@@ -1,3 +1,5 @@
+ALL IN THIS REPOSITORY IS WORK IN PROGRESS, MOSTLY AI GENERATED, PROBABLY NOTHING WORKS
+
 # Velyist Typst Editor
 
 This project implements a simple WYSIWYG (What You See Is What You Get) editor for Typst using the Velyst library. It demonstrates a Mosh-like latency hiding technique to provide a responsive user experience.
