@@ -11,6 +11,8 @@
     pkgs.git-lfs
     pkgs.rust-analyzer
     pkgs.pkg-config
+    pkgs.lld
+    pkgs.clang
     # Dependencies for Bevy (windowing, audio, graphics)
     pkgs.alsa-lib
     pkgs.vulkan-loader

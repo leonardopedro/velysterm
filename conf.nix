@@ -9,6 +9,8 @@ pkgs.mkShell {
     pkgs.rustc
     pkgs.rust-analyzer
     pkgs.pkg-config
+    pkgs.lld
+    pkgs.clang
   ];
 
   # System libraries required for the build
