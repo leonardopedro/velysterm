@@ -1,92 +1,39 @@
-# Velyst
+# Velyist Typst Editor
 
-Interactive [Typst](https://typst.app) content creator using [Vello](https://github.com/linebender/vello) and [Bevy](https://bevyengine.org).
+This project implements a simple WYSIWYG (What You See Is What You Get) editor for Typst using the Velyst library. It demonstrates a Mosh-like latency hiding technique to provide a responsive user experience.
 
-![hello world](./.github/assets/hello_world.gif)
+The core idea is to have two rendering layers:
+1.  A **"fast" prediction layer** that immediately displays raw text input as the user types.
+2.  A **"slow" Typst rendering layer** that provides accurate, fully formatted output.
 
-*Associated example [here](./examples/hello_world.rs)!*
+This approach solves the challenge of providing immediate feedback in an editor where the final rendering can have some latency.
 
-## Quickstart
+## The "Cursor Anchor" Strategy
 
-Velyst renders Typst content using Typst functions.
-This example shows you how to render a simple white box in the center of the screen.
-To get started rendering a simple box, create a function inside a `.typ` file:
+To build a WYSIWYG Typst Editor with Mosh-like latency hiding, we can't just append text. Users need to be able to edit text anywhere in the document. The "Cursor Anchor" strategy solves this:
 
-```typ
-#let main() = {
-  box(width: 100%, height: 100%)[
-    #place(center + horizon)[
-      #box(width: 10em, height: 10em, fill: white)
-    ]
-  ]
-}
-```
+1.  **The Anchor (Slow):** We inject an invisible marker (`<cursor>`) into the Typst source code at the user's caret position. When Typst compiles, it calculates the exact X/Y coordinates of that marker.
+2.  **The Prediction (Fast):** We render a transparent Bevy UI container at the last known X/Y coordinate of the cursor. As the user types, we immediately fill this container with raw characters.
+3.  **The Snap (Reconciliation):** When the slower, full Typst compilation finishes, the new, correctly formatted text appears, and we clear the prediction buffer.
 
-Then, in your `.rs` file, load your Typst asset file and register your function.
+## Implementation
 
-```rust no_run
-use bevy::prelude::*;
-use bevy_vello::prelude::*;
-use velyst::prelude::*;
+The implementation of this editor is split between a Typst file for rendering and a Rust file for the application logic.
 
-fn main() {
-    App::new()
-        .add_plugins((
-            DefaultPlugins,
-            bevy_vello::VelloPlugin::default(),
-            velyst::VelystPlugin,
-        ))
-        .register_typst_func::<MainFunc>()
-        .add_systems(Startup, setup)
-        .run();
-}
+### Typst-side Implementation
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.spawn((Camera2d, VelloView));
+The Typst logic for anchoring the cursor and rendering the text can be found in:
+- `assets/typst/editor.typ`
 
-    let handle =
-        VelystSourceHandle(asset_server.load("typst/box.typ"));
+### Bevy-side (Rust) Implementation
 
-    commands.spawn((
-        VelystFuncBundle {
-            handle,
-            func: MainFunc::default(),
-        },
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-    ));
-}
+The Bevy application, which includes state management, fast prediction rendering, and the slow synchronization with the Velyst Typst renderer, is implemented in:
+- `examples/editor.rs`
 
-typst_func!(
-    "main",
-    #[derive(Component, Default)]
-    struct MainFunc {},
-);
-```
+## Visual Polish
 
-*Associated example [here](./examples/center_box.rs)!*
+To make it feel like a modern editor, some potential improvements include:
 
-## Interactions
-
-Velyst is also compatible with `bevy_ui` interactions.
-
-![game ui](./.github/assets/game_ui.png)
-
-*Associated example [here](./examples/game_ui.rs)!*
-
-## Join the community!
-
-You can join us on the [Voxell discord server](https://discord.gg/Mhnyp6VYEQ).
-
-## License
-
-`velyst` is dual-licensed under either:
-
-- MIT License ([LICENSE-MIT](LICENSE-MIT) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
-
-This means you can select the license you prefer!
-This dual-licensing approach is the de-facto standard in the Rust ecosystem and there are [very good reasons](https://github.com/bevyengine/bevy/issues/2373) to include both.
+1.  **Text Matching:** Ensure the Bevy UI font for the prediction layer matches the Typst font.
+2.  **Ghosting:** Make the "Prediction Layer" text slightly grey or underlined until the "Real" Typst render arrives and replaces it.
+3.  **Drift Correction:** If the user types a lot, the "Fast" text might drift from where Typst would actually place it (e.g., due to kerning or line wrapping). A "Hard Sync" could be forced to clear the pending input whenever a new frame arrives from Velyst.
