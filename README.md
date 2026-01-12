@@ -1,5 +1,3 @@
-ALL IN THIS REPOSITORY IS WORK IN PROGRESS, MOSTLY AI GENERATED, PROBABLY NOTHING WORKS
-
 # Velyist Typst Editor
 
 This project implements a simple WYSIWYG (What You See Is What You Get) editor for Typst using the Velyst library. It demonstrates a Mosh-like latency hiding technique to provide a responsive user experience.
@@ -31,6 +29,27 @@ The Typst logic for anchoring the cursor and rendering the text can be found in:
 
 The Bevy application, which includes state management, fast prediction rendering, and the slow synchronization with the Velyst Typst renderer, is implemented in:
 - `examples/editor.rs`
+
+## Compiling and Running the Editor
+
+To ensure a consistent and reproducible development environment, this project uses Nix.
+
+### Using Nix (Recommended)
+
+1.  **Install Nix:** If you don't have Nix, follow the instructions at [https://nixos.org/download.html](https://nixos.org/download.html).
+2.  **Enter the Development Shell:** Open your terminal at the project's root and run:
+    ```sh
+    nix-shell
+    ```
+    This command will automatically download and configure all the necessary dependencies defined in `dev.nix`.
+3.  **Compile and Run:** Once inside the Nix shell, you can compile and run the editor:
+    ```sh
+    cargo run --release --example editor
+    ```
+
+### Manual Setup (Without Nix)
+
+If you prefer not to use Nix, you will need to manually install the required system libraries for your operating system. The dependencies for Linux and macOS are listed in the `dev.nix` file. After installing them, you can run the editor using the same `cargo` command as above.
 
 ## Visual Polish
 
