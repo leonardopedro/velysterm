@@ -1,0 +1,11 @@
+[package]
+name = "delta_sirk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "0.19"
+bytemuck = { version = "1.16", features = ["derive"] }
+tokio = { version = "1.36", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
