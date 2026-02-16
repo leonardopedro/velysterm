@@ -60,6 +60,3 @@ To adapt this for a specific physical problem (e.g., Quantum Chemistry, Fluid Dy
 1.  **Modify `SymbolicParams`**: Add fields relevant to your ansatz (e.g., polynomial coefficients, contraction weights).
 2.  **Update `shader.wgsl`**: Implement the `analytic_overlap` and `analytic_matrix_element` functions with the specific integrals for your basis functions.
 3.  **Implement `apply_symbolic_resolvent`**: In `src/lib.rs`, define how the operator $(H + i\gamma)^{-1}$ transforms your parameters.
-
-## License
-MIT / Apache-2.0
