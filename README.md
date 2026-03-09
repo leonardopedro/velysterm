@@ -46,6 +46,7 @@ To ensure a consistent and reproducible development environment, this project us
     This command will automatically download and configure all the necessary dependencies defined in `dev.nix`.
 3.  **Compile and Run:** Once inside the Nix shell, you can compile and run the editor:
     ```sh
+    cargo run --example terminal --features embed-fonts
     cargo run --release --example editor
     ```
 
