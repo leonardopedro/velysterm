@@ -156,6 +156,7 @@ fn layout_content(
         (
             &VelystContent,
             &mut UiVelystScene,
+            &mut VelystFrame,
             &Visibility,
             &Node,
             &ComputedNode,
@@ -172,6 +173,7 @@ fn layout_content(
     for (
         content,
         mut scene,
+        mut velyst_frame,
         viz,
         node,
         computed_node,
@@ -204,6 +206,7 @@ fn layout_content(
             Region::new(size, Axes::splat(false)),
         ) {
             scene.0 = TypstScene::from_frame(&frame);
+            velyst_frame.0 = Some(frame.clone());
 
             let Axes { x, y } = frame.size();
             let size = Vec2::new(x.to_pt() as f32, y.to_pt() as f32)
@@ -263,8 +266,11 @@ pub struct VelystSourceReady;
 pub struct VelystContent(pub Content);
 
 #[derive(Component, Default, Deref, DerefMut)]
-#[require(UiVelloScene, ContentSize)]
+#[require(UiVelloScene, ContentSize, VelystFrame)]
 pub struct UiVelystScene(pub TypstScene);
+
+#[derive(Component, Default)]
+pub struct VelystFrame(pub Option<typst::layout::Frame>);
 
 pub trait TypstFunc {
     const NAME: &str;
