@@ -1,9 +1,7 @@
 #set page(fill: none, margin: 0pt)
 
-#let terminal_render_v2(content, ..args) = {
-  // Resilient against unexpected arguments
-
-  // Premium Layout
+#let final_terminal_fix(content, ..args) = {
+  // Final resilient rendering Core
   set text(white, size: 20pt, font: "DejaVu Sans Mono")
   set par(leading: 0pt, justify: false)
 
@@ -13,7 +11,7 @@
     it.text
   }
 
-  // Math block aesthetics
+  // Math block aesthetics - Gold/Yellow Glow
   show math.equation: it => {
     set text(rgb("#FFD700"), weight: "bold", size: 1.1em)
     it
