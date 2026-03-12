@@ -11,3 +11,4 @@ nalgebra = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = { workspace = true }
+quantrs2-symengine-pure = "0.1.2"

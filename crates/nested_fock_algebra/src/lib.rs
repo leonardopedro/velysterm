@@ -91,6 +91,7 @@ impl QuantumState {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum Operator {
     InnerBosonCreate(u32),       // a_dag_i
     InnerBosonAnnihilate(u32),   // a_i
@@ -308,6 +309,7 @@ mod tests {
     }
 }
 
+#[derive(Debug)]
 pub struct Hamiltonian {
     pub terms: Vec<(Complex64, Vec<Operator>)>,
 }
@@ -327,4 +329,8 @@ impl Hamiltonian {
 }
 
 pub mod cas;
-pub use cas::compile_to_fock;
+pub use cas::{compile_expression, compile_to_fock};
+
+/// Re-export the symbolic engine for high-level operator building.
+pub use quantrs2_symengine_pure as symengine;
+pub use quantrs2_symengine_pure::Expression;

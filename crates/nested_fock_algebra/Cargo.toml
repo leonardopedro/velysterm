@@ -10,5 +10,9 @@ rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
-pest = { workspace = true }
-pest_derive = { workspace = true }
+egg = "0.11.0"
+quantrs2-symengine-pure = "0.1.2"
+
+[[bin]]
+name = "nested_fock_example"
+path = "src/bin.rs"
