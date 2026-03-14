@@ -47,6 +47,8 @@ nalgebra = "0.34.1"
 pest = "2.8.6"
 pest_derive = "2.8.6"
 serde = { version = "1", features = ["derive"] }
+loro = "1.10.3"
+
 
 # Terminal
 alacritty_terminal = "0.25.1"
@@ -83,6 +85,8 @@ ecow = { workspace = true }
 smallvec = { workspace = true }
 alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
+loro = { workspace = true }
+
 
 [features]
 default = ["embed-fonts"]

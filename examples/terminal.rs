@@ -13,6 +13,8 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use velyst::prelude::*;
+use loro::{LoroDoc, LoroText, cursor::Side};
+use std::collections::HashMap;
 
 fn main() {
     App::new()
@@ -34,7 +36,7 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (update_terminal_render, update_cursor, handle_input),
+            (update_terminal_render, update_cursor, handle_input, log_marks),
         )
         .run();
 }
@@ -43,6 +45,9 @@ fn main() {
 struct TerminalEmulator {
     term: Arc<Mutex<Term<DummyListener>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    doc: Arc<Mutex<LoroDoc>>,
+    text: LoroText,
+    marks: Arc<Mutex<HashMap<String, loro::cursor::Cursor>>>,
 }
 
 struct DummyListener;
@@ -102,23 +107,61 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     let term = Arc::new(Mutex::new(term));
     let writer = Arc::new(Mutex::new(writer));
 
+    let doc = Arc::new(Mutex::new(LoroDoc::new()));
+    let text = doc.lock().unwrap().get_text("terminal");
+    let marks = Arc::new(Mutex::new(HashMap::new()));
+
     let term_clone = Arc::clone(&term);
+    let text_clone = text.clone();
+    let marks_clone = Arc::clone(&marks);
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buffer = [0u8; 1024];
         let mut processor = Processor::<StdSyncHandler>::new();
+        let mut stream_buffer = String::new();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let mut term_lock = term_clone.lock().unwrap();
-                    processor.advance(&mut *term_lock, &buffer[..n]);
+                    {
+                        let mut term_lock = term_clone.lock().unwrap();
+                        processor.advance(&mut *term_lock, &buffer[..n]);
+                    }
+
+                    let s = String::from_utf8_lossy(&buffer[..n]);
+                    text_clone.insert(text_clone.len_unicode(), &s).unwrap();
+                    
+                    stream_buffer.push_str(&s);
+                    while let Some(hash_idx) = stream_buffer.find('#') {
+                        if let Some(end_idx) = stream_buffer[hash_idx..].find(|c: char| c == ' ' || c == '\n') {
+                            let actual_end = hash_idx + end_idx;
+                            let name = &stream_buffer[hash_idx + 1 .. actual_end];
+                            if !name.is_empty() && !name.contains(' ') {
+                                let char_idx_in_buffer = stream_buffer[..hash_idx].chars().count();
+                                let chars_from_mark_to_end = stream_buffer.chars().count() - char_idx_in_buffer;
+                                let pos = text_clone.len_unicode() - chars_from_mark_to_end;
+                                if let Some(cursor) = text_clone.get_cursor(pos, Side::Left) {
+                                    marks_clone.lock().unwrap().insert(name.to_string(), cursor);
+                                }
+                            }
+                            // Drain up to and including the terminator
+                            let terminator_len = stream_buffer[actual_end..].chars().next().unwrap().len_utf8();
+                            stream_buffer.drain(..actual_end + terminator_len);
+                        } else {
+                             // Drain before the potential mark
+                             stream_buffer.drain(..hash_idx);
+                             break;
+                        }
+                    }
+                    if stream_buffer.len() > 2048 {
+                        stream_buffer.drain(..stream_buffer.len() - 2048);
+                    }
                 }
                 Err(_) => break,
             }
         }
     });
-    commands.insert_resource(TerminalEmulator { term, writer });
+    commands.insert_resource(TerminalEmulator { term, writer, doc, text, marks });
 
     let handle =
         VelystSourceHandle(asset_server.load("typst/term_v3.typ"));
@@ -202,12 +245,16 @@ fn color_to_typst(color: VteColor) -> Option<String> {
 
 fn update_terminal_render(
     emulator: Res<TerminalEmulator>,
+    keys: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut TerminalFuncV3, With<TerminalView>>,
 ) {
     let term_lock =
         emulator.term.lock().expect("failed to lock terminal");
     let grid = term_lock.grid();
     let cursor_p = grid.cursor.point;
+
+    let show_hidden = (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
+        && (keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight));
 
     let mut final_markup = String::new();
 
@@ -218,8 +265,10 @@ fn update_terminal_render(
         let mut group_text = String::new();
         let mut comment_seen = false;
 
-        for col_idx in (0..grid.columns()).map(Column) {
-            let cell = &row[col_idx];
+        let mut col_idx = 0;
+        while col_idx < grid.columns() {
+            let col = Column(col_idx);
+            let cell = &row[col];
             let c = if cell.c.is_control()
                 && cell.c != '\n'
                 && cell.c != '\r'
@@ -229,7 +278,32 @@ fn update_terminal_render(
                 cell.c
             };
 
-            if line_idx == cursor_p.line && col_idx == cursor_p.column
+            // Detect marker and its visibility
+            let mut hidden_len = 0;
+            if c == '#' {
+                let mut name = String::new();
+                let mut j = col_idx + 1;
+                while j < grid.columns() {
+                    let next_c = row[Column(j)].c;
+                    if next_c == ' ' || next_c == '\n' {
+                        break;
+                    }
+                    name.push(next_c);
+                    j += 1;
+                }
+                if !name.is_empty() && j < grid.columns() {
+                    let starts_upper = name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false);
+                    if !starts_upper && !show_hidden {
+                        hidden_len = j - col_idx;
+                    }
+                }
+            }
+
+            if line_idx == cursor_p.line && col_idx == cursor_p.column.0
             {
                 if let Some(current) = current_styles {
                     final_markup.push_str(&render_group(
@@ -243,6 +317,28 @@ fn update_terminal_render(
                 final_markup.push_str(
                     "#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]",
                 );
+            }
+
+            if hidden_len > 0 {
+                // Check if cursor is inside hidden range
+                if line_idx == cursor_p.line
+                    && cursor_p.column.0 > col_idx
+                    && cursor_p.column.0 < col_idx + hidden_len
+                {
+                    if let Some(current) = current_styles {
+                        final_markup.push_str(&render_group(
+                            &group_text,
+                            current,
+                            comment_seen,
+                        ));
+                        group_text.clear();
+                    }
+                    final_markup.push_str(
+                        "#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]",
+                    );
+                }
+                col_idx += hidden_len;
+                continue;
             }
 
             let mut fg = cell.fg;
@@ -275,6 +371,7 @@ fn update_terminal_render(
                 current_styles = Some(style);
                 group_text = c.to_string();
             }
+            col_idx += 1;
         }
         if let Some(current) = current_styles {
             final_markup.push_str(&render_group(
@@ -463,3 +560,14 @@ typst_func!(
     struct TerminalFuncV3 {},
     positional_args { content: String },
 );
+
+fn log_marks(emulator: Res<TerminalEmulator>) {
+    if let Ok(marks) = emulator.marks.try_lock() {
+        static LAST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = marks.len();
+        if count > LAST_COUNT.load(std::sync::atomic::Ordering::Relaxed) {
+            println!("Current Marks in LoroText: {:?}", marks.keys().collect::<Vec<_>>());
+            LAST_COUNT.store(count, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
