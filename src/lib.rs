@@ -23,7 +23,6 @@ pub mod prelude {
 }
 
 pub mod asset;
-pub mod collaborative;
 pub mod renderer;
 pub mod world;
 

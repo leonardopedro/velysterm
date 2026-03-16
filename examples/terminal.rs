@@ -9,9 +9,7 @@ use alacritty_terminal::vte::ansi::{
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy_vello::prelude::*;
-use loro::{LoroDoc, LoroText, cursor::Side};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use velyst::prelude::*;
@@ -40,7 +38,6 @@ fn main() {
                 update_terminal_render,
                 update_cursor,
                 handle_input,
-                log_marks,
             ),
         )
         .run();
@@ -50,13 +47,9 @@ fn main() {
 struct TerminalEmulator {
     term: Arc<Mutex<Term<DummyListener>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    doc: Arc<Mutex<LoroDoc>>,
-    text: LoroText,
-    marks: Arc<Mutex<HashMap<String, Vec<loro::cursor::Cursor>>>>,
-    marker_counter: Arc<Mutex<usize>>,
-    last_autocomplete_len: Arc<Mutex<usize>>,
-    // Metadata for the singleton #(..), stored locally in Loro
-    marker_map: loro::LoroMap,
+    _marker_counter: Arc<Mutex<usize>>,
+    _chain: Arc<Mutex<String>>,
+    _chain_content: Arc<Mutex<String>>,
 }
 
 struct DummyListener;
@@ -116,33 +109,24 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     let term = Arc::new(Mutex::new(term));
     let writer = Arc::new(Mutex::new(writer));
 
-    let doc = Arc::new(Mutex::new(LoroDoc::new()));
-    let text = doc.lock().unwrap().get_text("terminal");
-    let marks: Arc<
-        Mutex<HashMap<String, Vec<loro::cursor::Cursor>>>,
-    > = Arc::new(Mutex::new(HashMap::new()));
     let marker_counter = Arc::new(Mutex::new(0));
-    let last_autocomplete_len = Arc::new(Mutex::new(0usize));
-    let marker_map =
-        doc.lock().unwrap().get_map("local_property_marker");
+    let chain = Arc::new(Mutex::new(String::new()));
+    let chain_content = Arc::new(Mutex::new(String::new()));
 
     let term_clone = Arc::clone(&term);
-    let text_clone = text.clone();
-    let doc_clone = Arc::clone(&doc);
-    let marks_clone = Arc::clone(&marks);
     let writer_clone = Arc::clone(&writer);
     let counter_clone = Arc::clone(&marker_counter);
-    let auto_len_clone = Arc::clone(&last_autocomplete_len);
-    let marker_map_clone = marker_map.clone();
+    let chain_clone = Arc::clone(&chain);
+    let chain_content_clone = Arc::clone(&chain_content);
+
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buffer = [0u8; 1024];
         let mut processor = Processor::<StdSyncHandler>::new();
+
         let mut local_marker_active = false;
         let mut unsolidified_visual_len: usize = 0;
         let mut unsolidified_marker_content = String::new();
-        let mut local_anchor_cursor: Option<loro::cursor::Cursor> =
-            None;
         let mut last_two = String::new();
         let mut skip_echo_count = 0;
 
@@ -151,10 +135,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 Ok(0) => break,
                 Ok(n) => {
                     {
-                        let mut term_lock =
-                            term_clone.lock().unwrap();
-                        processor
-                            .advance(&mut *term_lock, &buffer[..n]);
+                        let mut term_lock = term_clone.lock().unwrap();
+                        processor.advance(&mut *term_lock, &buffer[..n]);
                     }
 
                     let s = String::from_utf8_lossy(&buffer[..n]);
@@ -174,8 +156,6 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                             continue;
                         }
 
-                        // Allow skip_count to consume any non-ANSI character. This correctly eats
-                        // the raw \x08 from bash's "\x08\x1b[K" backspace echo.
                         if skip_echo_count > 0 {
                             skip_echo_count -= 1;
                             last_two.clear();
@@ -195,500 +175,114 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                             if local_marker_active {
                                 // Solidify current first
                                 let id = {
-                                    let mut cnt =
-                                        counter_clone.lock().unwrap();
+                                    let mut cnt = counter_clone.lock().unwrap();
                                     *cnt += 1;
                                     *cnt
                                 };
                                 let marker_text = format!("#{}", id);
-                                let mut w_l =
-                                    writer_clone.lock().unwrap();
-                                let erase_len =
-                                    unsolidified_visual_len + 1; // +1 for the echoed '(' trigger
-                                let _ = w_l.write_all(
-                                    "\x08"
-                                        .repeat(erase_len)
-                                        .as_bytes(),
-                                );
-                                let _ = w_l.write_all(
-                                    marker_text.as_bytes(),
-                                );
+                                let mut w_l = writer_clone.lock().unwrap();
+                                let erase_len = unsolidified_visual_len + 1; // +1 for the echoed '('
+                                // Most PTYs echo 3 bytes per backspace (\x08 \x08)
+                                let _ = w_l.write_all("\x08".repeat(erase_len).as_bytes());
+                                let _ = w_l.write_all(marker_text.as_bytes());
                                 let _ = w_l.flush();
 
-                                skip_echo_count += erase_len
-                                    + marker_text.chars().count();
-
-                                let del_pos = text_clone
-                                    .len_unicode()
-                                    .saturating_sub(
-                                        unsolidified_visual_len + 1,
-                                    );
-                                text_clone
-                                    .delete(
-                                        del_pos,
-                                        unsolidified_visual_len + 1,
-                                    )
-                                    .unwrap();
-                                text_clone
-                                    .insert(del_pos, &marker_text)
-                                    .unwrap();
-
-                                local_marker_active = false;
-                                unsolidified_marker_content.clear();
-                                unsolidified_visual_len = 0;
+                                skip_echo_count += erase_len * 3 + marker_text.chars().count();
                                 trigger_already_erased = true;
-                            } else {
-                                // Delete the single '#' added at the loop bottom
-                                text_clone
-                                    .delete(
-                                        text_clone
-                                            .len_unicode()
-                                            .saturating_sub(1),
-                                        1,
-                                    )
-                                    .unwrap();
                             }
 
-                            // Autocomplete / Chain Logic
-                            let chain = marker_map_clone
-                                .get("chain")
-                                .and_then(|v| {
-                                    v.as_value().and_then(|v| {
-                                        v.as_string()
-                                            .map(|s| s.to_string())
-                                    })
-                                })
-                                .unwrap_or_default();
-                            let chain_content = marker_map_clone
-                                .get("chain_content")
-                                .and_then(|v| {
-                                    v.as_value().and_then(|v| {
-                                        v.as_string()
-                                            .map(|s| s.to_string())
-                                    })
-                                })
-                                .unwrap_or_default();
+                            let chain_val = chain_clone.lock().unwrap().clone();
+                            let chain_content_val = chain_content_clone.lock().unwrap().clone();
 
-                            if !chain.is_empty() {
-                                let mut w_l =
-                                    writer_clone.lock().unwrap();
+                            if !chain_val.is_empty() {
+                                let mut w_l = writer_clone.lock().unwrap();
                                 if !trigger_already_erased {
-                                    let _ = w_l.write_all(
-                                        "\x08\x08".as_bytes(),
-                                    );
-                                    // PTY echoes \x08 \x08 for each \x08 sent, 2 spaces = 2 printable chars
-                                    skip_echo_count += 2;
+                                    let _ = w_l.write_all("\x08\x08".as_bytes());
+                                    // Skip the echo of 2 backspaces (6 bytes typically)
+                                    skip_echo_count += 6;
                                 }
-                                let autocomplete_text =
-                                    format!("{}#(", chain);
-                                let _ = w_l.write_all(
-                                    autocomplete_text.as_bytes(),
-                                );
+                                let autocomplete_text = format!("{}#(", chain_val);
+                                let _ = w_l.write_all(autocomplete_text.as_bytes());
                                 let _ = w_l.flush();
-                                skip_echo_count +=
-                                    autocomplete_text.chars().count();
+                                skip_echo_count += autocomplete_text.chars().count();
 
-                                text_clone
-                                    .insert(
-                                        text_clone.len_unicode(),
-                                        &autocomplete_text,
-                                    )
-                                    .unwrap();
-
-                                unsolidified_visual_len =
-                                    chain.chars().count() + 2;
-                                unsolidified_marker_content =
-                                    format!("{})#(", chain_content);
+                                unsolidified_visual_len = chain_val.chars().count() + 2;
+                                unsolidified_marker_content = format!("{})#(", chain_content_val);
                             } else {
-                                // First marker OR chained without saved chain
-                                let mut w_l =
-                                    writer_clone.lock().unwrap();
-                                if skip_echo_count > 0
-                                    || trigger_already_erased
-                                {
-                                    let _ = w_l
-                                        .write_all("#(".as_bytes());
+                                let mut w_l = writer_clone.lock().unwrap();
+                                if skip_echo_count > 0 || trigger_already_erased {
+                                    let _ = w_l.write_all("#(".as_bytes());
                                     let _ = w_l.flush();
                                     skip_echo_count += 2;
                                 }
-                                text_clone
-                                    .insert(
-                                        text_clone.len_unicode(),
-                                        "#(",
-                                    )
-                                    .unwrap();
                                 unsolidified_visual_len = 2;
                                 unsolidified_marker_content.clear();
                             }
 
                             local_marker_active = true;
-                            local_anchor_cursor = text_clone
-                                .get_cursor(
-                                    text_clone.len_unicode(),
-                                    Side::Left,
-                                );
-                            marker_map_clone
-                                .insert("active", true)
-                                .unwrap();
                             last_two.clear();
                             continue;
                         }
 
                         if c == '\u{0008}' || c == '\u{007f}' {
                             if local_marker_active {
-                                if !unsolidified_marker_content
-                                    .is_empty()
-                                {
+                                if !unsolidified_marker_content.is_empty() {
                                     unsolidified_marker_content.pop();
-                                    let clean =
-                                        unsolidified_marker_content
-                                            .trim_end_matches(')')
-                                            .to_string();
-                                    let chain_val =
-                                        if clean.is_empty() {
-                                            "".to_string()
-                                        } else {
-                                            format!("#({})", clean)
-                                        };
-                                    marker_map_clone
-                                        .insert(
-                                            "chain",
-                                            chain_val.as_str(),
-                                        )
-                                        .unwrap();
-                                    marker_map_clone
-                                        .insert(
-                                            "chain_content",
-                                            clean.as_str(),
-                                        )
-                                        .unwrap();
-                                } else if unsolidified_visual_len > 0
-                                {
-                                    // De-incrementing visual len for the #( part, but keep active
+                                    let clean = unsolidified_marker_content.trim_end_matches(')').to_string();
+                                    let chain_val = if clean.is_empty() { "".to_string() } else { format!("#({})", clean) };
+                                    *chain_clone.lock().unwrap() = chain_val;
+                                    *chain_content_clone.lock().unwrap() = clean;
+                                } else if unsolidified_visual_len > 0 {
+                                    // keep active
                                 } else {
                                     local_marker_active = false;
-                                    marker_map_clone
-                                        .insert("chain", "")
-                                        .unwrap();
-                                    marker_map_clone
-                                        .insert("chain_content", "")
-                                        .unwrap();
+                                    *chain_clone.lock().unwrap() = String::new();
+                                    *chain_content_clone.lock().unwrap() = String::new();
                                 }
                                 if unsolidified_visual_len > 0 {
                                     unsolidified_visual_len -= 1;
-                                    // Keep text_clone in sync!
-                                    if text_clone.len_unicode() > 0 {
-                                        text_clone
-                                            .delete(
-                                                text_clone
-                                                    .len_unicode()
-                                                    - 1,
-                                                1,
-                                            )
-                                            .unwrap();
-                                    }
                                 }
-                                marker_map_clone
-                                    .insert(
-                                        "content",
-                                        unsolidified_marker_content
-                                            .as_str(),
-                                    )
-                                    .unwrap();
                             } else {
                                 if unsolidified_visual_len > 0 {
                                     unsolidified_visual_len -= 1;
-                                }
-                                if text_clone.len_unicode() > 0 {
-                                    text_clone
-                                        .delete(
-                                            text_clone.len_unicode()
-                                                - 1,
-                                            1,
-                                        )
-                                        .unwrap();
                                 }
                             }
                             if !last_two.is_empty() {
                                 last_two.pop();
                             }
-                        } else if !c.is_control()
-                            || c == '\n'
-                            || c == '\r'
-                            || c == ' '
-                        {
+                        } else {
+                            // Detect space or newline to finalize marker
+                            let is_finalize_char = c == ' ' || c == '\n' || c == '\r';
                             if local_marker_active {
-                                if c == ' ' || c == '\n' || c == '\r'
-                                {
+                                if is_finalize_char {
                                     local_marker_active = false;
-
                                     let id = {
-                                        let mut cnt = counter_clone
-                                            .lock()
-                                            .unwrap();
+                                        let mut cnt = counter_clone.lock().unwrap();
                                         *cnt += 1;
                                         *cnt
                                     };
-                                    let marker_text =
-                                        format!("#{}", id);
-
-                                    let mut w_l =
-                                        writer_clone.lock().unwrap();
-                                    // Erase unsolidified marker AND the echoed trigger character c
-                                    let erase_len =
-                                        unsolidified_visual_len + 1;
-                                    let _ = w_l.write_all(
-                                        "\x08"
-                                            .repeat(erase_len)
-                                            .as_bytes(),
-                                    );
-                                    let _ = w_l.write_all(
-                                        marker_text.as_bytes(),
-                                    );
-                                    let _ = w_l.write_all(
-                                        c.to_string().as_bytes(),
-                                    );
+                                    let marker_text = format!("#{}", id);
+                                    let mut w_l = writer_clone.lock().unwrap();
+                                    let erase_len = unsolidified_visual_len + 1; // +1 for the finalizing char
+                                    let _ = w_l.write_all("\x08".repeat(erase_len).as_bytes());
+                                    let _ = w_l.write_all(marker_text.as_bytes());
+                                    let _ = w_l.write_all(c.to_string().as_bytes());
                                     let _ = w_l.flush();
 
-                                    skip_echo_count += erase_len
-                                        + marker_text.chars().count()
-                                        + 1;
+                                    skip_echo_count += erase_len * 3 + marker_text.chars().count() + 1;
 
-                                    let clean =
-                                        unsolidified_marker_content
-                                            .trim_end_matches(')')
-                                            .to_string();
-                                    let chain_val =
-                                        format!("#({})", clean);
-                                    marker_map_clone
-                                        .insert(
-                                            "chain",
-                                            chain_val.as_str(),
-                                        )
-                                        .unwrap();
-                                    marker_map_clone
-                                        .insert(
-                                            "chain_content",
-                                            clean.as_str(),
-                                        )
-                                        .unwrap();
-                                    marker_map_clone
-                                        .insert("active", false)
-                                        .unwrap();
+                                    let clean = unsolidified_marker_content.trim_end_matches(')').to_string();
+                                    *chain_clone.lock().unwrap() = format!("#({})", clean);
+                                    *chain_content_clone.lock().unwrap() = clean;
 
-                                    {
-                                        let mut doc_lock =
-                                            doc_clone.lock().unwrap();
-                                        let mut marks_lock =
-                                            marks_clone
-                                                .lock()
-                                                .unwrap();
-
-                                        // Delete unsolidified visual representation from text_clone
-                                        let del_pos = text_clone.len_unicode().saturating_sub(unsolidified_visual_len);
-                                        text_clone.delete(del_pos, unsolidified_visual_len).unwrap();
-
-                                        let pos = del_pos;
-                                        text_clone
-                                            .insert(pos, &marker_text)
-                                            .unwrap();
-                                        text_clone
-                                            .insert(
-                                                pos + marker_text
-                                                    .chars()
-                                                    .count(),
-                                                &c.to_string(),
-                                            )
-                                            .unwrap();
-
-                                        if let Some(cur) = text_clone
-                                            .get_cursor(
-                                                pos + marker_text
-                                                    .chars()
-                                                    .count()
-                                                    - 1,
-                                                Side::Left,
-                                            )
-                                        {
-                                            marks_lock
-                                                .entry(id.to_string())
-                                                .or_default()
-                                                .push(cur);
-                                        }
-
-                                        let clean_parse: String = clean.chars()
-                                            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == ',' || *ch == ':' || *ch == '.' || *ch == '-' || *ch == '_')
-                                            .collect();
-
-                                        for block in
-                                            clean_parse.split(")#(")
-                                        {
-                                            let mut props =
-                                                Vec::new();
-                                            let mut ranges =
-                                                Vec::new();
-                                            let mut parts =
-                                                block.splitn(2, ',');
-                                            let props_p = parts
-                                                .next()
-                                                .unwrap_or("");
-                                            let pairs_p = parts
-                                                .next()
-                                                .unwrap_or("");
-                                            for p in props_p
-                                                .split_whitespace()
-                                            {
-                                                props.push(
-                                                    p.to_string(),
-                                                );
-                                            }
-                                            for pair in pairs_p
-                                                .split_whitespace()
-                                            {
-                                                if pair.contains(':')
-                                                {
-                                                    let mut s_pair =
-                                                        pair.splitn(
-                                                            2, ':',
-                                                        );
-                                                    ranges.push((s_pair.next().unwrap_or("").to_string(), s_pair.next().unwrap_or("").to_string()));
-                                                } else if !pair
-                                                    .is_empty()
-                                                {
-                                                    ranges.push((pair.to_string(), "".to_string()));
-                                                }
-                                            }
-
-                                            let get_pos = |name: &str| -> Vec<usize> {
-                                                marks_lock.get(name).map(|list| list.iter().filter_map(|cur| doc_lock.get_cursor_pos(cur).ok().map(|p| p.current.pos)).collect()).unwrap_or_default()
-                                            };
-                                            let find_cl = |target: usize, positions: &[usize], exclude: Option<usize>| -> Option<usize> {
-                                                positions.iter().filter(|&&p| exclude.map_or(true, |ep| p != ep)).min_by_key(|&&p| (p as isize - target as isize).abs()).copied()
-                                            };
-
-                                            for (m1, m2) in ranges {
-                                                let mut final_r =
-                                                    Vec::new();
-                                                if m1.is_empty()
-                                                    && !m2.is_empty()
-                                                {
-                                                    if let Some(p2) =
-                                                        find_cl(
-                                                            pos,
-                                                            &get_pos(
-                                                                &m2,
-                                                            ),
-                                                            None,
-                                                        )
-                                                    {
-                                                        final_r.push(
-                                                            (pos, p2),
-                                                        );
-                                                    }
-                                                } else if !m1
-                                                    .is_empty()
-                                                    && m2.is_empty()
-                                                {
-                                                    if let Some(p1) =
-                                                        find_cl(
-                                                            pos,
-                                                            &get_pos(
-                                                                &m1,
-                                                            ),
-                                                            None,
-                                                        )
-                                                    {
-                                                        final_r.push(
-                                                            (p1, pos),
-                                                        );
-                                                    }
-                                                } else if !m1
-                                                    .is_empty()
-                                                    && m1 == m2
-                                                {
-                                                    let ps =
-                                                        get_pos(&m1);
-                                                    for &p1 in &ps {
-                                                        if let Some(
-                                                            p2,
-                                                        ) = find_cl(
-                                                            p1,
-                                                            &ps,
-                                                            Some(p1),
-                                                        ) {
-                                                            final_r.push((p1, p2));
-                                                        }
-                                                    }
-                                                } else if !m1
-                                                    .is_empty()
-                                                    && !m2.is_empty()
-                                                {
-                                                    let p1s =
-                                                        get_pos(&m1);
-                                                    let p2s =
-                                                        get_pos(&m2);
-                                                    for &p1 in &p1s {
-                                                        if let Some(
-                                                            p2,
-                                                        ) = find_cl(
-                                                            p1, &p2s,
-                                                            None,
-                                                        ) {
-                                                            final_r.push((p1, p2));
-                                                        }
-                                                    }
-                                                }
-                                                for (start, end) in
-                                                    final_r
-                                                {
-                                                    let (
-                                                        s_idx,
-                                                        e_idx,
-                                                    ) = if start
-                                                        <= end
-                                                    {
-                                                        (start, end)
-                                                    } else {
-                                                        (end, start)
-                                                    };
-                                                    for prop in &props
-                                                    {
-                                                        if let Some(
-                                                            split,
-                                                        ) = prop
-                                                            .find(':')
-                                                        {
-                                                            let _ = text_clone.mark(s_idx..e_idx, prop[..split].trim(), prop[split+1..].trim());
-                                                        } else {
-                                                            let _ = text_clone.mark(s_idx..e_idx, prop.trim(), true);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    unsolidified_marker_content
-                                        .clear();
+                                    unsolidified_marker_content.clear();
                                     unsolidified_visual_len = 0;
-                                } else {
-                                    unsolidified_marker_content
-                                        .push(c);
+                                } else if !c.is_control() {
+                                    unsolidified_marker_content.push(c);
                                     unsolidified_visual_len += 1;
-                                    text_clone
-                                        .insert(
-                                            text_clone.len_unicode(),
-                                            &c.to_string(),
-                                        )
-                                        .unwrap();
-                                    marker_map_clone.insert("content", unsolidified_marker_content.as_str()).unwrap();
                                 }
-                            } else {
-                                text_clone
-                                    .insert(
-                                        text_clone.len_unicode(),
-                                        &c.to_string(),
-                                    )
-                                    .unwrap();
+                            } else if !c.is_control() {
+                                // Normal text, maybe tracking visual len for other purposes
                             }
                         }
                     }
@@ -743,12 +337,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(TerminalEmulator {
         term,
         writer,
-        doc,
-        text,
-        marks,
-        marker_counter,
-        last_autocomplete_len,
-        marker_map,
+        _marker_counter: marker_counter,
+        _chain: chain,
+        _chain_content: chain_content,
     });
 }
 
@@ -996,7 +587,6 @@ fn update_terminal_render(
     for mut func in &mut query {
         if func.content != final_markup {
             func.content = final_markup.clone();
-            // println!("DEBUG MARKUP: {}", final_markup);
         }
     }
 }
@@ -1031,8 +621,6 @@ fn render_group(
                         }
                         let math: String =
                             chars[i..j + 1].iter().collect();
-                        // For math mode, we ONLY escape '#' because it triggers Typst code.
-                        // We do NOT escape '\' because it is used for math symbols like \sigma.
                         markup.push_str(&math.replace('#', "\\#"));
                         i = j;
                         last_idx = j + 1;
@@ -1095,7 +683,6 @@ fn find_marker_position(
 ) -> Option<Vec2> {
     use typst::layout::FrameItem;
     use typst::visualize::Paint;
-    // Magenta = rgb(255, 0, 255) in Typst
     let marker_color =
         typst::visualize::Color::from_u8(255u8, 0u8, 255u8, 255u8);
     for (p, item) in frame.items() {
@@ -1170,21 +757,3 @@ typst_func!(
     struct TerminalFuncV3 {},
     positional_args { content: String },
 );
-
-fn log_marks(emulator: Res<TerminalEmulator>) {
-    if let Ok(marks) = emulator.marks.try_lock() {
-        static LAST_COUNT: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
-        let count = marks.len();
-        if count
-            > LAST_COUNT.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            println!(
-                "Current Marks in LoroText: {:?}",
-                marks.keys().collect::<Vec<_>>()
-            );
-            LAST_COUNT
-                .store(count, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
