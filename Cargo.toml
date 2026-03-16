@@ -85,7 +85,7 @@ ecow = { workspace = true }
 smallvec = { workspace = true }
 alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
-loro = { workspace = true }
+loro.workspace = true
 
 
 [features]

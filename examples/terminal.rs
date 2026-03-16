@@ -9,12 +9,12 @@ use alacritty_terminal::vte::ansi::{
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy_vello::prelude::*;
+use loro::{LoroDoc, LoroText, cursor::Side};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use velyst::prelude::*;
-use loro::{LoroDoc, LoroText, cursor::Side};
-use std::collections::HashMap;
 
 fn main() {
     App::new()
@@ -36,7 +36,12 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (update_terminal_render, update_cursor, handle_input, log_marks),
+            (
+                update_terminal_render,
+                update_cursor,
+                handle_input,
+                log_marks,
+            ),
         )
         .run();
 }
@@ -47,7 +52,11 @@ struct TerminalEmulator {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     doc: Arc<Mutex<LoroDoc>>,
     text: LoroText,
-    marks: Arc<Mutex<HashMap<String, loro::cursor::Cursor>>>,
+    marks: Arc<Mutex<HashMap<String, Vec<loro::cursor::Cursor>>>>,
+    marker_counter: Arc<Mutex<usize>>,
+    last_autocomplete_len: Arc<Mutex<usize>>,
+    // Metadata for the singleton #(..), stored locally in Loro
+    marker_map: loro::LoroMap,
 }
 
 struct DummyListener;
@@ -109,59 +118,585 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
     let doc = Arc::new(Mutex::new(LoroDoc::new()));
     let text = doc.lock().unwrap().get_text("terminal");
-    let marks = Arc::new(Mutex::new(HashMap::new()));
+    let marks: Arc<
+        Mutex<HashMap<String, Vec<loro::cursor::Cursor>>>,
+    > = Arc::new(Mutex::new(HashMap::new()));
+    let marker_counter = Arc::new(Mutex::new(0));
+    let last_autocomplete_len = Arc::new(Mutex::new(0usize));
+    let marker_map =
+        doc.lock().unwrap().get_map("local_property_marker");
 
     let term_clone = Arc::clone(&term);
     let text_clone = text.clone();
+    let doc_clone = Arc::clone(&doc);
     let marks_clone = Arc::clone(&marks);
+    let writer_clone = Arc::clone(&writer);
+    let counter_clone = Arc::clone(&marker_counter);
+    let auto_len_clone = Arc::clone(&last_autocomplete_len);
+    let marker_map_clone = marker_map.clone();
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buffer = [0u8; 1024];
         let mut processor = Processor::<StdSyncHandler>::new();
-        let mut stream_buffer = String::new();
+        let mut local_marker_active = false;
+        let mut unsolidified_visual_len: usize = 0;
+        let mut unsolidified_marker_content = String::new();
+        let mut local_anchor_cursor: Option<loro::cursor::Cursor> =
+            None;
+        let mut last_two = String::new();
+        let mut skip_echo_count = 0;
+
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
                     {
-                        let mut term_lock = term_clone.lock().unwrap();
-                        processor.advance(&mut *term_lock, &buffer[..n]);
+                        let mut term_lock =
+                            term_clone.lock().unwrap();
+                        processor
+                            .advance(&mut *term_lock, &buffer[..n]);
                     }
 
                     let s = String::from_utf8_lossy(&buffer[..n]);
-                    text_clone.insert(text_clone.len_unicode(), &s).unwrap();
-                    
-                    stream_buffer.push_str(&s);
-                    while let Some(hash_idx) = stream_buffer.find('#') {
-                        if let Some(end_idx) = stream_buffer[hash_idx..].find(|c: char| c == ' ' || c == '\n') {
-                            let actual_end = hash_idx + end_idx;
-                            let name = &stream_buffer[hash_idx + 1 .. actual_end];
-                            if !name.is_empty() && !name.contains(' ') {
-                                let char_idx_in_buffer = stream_buffer[..hash_idx].chars().count();
-                                let chars_from_mark_to_end = stream_buffer.chars().count() - char_idx_in_buffer;
-                                let pos = text_clone.len_unicode() - chars_from_mark_to_end;
-                                if let Some(cursor) = text_clone.get_cursor(pos, Side::Left) {
-                                    marks_clone.lock().unwrap().insert(name.to_string(), cursor);
+                    let mut in_ansi = false;
+                    for c in s.chars() {
+                        if in_ansi {
+                            if (c >= 'a' && c <= 'z')
+                                || (c >= 'A' && c <= 'Z')
+                                || c == 'm'
+                                || c == '~'
+                            {
+                                in_ansi = false;
+                            }
+                            continue;
+                        } else if c == '\x1b' {
+                            in_ansi = true;
+                            continue;
+                        }
+
+                        // Allow skip_count to consume any non-ANSI character. This correctly eats
+                        // the raw \x08 from bash's "\x08\x1b[K" backspace echo.
+                        if skip_echo_count > 0 {
+                            skip_echo_count -= 1;
+                            last_two.clear();
+                            continue;
+                        }
+
+                        if !c.is_control() {
+                            last_two.push(c);
+                            if last_two.len() > 2 {
+                                last_two.remove(0);
+                            }
+                        }
+
+                        if last_two == "#(" {
+                            let mut trigger_already_erased = false;
+
+                            if local_marker_active {
+                                // Solidify current first
+                                let id = {
+                                    let mut cnt =
+                                        counter_clone.lock().unwrap();
+                                    *cnt += 1;
+                                    *cnt
+                                };
+                                let marker_text = format!("#{}", id);
+                                let mut w_l =
+                                    writer_clone.lock().unwrap();
+                                let erase_len =
+                                    unsolidified_visual_len + 1; // +1 for the echoed '(' trigger
+                                let _ = w_l.write_all(
+                                    "\x08"
+                                        .repeat(erase_len)
+                                        .as_bytes(),
+                                );
+                                let _ = w_l.write_all(
+                                    marker_text.as_bytes(),
+                                );
+                                let _ = w_l.flush();
+
+                                skip_echo_count += erase_len
+                                    + marker_text.chars().count();
+
+                                let del_pos = text_clone
+                                    .len_unicode()
+                                    .saturating_sub(
+                                        unsolidified_visual_len + 1,
+                                    );
+                                text_clone
+                                    .delete(
+                                        del_pos,
+                                        unsolidified_visual_len + 1,
+                                    )
+                                    .unwrap();
+                                text_clone
+                                    .insert(del_pos, &marker_text)
+                                    .unwrap();
+
+                                local_marker_active = false;
+                                unsolidified_marker_content.clear();
+                                unsolidified_visual_len = 0;
+                                trigger_already_erased = true;
+                            } else {
+                                // Delete the single '#' added at the loop bottom
+                                text_clone
+                                    .delete(
+                                        text_clone
+                                            .len_unicode()
+                                            .saturating_sub(1),
+                                        1,
+                                    )
+                                    .unwrap();
+                            }
+
+                            // Autocomplete / Chain Logic
+                            let chain = marker_map_clone
+                                .get("chain")
+                                .and_then(|v| {
+                                    v.as_value().and_then(|v| {
+                                        v.as_string()
+                                            .map(|s| s.to_string())
+                                    })
+                                })
+                                .unwrap_or_default();
+                            let chain_content = marker_map_clone
+                                .get("chain_content")
+                                .and_then(|v| {
+                                    v.as_value().and_then(|v| {
+                                        v.as_string()
+                                            .map(|s| s.to_string())
+                                    })
+                                })
+                                .unwrap_or_default();
+
+                            if !chain.is_empty() {
+                                let mut w_l =
+                                    writer_clone.lock().unwrap();
+                                if !trigger_already_erased {
+                                    let _ = w_l.write_all(
+                                        "\x08\x08".as_bytes(),
+                                    );
+                                    // PTY echoes \x08 \x08 for each \x08 sent, 2 spaces = 2 printable chars
+                                    skip_echo_count += 2;
+                                }
+                                let autocomplete_text =
+                                    format!("{}#(", chain);
+                                let _ = w_l.write_all(
+                                    autocomplete_text.as_bytes(),
+                                );
+                                let _ = w_l.flush();
+                                skip_echo_count +=
+                                    autocomplete_text.chars().count();
+
+                                text_clone
+                                    .insert(
+                                        text_clone.len_unicode(),
+                                        &autocomplete_text,
+                                    )
+                                    .unwrap();
+
+                                unsolidified_visual_len =
+                                    chain.chars().count() + 2;
+                                unsolidified_marker_content =
+                                    format!("{})#(", chain_content);
+                            } else {
+                                // First marker OR chained without saved chain
+                                let mut w_l =
+                                    writer_clone.lock().unwrap();
+                                if skip_echo_count > 0
+                                    || trigger_already_erased
+                                {
+                                    let _ = w_l
+                                        .write_all("#(".as_bytes());
+                                    let _ = w_l.flush();
+                                    skip_echo_count += 2;
+                                }
+                                text_clone
+                                    .insert(
+                                        text_clone.len_unicode(),
+                                        "#(",
+                                    )
+                                    .unwrap();
+                                unsolidified_visual_len = 2;
+                                unsolidified_marker_content.clear();
+                            }
+
+                            local_marker_active = true;
+                            local_anchor_cursor = text_clone
+                                .get_cursor(
+                                    text_clone.len_unicode(),
+                                    Side::Left,
+                                );
+                            marker_map_clone
+                                .insert("active", true)
+                                .unwrap();
+                            last_two.clear();
+                            continue;
+                        }
+
+                        if c == '\u{0008}' || c == '\u{007f}' {
+                            if local_marker_active {
+                                if !unsolidified_marker_content
+                                    .is_empty()
+                                {
+                                    unsolidified_marker_content.pop();
+                                    let clean =
+                                        unsolidified_marker_content
+                                            .trim_end_matches(')')
+                                            .to_string();
+                                    let chain_val =
+                                        if clean.is_empty() {
+                                            "".to_string()
+                                        } else {
+                                            format!("#({})", clean)
+                                        };
+                                    marker_map_clone
+                                        .insert(
+                                            "chain",
+                                            chain_val.as_str(),
+                                        )
+                                        .unwrap();
+                                    marker_map_clone
+                                        .insert(
+                                            "chain_content",
+                                            clean.as_str(),
+                                        )
+                                        .unwrap();
+                                } else if unsolidified_visual_len > 0
+                                {
+                                    // De-incrementing visual len for the #( part, but keep active
+                                } else {
+                                    local_marker_active = false;
+                                    marker_map_clone
+                                        .insert("chain", "")
+                                        .unwrap();
+                                    marker_map_clone
+                                        .insert("chain_content", "")
+                                        .unwrap();
+                                }
+                                if unsolidified_visual_len > 0 {
+                                    unsolidified_visual_len -= 1;
+                                    // Keep text_clone in sync!
+                                    if text_clone.len_unicode() > 0 {
+                                        text_clone
+                                            .delete(
+                                                text_clone
+                                                    .len_unicode()
+                                                    - 1,
+                                                1,
+                                            )
+                                            .unwrap();
+                                    }
+                                }
+                                marker_map_clone
+                                    .insert(
+                                        "content",
+                                        unsolidified_marker_content
+                                            .as_str(),
+                                    )
+                                    .unwrap();
+                            } else {
+                                if unsolidified_visual_len > 0 {
+                                    unsolidified_visual_len -= 1;
+                                }
+                                if text_clone.len_unicode() > 0 {
+                                    text_clone
+                                        .delete(
+                                            text_clone.len_unicode()
+                                                - 1,
+                                            1,
+                                        )
+                                        .unwrap();
                                 }
                             }
-                            // Drain up to and including the terminator
-                            let terminator_len = stream_buffer[actual_end..].chars().next().unwrap().len_utf8();
-                            stream_buffer.drain(..actual_end + terminator_len);
-                        } else {
-                             // Drain before the potential mark
-                             stream_buffer.drain(..hash_idx);
-                             break;
+                            if !last_two.is_empty() {
+                                last_two.pop();
+                            }
+                        } else if !c.is_control()
+                            || c == '\n'
+                            || c == '\r'
+                            || c == ' '
+                        {
+                            if local_marker_active {
+                                if c == ' ' || c == '\n' || c == '\r'
+                                {
+                                    local_marker_active = false;
+
+                                    let id = {
+                                        let mut cnt = counter_clone
+                                            .lock()
+                                            .unwrap();
+                                        *cnt += 1;
+                                        *cnt
+                                    };
+                                    let marker_text =
+                                        format!("#{}", id);
+
+                                    let mut w_l =
+                                        writer_clone.lock().unwrap();
+                                    // Erase unsolidified marker AND the echoed trigger character c
+                                    let erase_len =
+                                        unsolidified_visual_len + 1;
+                                    let _ = w_l.write_all(
+                                        "\x08"
+                                            .repeat(erase_len)
+                                            .as_bytes(),
+                                    );
+                                    let _ = w_l.write_all(
+                                        marker_text.as_bytes(),
+                                    );
+                                    let _ = w_l.write_all(
+                                        c.to_string().as_bytes(),
+                                    );
+                                    let _ = w_l.flush();
+
+                                    skip_echo_count += erase_len
+                                        + marker_text.chars().count()
+                                        + 1;
+
+                                    let clean =
+                                        unsolidified_marker_content
+                                            .trim_end_matches(')')
+                                            .to_string();
+                                    let chain_val =
+                                        format!("#({})", clean);
+                                    marker_map_clone
+                                        .insert(
+                                            "chain",
+                                            chain_val.as_str(),
+                                        )
+                                        .unwrap();
+                                    marker_map_clone
+                                        .insert(
+                                            "chain_content",
+                                            clean.as_str(),
+                                        )
+                                        .unwrap();
+                                    marker_map_clone
+                                        .insert("active", false)
+                                        .unwrap();
+
+                                    {
+                                        let mut doc_lock =
+                                            doc_clone.lock().unwrap();
+                                        let mut marks_lock =
+                                            marks_clone
+                                                .lock()
+                                                .unwrap();
+
+                                        // Delete unsolidified visual representation from text_clone
+                                        let del_pos = text_clone.len_unicode().saturating_sub(unsolidified_visual_len);
+                                        text_clone.delete(del_pos, unsolidified_visual_len).unwrap();
+
+                                        let pos = del_pos;
+                                        text_clone
+                                            .insert(pos, &marker_text)
+                                            .unwrap();
+                                        text_clone
+                                            .insert(
+                                                pos + marker_text
+                                                    .chars()
+                                                    .count(),
+                                                &c.to_string(),
+                                            )
+                                            .unwrap();
+
+                                        if let Some(cur) = text_clone
+                                            .get_cursor(
+                                                pos + marker_text
+                                                    .chars()
+                                                    .count()
+                                                    - 1,
+                                                Side::Left,
+                                            )
+                                        {
+                                            marks_lock
+                                                .entry(id.to_string())
+                                                .or_default()
+                                                .push(cur);
+                                        }
+
+                                        let clean_parse: String = clean.chars()
+                                            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == ',' || *ch == ':' || *ch == '.' || *ch == '-' || *ch == '_')
+                                            .collect();
+
+                                        for block in
+                                            clean_parse.split(")#(")
+                                        {
+                                            let mut props =
+                                                Vec::new();
+                                            let mut ranges =
+                                                Vec::new();
+                                            let mut parts =
+                                                block.splitn(2, ',');
+                                            let props_p = parts
+                                                .next()
+                                                .unwrap_or("");
+                                            let pairs_p = parts
+                                                .next()
+                                                .unwrap_or("");
+                                            for p in props_p
+                                                .split_whitespace()
+                                            {
+                                                props.push(
+                                                    p.to_string(),
+                                                );
+                                            }
+                                            for pair in pairs_p
+                                                .split_whitespace()
+                                            {
+                                                if pair.contains(':')
+                                                {
+                                                    let mut s_pair =
+                                                        pair.splitn(
+                                                            2, ':',
+                                                        );
+                                                    ranges.push((s_pair.next().unwrap_or("").to_string(), s_pair.next().unwrap_or("").to_string()));
+                                                } else if !pair
+                                                    .is_empty()
+                                                {
+                                                    ranges.push((pair.to_string(), "".to_string()));
+                                                }
+                                            }
+
+                                            let get_pos = |name: &str| -> Vec<usize> {
+                                                marks_lock.get(name).map(|list| list.iter().filter_map(|cur| doc_lock.get_cursor_pos(cur).ok().map(|p| p.current.pos)).collect()).unwrap_or_default()
+                                            };
+                                            let find_cl = |target: usize, positions: &[usize], exclude: Option<usize>| -> Option<usize> {
+                                                positions.iter().filter(|&&p| exclude.map_or(true, |ep| p != ep)).min_by_key(|&&p| (p as isize - target as isize).abs()).copied()
+                                            };
+
+                                            for (m1, m2) in ranges {
+                                                let mut final_r =
+                                                    Vec::new();
+                                                if m1.is_empty()
+                                                    && !m2.is_empty()
+                                                {
+                                                    if let Some(p2) =
+                                                        find_cl(
+                                                            pos,
+                                                            &get_pos(
+                                                                &m2,
+                                                            ),
+                                                            None,
+                                                        )
+                                                    {
+                                                        final_r.push(
+                                                            (pos, p2),
+                                                        );
+                                                    }
+                                                } else if !m1
+                                                    .is_empty()
+                                                    && m2.is_empty()
+                                                {
+                                                    if let Some(p1) =
+                                                        find_cl(
+                                                            pos,
+                                                            &get_pos(
+                                                                &m1,
+                                                            ),
+                                                            None,
+                                                        )
+                                                    {
+                                                        final_r.push(
+                                                            (p1, pos),
+                                                        );
+                                                    }
+                                                } else if !m1
+                                                    .is_empty()
+                                                    && m1 == m2
+                                                {
+                                                    let ps =
+                                                        get_pos(&m1);
+                                                    for &p1 in &ps {
+                                                        if let Some(
+                                                            p2,
+                                                        ) = find_cl(
+                                                            p1,
+                                                            &ps,
+                                                            Some(p1),
+                                                        ) {
+                                                            final_r.push((p1, p2));
+                                                        }
+                                                    }
+                                                } else if !m1
+                                                    .is_empty()
+                                                    && !m2.is_empty()
+                                                {
+                                                    let p1s =
+                                                        get_pos(&m1);
+                                                    let p2s =
+                                                        get_pos(&m2);
+                                                    for &p1 in &p1s {
+                                                        if let Some(
+                                                            p2,
+                                                        ) = find_cl(
+                                                            p1, &p2s,
+                                                            None,
+                                                        ) {
+                                                            final_r.push((p1, p2));
+                                                        }
+                                                    }
+                                                }
+                                                for (start, end) in
+                                                    final_r
+                                                {
+                                                    let (
+                                                        s_idx,
+                                                        e_idx,
+                                                    ) = if start
+                                                        <= end
+                                                    {
+                                                        (start, end)
+                                                    } else {
+                                                        (end, start)
+                                                    };
+                                                    for prop in &props
+                                                    {
+                                                        if let Some(
+                                                            split,
+                                                        ) = prop
+                                                            .find(':')
+                                                        {
+                                                            let _ = text_clone.mark(s_idx..e_idx, prop[..split].trim(), prop[split+1..].trim());
+                                                        } else {
+                                                            let _ = text_clone.mark(s_idx..e_idx, prop.trim(), true);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    unsolidified_marker_content
+                                        .clear();
+                                    unsolidified_visual_len = 0;
+                                } else {
+                                    unsolidified_marker_content
+                                        .push(c);
+                                    unsolidified_visual_len += 1;
+                                    text_clone
+                                        .insert(
+                                            text_clone.len_unicode(),
+                                            &c.to_string(),
+                                        )
+                                        .unwrap();
+                                    marker_map_clone.insert("content", unsolidified_marker_content.as_str()).unwrap();
+                                }
+                            } else {
+                                text_clone
+                                    .insert(
+                                        text_clone.len_unicode(),
+                                        &c.to_string(),
+                                    )
+                                    .unwrap();
+                            }
                         }
-                    }
-                    if stream_buffer.len() > 2048 {
-                        stream_buffer.drain(..stream_buffer.len() - 2048);
                     }
                 }
                 Err(_) => break,
             }
         }
     });
-    commands.insert_resource(TerminalEmulator { term, writer, doc, text, marks });
 
     let handle =
         VelystSourceHandle(asset_server.load("typst/term_v3.typ"));
@@ -205,6 +740,16 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 ZIndex(2),
             ));
         });
+    commands.insert_resource(TerminalEmulator {
+        term,
+        writer,
+        doc,
+        text,
+        marks,
+        marker_counter,
+        last_autocomplete_len,
+        marker_map,
+    });
 }
 
 fn color_to_typst(color: VteColor) -> Option<String> {
@@ -253,8 +798,10 @@ fn update_terminal_render(
     let grid = term_lock.grid();
     let cursor_p = grid.cursor.point;
 
-    let show_hidden = (keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight))
-        && (keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight));
+    let show_hidden = (keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight))
+        && (keys.pressed(KeyCode::ShiftLeft)
+            || keys.pressed(KeyCode::ShiftRight));
 
     let mut final_markup = String::new();
 
@@ -278,32 +825,95 @@ fn update_terminal_render(
                 cell.c
             };
 
-            // Detect marker and its visibility
             let mut hidden_len = 0;
             if c == '#' {
-                let mut name = String::new();
-                let mut j = col_idx + 1;
-                while j < grid.columns() {
-                    let next_c = row[Column(j)].c;
-                    if next_c == ' ' || next_c == '\n' {
-                        break;
+                // Check for a chain of local markers #(...) or generated markers #1, #2...
+                let mut current_j = col_idx;
+                let mut found_chain = false;
+                let mut chain_end = col_idx;
+
+                while current_j < grid.columns() {
+                    let cur_c = row[Column(current_j)].c;
+                    if cur_c == '#' {
+                        if current_j + 1 < grid.columns()
+                            && row[Column(current_j + 1)].c == '('
+                        {
+                            // Find closing )
+                            let mut k = current_j + 2;
+                            let mut found_paren = None;
+                            while k < grid.columns() {
+                                if row[Column(k)].c == ')' {
+                                    found_paren = Some(k);
+                                    break;
+                                }
+                                k += 1;
+                            }
+                            if let Some(cp) = found_paren {
+                                current_j = cp + 1;
+                                chain_end = cp;
+                                found_chain = true;
+                                continue;
+                            }
+                        } else {
+                            // Possible generated marker #1, #2...
+                            let mut k = current_j + 1;
+                            let mut name = String::new();
+                            while k < grid.columns() {
+                                let nc = row[Column(k)].c;
+                                if nc.is_ascii_alphanumeric() {
+                                    name.push(nc);
+                                    k += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            if !name.is_empty() {
+                                let starts_upper = name
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.is_uppercase())
+                                    .unwrap_or(false);
+                                if !starts_upper {
+                                    current_j = k;
+                                    chain_end = k - 1;
+                                    found_chain = true;
+                                    continue;
+                                }
+                            }
+                        }
                     }
-                    name.push(next_c);
-                    j += 1;
+                    break;
                 }
-                if !name.is_empty() && j < grid.columns() {
-                    let starts_upper = name
-                        .chars()
-                        .next()
-                        .map(|c| c.is_uppercase())
-                        .unwrap_or(false);
-                    if !starts_upper && !show_hidden {
-                        hidden_len = j - col_idx;
+
+                if found_chain {
+                    let mut has_delimit = false;
+                    let mut space_offset = 0;
+                    if chain_end + 1 < grid.columns() {
+                        let next_c = row[Column(chain_end + 1)].c;
+                        if next_c == ' ' {
+                            has_delimit = true;
+                            space_offset = 1;
+                        } else if next_c == '\n' || next_c == '\r' {
+                            has_delimit = true;
+                        }
+                    } else {
+                        has_delimit = true;
+                    }
+
+                    // Check if cursor is anywhere inside the ENTIRE chain
+                    let cursor_inside = line_idx == cursor_p.line
+                        && cursor_p.column.0 >= col_idx
+                        && cursor_p.column.0
+                            < (chain_end + space_offset + 1);
+                    if !show_hidden && has_delimit && !cursor_inside {
+                        hidden_len =
+                            (chain_end - col_idx + 1) + space_offset;
                     }
                 }
             }
 
-            if line_idx == cursor_p.line && col_idx == cursor_p.column.0
+            if line_idx == cursor_p.line
+                && col_idx == cursor_p.column.0
             {
                 if let Some(current) = current_styles {
                     final_markup.push_str(&render_group(
@@ -313,7 +923,7 @@ fn update_terminal_render(
                     ));
                     group_text.clear();
                 }
-                // Inject a zero-width colored box as cursor marker (safe in eval)
+                // Inject zero-width cursor marker
                 final_markup.push_str(
                     "#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]",
                 );
@@ -518,10 +1128,10 @@ fn handle_input(
 ) {
     let mut writer_lock =
         emulator.writer.lock().expect("failed to lock writer");
+
     for ev in keyboard_evr.read() {
         if ev.state == bevy::input::ButtonState::Pressed {
             if let Some(ref text) = ev.text {
-                let text: &str = text;
                 let _ = writer_lock.write_all(text.as_bytes());
             } else {
                 match ev.key_code {
@@ -563,11 +1173,18 @@ typst_func!(
 
 fn log_marks(emulator: Res<TerminalEmulator>) {
     if let Ok(marks) = emulator.marks.try_lock() {
-        static LAST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        static LAST_COUNT: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
         let count = marks.len();
-        if count > LAST_COUNT.load(std::sync::atomic::Ordering::Relaxed) {
-            println!("Current Marks in LoroText: {:?}", marks.keys().collect::<Vec<_>>());
-            LAST_COUNT.store(count, std::sync::atomic::Ordering::Relaxed);
+        if count
+            > LAST_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            println!(
+                "Current Marks in LoroText: {:?}",
+                marks.keys().collect::<Vec<_>>()
+            );
+            LAST_COUNT
+                .store(count, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

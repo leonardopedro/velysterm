@@ -22,7 +22,7 @@ impl DeltaAlgebraEngine {
             .expect("Failed to find a suitable GPU adapter");
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .request_device(&wgpu::DeviceDescriptor::default())
             .await
             .expect("Failed to create WGPU device");
 
@@ -90,7 +90,9 @@ impl DeltaAlgebraEngine {
                 label: Some("Delta-Algebra Expansion Pipeline"),
                 layout: Some(&pipeline_layout),
                 module: &shader,
-                entry_point: "apply_recursion",
+                entry_point: Some("apply_recursion"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
             },
         );
 
