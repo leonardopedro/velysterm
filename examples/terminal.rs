@@ -13,6 +13,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use velyst::prelude::*;
+use velyst::rfc1751;
 
 fn main() {
     App::new()
@@ -34,11 +35,7 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (
-                update_terminal_render,
-                update_cursor,
-                handle_input,
-            ),
+            (update_terminal_render, update_cursor, handle_input, auto_scroll),
         )
         .run();
 }
@@ -104,20 +101,18 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .try_clone_reader()
         .expect("failed to clone reader");
 
-    let dims = TermSize { cols: 80, rows: 24 };
+    let dims = TermSize { cols: 120, rows: 24 };
     let term = Term::new(Config::default(), &dims, DummyListener);
     let term = Arc::new(Mutex::new(term));
     let writer = Arc::new(Mutex::new(writer));
 
     let marker_counter = Arc::new(Mutex::new(0));
-    let chain = Arc::new(Mutex::new(String::new()));
-    let chain_content = Arc::new(Mutex::new(String::new()));
+    let persistent_history = Arc::new(Mutex::new(String::new()));
 
     let term_clone = Arc::clone(&term);
     let writer_clone = Arc::clone(&writer);
     let counter_clone = Arc::clone(&marker_counter);
-    let chain_clone = Arc::clone(&chain);
-    let chain_content_clone = Arc::clone(&chain_content);
+    let history_clone = Arc::clone(&persistent_history);
 
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -125,8 +120,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         let mut processor = Processor::<StdSyncHandler>::new();
 
         let mut local_marker_active = false;
-        let mut unsolidified_visual_len: usize = 0;
-        let mut unsolidified_marker_content = String::new();
+        let mut segment_visual_len: usize = 0;
+        let mut segment_content = String::new();
         let mut last_two = String::new();
         let mut skip_echo_count = 0;
 
@@ -135,8 +130,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                 Ok(0) => break,
                 Ok(n) => {
                     {
-                        let mut term_lock = term_clone.lock().unwrap();
-                        processor.advance(&mut *term_lock, &buffer[..n]);
+                        let mut term_lock =
+                            term_clone.lock().unwrap();
+                        processor
+                            .advance(&mut *term_lock, &buffer[..n]);
                     }
 
                     let s = String::from_utf8_lossy(&buffer[..n]);
@@ -170,119 +167,469 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                         }
 
                         if last_two == "#(" {
-                            let mut trigger_already_erased = false;
-
                             if local_marker_active {
-                                // Solidify current first
-                                let id = {
-                                    let mut cnt = counter_clone.lock().unwrap();
-                                    *cnt += 1;
-                                    *cnt
-                                };
-                                let marker_text = format!("#{}", id);
-                                let mut w_l = writer_clone.lock().unwrap();
-                                let erase_len = unsolidified_visual_len + 1; // +1 for the echoed '('
-                                // Most PTYs echo 3 bytes per backspace (\x08 \x08)
-                                let _ = w_l.write_all("\x08".repeat(erase_len).as_bytes());
-                                let _ = w_l.write_all(marker_text.as_bytes());
-                                let _ = w_l.flush();
+                                // 1. Chaining markers: Treat #(...)#(...) as one object
+                                // Transform current chain if missing IDs are found in history
+                                let current_text =
+                                    segment_content.clone();
+                                let clean = current_text
+                                    .trim_end_matches('(')
+                                    .trim_end_matches('#')
+                                    .trim_end_matches(')')
+                                    .trim_end()
+                                    .to_string();
 
-                                skip_echo_count += erase_len * 3 + marker_text.chars().count();
-                                trigger_already_erased = true;
-                            }
-
-                            let chain_val = chain_clone.lock().unwrap().clone();
-                            let chain_content_val = chain_content_clone.lock().unwrap().clone();
-
-                            if !chain_val.is_empty() {
-                                let mut w_l = writer_clone.lock().unwrap();
-                                if !trigger_already_erased {
-                                    let _ = w_l.write_all("\x08\x08".as_bytes());
-                                    // Skip the echo of 2 backspaces (6 bytes typically)
-                                    skip_echo_count += 6;
+                                let mut normalize_clean =
+                                    clean.clone();
+                                normalize_clean = normalize_clean
+                                    .replace(")#(", ":");
+                                if normalize_clean.starts_with('(') {
+                                    normalize_clean.remove(0);
                                 }
-                                let autocomplete_text = format!("{}#(", chain_val);
-                                let _ = w_l.write_all(autocomplete_text.as_bytes());
-                                let _ = w_l.flush();
-                                skip_echo_count += autocomplete_text.chars().count();
+                                normalize_clean = normalize_clean
+                                    .trim_matches(':')
+                                    .to_string();
 
-                                unsolidified_visual_len = chain_val.chars().count() + 2;
-                                unsolidified_marker_content = format!("{})#(", chain_content_val);
+                                if !normalize_clean.is_empty() {
+                                    let hist_lock =
+                                        history_clone.lock().unwrap();
+
+                                    // Smarter chain match:
+                                    // Try to find a history entry that contains 'norm''s segments in sequence.
+                                    // e.g. 'b,a:c,a' matches 'b,a:1:c,a:1:2'
+                                    let norm_parts: Vec<&str> =
+                                        normalize_clean
+                                            .split(':')
+                                            .collect();
+
+                                    // Find entry in history that matches this prefix
+                                    let full_hist = &*hist_lock;
+                                    let hist_parts: Vec<&str> =
+                                        full_hist
+                                            .split(':')
+                                            .collect();
+
+                                    let mut match_found = false;
+                                    let mut best_index = 0;
+                                    let mut h_start = 0;
+                                    while h_start < hist_parts.len() {
+                                        let mut n_idx = 0;
+                                        let mut current_h = h_start;
+                                        while current_h
+                                            < hist_parts.len()
+                                            && n_idx
+                                                < norm_parts.len()
+                                        {
+                                            if hist_parts[current_h]
+                                                == norm_parts[n_idx]
+                                            {
+                                                n_idx += 1;
+                                                current_h += 1;
+                                                // Skip ID piece in history if not present in norm
+                                                if current_h
+                                                    < hist_parts.len()
+                                                    && n_idx
+                                                        < norm_parts
+                                                            .len()
+                                                {
+                                                    if let Ok(_) = hist_parts[current_h].parse::<usize>() {
+                                                        if hist_parts[current_h] != norm_parts[n_idx] {
+                                                            current_h += 1;
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        if n_idx == norm_parts.len() {
+                                            match_found = true;
+                                            // Greedy: check if the VERY next part in history is an ID
+                                            if current_h
+                                                < hist_parts.len()
+                                            {
+                                                if let Ok(_) = hist_parts[current_h].parse::<usize>() {
+                                                    current_h += 1;
+                                                }
+                                            }
+                                            best_index = current_h;
+                                            break;
+                                        }
+                                        h_start += 1;
+                                    }
+
+                                    if match_found {
+                                        let mut w_l = writer_clone
+                                            .lock()
+                                            .unwrap();
+                                        // On screen we have '#' + segment_content + triggering '('
+                                        // segment_visual_len already includes the leading '#'.
+                                        // So we need to erase segment_visual_len + 1 (for the '(').
+                                        let erase_count =
+                                            segment_visual_len + 1;
+                                        let _ = w_l.write_all(
+                                            "\x08"
+                                                .repeat(erase_count)
+                                                .as_bytes(),
+                                        );
+
+                                        let mut improved_parts =
+                                            Vec::new();
+                                        let mut i = h_start;
+                                        while i < best_index {
+                                            if i + 1 < best_index {
+                                                if let Ok(_) = hist_parts[i+1].parse::<usize>() {
+                                                    improved_parts.push(format!("({}:{})", hist_parts[i], hist_parts[i+1]));
+                                                    i += 2;
+                                                    continue;
+                                                }
+                                            }
+                                            improved_parts.push(
+                                                format!(
+                                                    "({})",
+                                                    hist_parts[i]
+                                                ),
+                                            );
+                                            i += 1;
+                                        }
+
+                                        let final_text = format!(
+                                            "#{}#(",
+                                            improved_parts.join("#")
+                                        );
+                                        let _ = w_l.write_all(
+                                            final_text.as_bytes(),
+                                        );
+                                        let _ = w_l.flush();
+
+                                        skip_echo_count += erase_count
+                                            + final_text
+                                                .chars()
+                                                .count();
+                                        segment_visual_len =
+                                            final_text
+                                                .chars()
+                                                .count();
+                                        segment_content = final_text
+                                            [1..]
+                                            .to_string();
+
+                                        last_two.clear();
+                                        continue;
+                                    }
+                                }
+
+                                // If no history match or already has ID, just append the triggering "("
+                                segment_content.push(c); // '('
+                                segment_visual_len += 1;
                             } else {
-                                let mut w_l = writer_clone.lock().unwrap();
-                                if skip_echo_count > 0 || trigger_already_erased {
-                                    let _ = w_l.write_all("#(".as_bytes());
-                                    let _ = w_l.flush();
+                                // 2. First marker start: Trigger history autocomplete prefix
+                                let history_val = history_clone
+                                    .lock()
+                                    .unwrap()
+                                    .clone();
+
+                                if !history_val.is_empty() {
+                                    // Autocomplete from history: only suggest the LAST atomic chain.
+                                    // Stored as s1:s2:solidID:s3:s4:solidID...
+                                    let full_parts: Vec<&str> =
+                                        history_val
+                                            .split(':')
+                                            .collect();
+
+                                    // Find the last solid ID in history and take everything AFTER the previous ID.
+                                    let mut last_id_idx = None;
+                                    for idx in
+                                        (0..full_parts.len()).rev()
+                                    {
+                                        if let Ok(_) = full_parts[idx]
+                                            .parse::<usize>()
+                                        {
+                                            last_id_idx = Some(idx);
+                                            break;
+                                        }
+                                    }
+
+                                    let mut start_idx = 0;
+                                    if let Some(l_idx) = last_id_idx {
+                                        // Found a chain ending. Look for the start of this specific chain.
+                                        // Usually everything since the previous chain's ID.
+                                        for idx in (0..l_idx).rev() {
+                                            if let Ok(_) = full_parts
+                                                [idx]
+                                                .parse::<usize>()
+                                            {
+                                                start_idx = idx + 1;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    let mut autocomplete_parts =
+                                        Vec::new();
+                                    let mut i = start_idx;
+                                    let end_idx = last_id_idx
+                                        .unwrap_or(full_parts.len());
+
+                                    while i < end_idx {
+                                        if i + 1 < end_idx {
+                                            if let Ok(_) = full_parts
+                                                [i + 1]
+                                                .parse::<usize>()
+                                            {
+                                                autocomplete_parts
+                                                    .push(format!(
+                                                        "({}:{})",
+                                                        full_parts[i],
+                                                        full_parts
+                                                            [i + 1]
+                                                    ));
+                                                i += 2;
+                                                continue;
+                                            }
+                                        }
+                                        autocomplete_parts.push(
+                                            format!(
+                                                "({})",
+                                                full_parts[i]
+                                            ),
+                                        );
+                                        i += 1;
+                                    }
+
+                                    let autocomplete_text = format!(
+                                        "#{}#(",
+                                        autocomplete_parts.join("#")
+                                    );
+
+                                    let mut w_l =
+                                        writer_clone.lock().unwrap();
+                                    let _ =
+                                        w_l.write_all(b"\x08\x08"); // Erase the echoed "#("
                                     skip_echo_count += 2;
+
+                                    let _ = w_l.write_all(
+                                        autocomplete_text.as_bytes(),
+                                    );
+                                    let _ = w_l.flush();
+                                    skip_echo_count +=
+                                        autocomplete_text
+                                            .chars()
+                                            .count();
+
+                                    local_marker_active = true;
+                                    segment_visual_len =
+                                        autocomplete_text
+                                            .chars()
+                                            .count();
+                                    segment_content =
+                                        autocomplete_text[1..] // Starts with '('
+                                            .to_string();
+                                } else {
+                                    local_marker_active = true;
+                                    segment_visual_len = 2; // For "#("
+                                    segment_content = "(".to_string();
                                 }
-                                unsolidified_visual_len = 2;
-                                unsolidified_marker_content.clear();
                             }
 
-                            local_marker_active = true;
                             last_two.clear();
                             continue;
                         }
 
                         if c == '\u{0008}' || c == '\u{007f}' {
                             if local_marker_active {
-                                if !unsolidified_marker_content.is_empty() {
-                                    unsolidified_marker_content.pop();
-                                    let clean = unsolidified_marker_content.trim_end_matches(')').to_string();
-                                    let chain_val = if clean.is_empty() { "".to_string() } else { format!("#({})", clean) };
-                                    *chain_clone.lock().unwrap() = chain_val;
-                                    *chain_content_clone.lock().unwrap() = clean;
-                                } else if unsolidified_visual_len > 0 {
-                                    // keep active
-                                } else {
+                                if !segment_content.is_empty() {
+                                    segment_content.pop();
+                                }
+                                if segment_visual_len > 0 {
+                                    segment_visual_len -= 1;
+                                }
+                                if segment_visual_len == 0 {
                                     local_marker_active = false;
-                                    *chain_clone.lock().unwrap() = String::new();
-                                    *chain_content_clone.lock().unwrap() = String::new();
-                                }
-                                if unsolidified_visual_len > 0 {
-                                    unsolidified_visual_len -= 1;
-                                }
-                            } else {
-                                if unsolidified_visual_len > 0 {
-                                    unsolidified_visual_len -= 1;
                                 }
                             }
                             if !last_two.is_empty() {
                                 last_two.pop();
                             }
                         } else {
-                            // Detect space or newline to finalize marker
-                            let is_finalize_char = c == ' ' || c == '\n' || c == '\r';
+                            let is_finalize_char =
+                                c == ' ' || c == '\n' || c == '\r';
                             if local_marker_active {
                                 if is_finalize_char {
                                     local_marker_active = false;
-                                    let id = {
-                                        let mut cnt = counter_clone.lock().unwrap();
+                                    let mut clean = segment_content
+                                        .trim_end_matches('(')
+                                        .trim_end_matches('#')
+                                        .trim_end_matches(')')
+                                        .trim_end()
+                                        .to_string();
+
+                                    // Normalize chain format: "(b:1)#(c" -> "b:1:c"
+                                    clean = clean.replace(")#(", ":");
+                                    if clean.starts_with('(') {
+                                        clean.remove(0);
+                                    }
+                                    clean = clean
+                                        .trim_matches(':')
+                                        .to_string();
+
+                                    let mut final_id = None;
+                                    let mut final_clean =
+                                        clean.clone();
+
+                                    if let Some(pos) =
+                                        clean.rfind(':')
+                                    {
+                                        let maybe_id_part =
+                                            clean[pos + 1..].trim();
+                                        if let Ok(val) = maybe_id_part
+                                            .parse::<usize>()
+                                        {
+                                            final_id = Some(val);
+                                            final_clean = clean
+                                                [..pos]
+                                                .trim_end()
+                                                .to_string();
+                                        }
+                                    }
+
+                                    if final_id.is_none()
+                                        && !final_clean.is_empty()
+                                    {
+                                        let hist_lock = history_clone
+                                            .lock()
+                                            .unwrap();
+
+                                        let hist_parts: Vec<&str> =
+                                            hist_lock
+                                                .split(':')
+                                                .collect();
+
+                                        let clean_parts: Vec<&str> =
+                                            final_clean
+                                                .split(':')
+                                                .collect();
+
+                                        let mut h_idx = 0;
+                                        while h_idx < hist_parts.len()
+                                        {
+                                            let mut n_idx = 0;
+                                            let mut current_h = h_idx;
+                                            while current_h
+                                                < hist_parts.len()
+                                                && n_idx
+                                                    < clean_parts
+                                                        .len()
+                                            {
+                                                if hist_parts
+                                                    [current_h]
+                                                    == clean_parts
+                                                        [n_idx]
+                                                {
+                                                    n_idx += 1;
+                                                    current_h += 1;
+                                                    // Skip optional numerical ID in history
+                                                    if current_h < hist_parts.len() && n_idx < clean_parts.len() {
+                                                        if let Ok(_) = hist_parts[current_h].parse::<usize>() {
+                                                            if hist_parts[current_h] != clean_parts[n_idx] {
+                                                                current_h += 1;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            if n_idx
+                                                == clean_parts.len()
+                                                && current_h
+                                                    < hist_parts.len()
+                                            {
+                                                if let Ok(id_val) = hist_parts[current_h].trim().parse::<usize>() {
+                                                    final_id = Some(id_val);
+                                                    break;
+                                                }
+                                            }
+                                            h_idx += 1;
+                                        }
+                                    }
+
+                                    let solid_id = if let Some(val) =
+                                        final_id
+                                    {
+                                        let mut cnt = counter_clone
+                                            .lock()
+                                            .unwrap();
+                                        if val > *cnt {
+                                            *cnt = val;
+                                        }
+                                        val
+                                    } else {
+                                        let mut cnt = counter_clone
+                                            .lock()
+                                            .unwrap();
                                         *cnt += 1;
                                         *cnt
                                     };
-                                    let marker_text = format!("#{}", id);
-                                    let mut w_l = writer_clone.lock().unwrap();
-                                    let erase_len = unsolidified_visual_len + 1; // +1 for the finalizing char
-                                    let _ = w_l.write_all("\x08".repeat(erase_len).as_bytes());
-                                    let _ = w_l.write_all(marker_text.as_bytes());
-                                    let _ = w_l.write_all(c.to_string().as_bytes());
+
+                                    let marker_text =
+                                        format!("#{}", rfc1751::u64_to_rfc1751(solid_id as u64));
+                                    let mut w_l =
+                                        writer_clone.lock().unwrap();
+
+                                    // segment_visual_len includes the leading '#'
+                                    let erase_count =
+                                        segment_visual_len;
+                                    let erase_cmd =
+                                        "\x08".repeat(erase_count);
+                                    let _ = w_l.write_all(
+                                        erase_cmd.as_bytes(),
+                                    );
+                                    let _ = w_l.write_all(
+                                        marker_text.as_bytes(),
+                                    );
+                                    let _ = w_l.write_all(
+                                        c.to_string().as_bytes(),
+                                    );
                                     let _ = w_l.flush();
 
-                                    skip_echo_count += erase_len * 3 + marker_text.chars().count() + 1;
+                                    // Update history: current_segment should include intermixed IDs for chaining
+                                    // final_clean is normalized (segments only), but clean still has IDs.
+                                    let mut hist_entry =
+                                        clean.clone();
+                                    if !hist_entry.is_empty() {
+                                        hist_entry.push(':');
+                                    }
+                                    hist_entry.push_str(
+                                        &solid_id.to_string(),
+                                    );
 
-                                    let clean = unsolidified_marker_content.trim_end_matches(')').to_string();
-                                    *chain_clone.lock().unwrap() = format!("#({})", clean);
-                                    *chain_content_clone.lock().unwrap() = clean;
+                                    let mut hist =
+                                        history_clone.lock().unwrap();
+                                    let hist_str = &*hist;
 
-                                    unsolidified_marker_content.clear();
-                                    unsolidified_visual_len = 0;
+                                    if !hist_str.contains(&hist_entry)
+                                    {
+                                        if hist_str.is_empty() {
+                                            *hist = hist_entry;
+                                        } else {
+                                            *hist = format!(
+                                                "{}:{}",
+                                                hist_str, hist_entry
+                                            );
+                                        }
+                                    }
+
+                                    skip_echo_count += erase_count
+                                        + marker_text.chars().count()
+                                        + 1;
+
+                                    segment_content.clear();
+                                    segment_visual_len = 0;
                                 } else if !c.is_control() {
-                                    unsolidified_marker_content.push(c);
-                                    unsolidified_visual_len += 1;
+                                    segment_content.push(c);
+                                    segment_visual_len += 1;
                                 }
-                            } else if !c.is_control() {
-                                // Normal text, maybe tracking visual len for other purposes
                             }
                         }
                     }
@@ -338,8 +685,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         term,
         writer,
         _marker_counter: marker_counter,
-        _chain: chain,
-        _chain_content: chain_content,
+        _chain: Arc::new(Mutex::new(String::new())),
+        _chain_content: persistent_history,
     });
 }
 
@@ -396,14 +743,24 @@ fn update_terminal_render(
 
     let mut final_markup = String::new();
 
-    for line_idx in (0..grid.screen_lines()).map(|l| Line(l as i32)) {
+    // 1D Mapping: Iterate over all lines (scrollback + screen)
+    // and join them based on the WRAP flag to reconstruct the 1D stream.
+    let total_lines = grid.total_lines();
+    for row_idx in 0..total_lines {
+        // Alacritty line indexing: 0 is the top of scrollback.
+        // Screen lines start after scrollback.
+        let line_idx = Line(-(grid.history_size() as i32) + row_idx as i32);
         let row = &grid[line_idx];
         let mut current_styles: Option<(VteColor, VteColor, Flags)> =
             None;
         let mut group_text = String::new();
         let mut comment_seen = false;
 
+        let mut is_wrapped = false;
         let mut col_idx = 0;
+        let mut line_has_content = false;
+        let cursor_on_this_line = line_idx == cursor_p.line;
+
         while col_idx < grid.columns() {
             let col = Column(col_idx);
             let cell = &row[col];
@@ -416,7 +773,12 @@ fn update_terminal_render(
                 cell.c
             };
 
+            if c != ' ' {
+                line_has_content = true;
+            }
+            
             let mut hidden_len = 0;
+            // ... (keep marker hiding logic) ...
             if c == '#' {
                 // Check for a chain of local markers #(...) or generated markers #1, #2...
                 let mut current_j = col_idx;
@@ -492,7 +854,7 @@ fn update_terminal_render(
                     }
 
                     // Check if cursor is anywhere inside the ENTIRE chain
-                    let cursor_inside = line_idx == cursor_p.line
+                    let cursor_inside = cursor_on_this_line
                         && cursor_p.column.0 >= col_idx
                         && cursor_p.column.0
                             < (chain_end + space_offset + 1);
@@ -503,7 +865,7 @@ fn update_terminal_render(
                 }
             }
 
-            if line_idx == cursor_p.line
+            if cursor_on_this_line
                 && col_idx == cursor_p.column.0
             {
                 if let Some(current) = current_styles {
@@ -521,8 +883,7 @@ fn update_terminal_render(
             }
 
             if hidden_len > 0 {
-                // Check if cursor is inside hidden range
-                if line_idx == cursor_p.line
+                if cursor_on_this_line
                     && cursor_p.column.0 > col_idx
                     && cursor_p.column.0 < col_idx + hidden_len
                 {
@@ -574,14 +935,29 @@ fn update_terminal_render(
             }
             col_idx += 1;
         }
-        if let Some(current) = current_styles {
-            final_markup.push_str(&render_group(
-                &group_text,
-                current,
-                comment_seen,
-            ));
+
+        // Only emit the line if it has content or the cursor is on it.
+        // This makes the terminal behave like a 1D stream that only exists where text is.
+        if line_has_content || cursor_on_this_line {
+            // Check if wrapping to next line
+            if grid.columns() > 0 {
+                if row[Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE) {
+                    is_wrapped = true;
+                }
+            }
+
+            if let Some(current) = current_styles {
+                final_markup.push_str(&render_group(
+                    &group_text,
+                    current,
+                    comment_seen,
+                ));
+            }
+
+            if !is_wrapped {
+                final_markup.push_str(" #h(1fr) #parbreak() \n");
+            }
         }
-        final_markup.push_str(" #parbreak() \n");
     }
 
     for mut func in &mut query {
@@ -747,6 +1123,35 @@ fn handle_input(
                 }
             }
             let _ = writer_lock.flush();
+        }
+    }
+}
+
+fn auto_scroll(
+    mut q_view: Query<&mut Node, With<TerminalView>>,
+    q_cursor: Query<&Node, (With<Cursor>, Without<TerminalView>)>,
+    windows: Query<&Window>,
+) {
+    let window = if let Some(w) = windows.iter().next() {
+        w
+    } else {
+        return;
+    };
+    let win_h = window.height();
+    
+    if let Some(cursor_node) = q_cursor.iter().next() {
+        if let Val::Px(top) = cursor_node.top {
+            // Leave some room at the bottom
+            let target_top = if top > win_h - 100.0 {
+                -(top - (win_h - 100.0))
+            } else {
+                0.0
+            };
+            
+            if let Some(mut view_node) = q_view.iter_mut().next() {
+                // Smooth-ish scroll by just updating
+                view_node.top = Val::Px(target_top);
+            }
         }
     }
 }

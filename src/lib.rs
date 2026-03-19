@@ -25,6 +25,7 @@ pub mod prelude {
 pub mod asset;
 pub mod renderer;
 pub mod world;
+pub mod rfc1751;
 
 /// Plugin for loading and rendering [Typst][typst] content.
 pub struct VelystPlugin;
