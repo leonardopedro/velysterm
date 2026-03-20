@@ -8,6 +8,7 @@ use alacritty_terminal::vte::ansi::{
 };
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
+use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_vello::prelude::*;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -17,13 +18,11 @@ use velyst::rfc1751;
 
 fn main() {
     App::new()
-        .insert_resource(ClearColor(bevy::prelude::Color::srgb(
-            0.05, 0.05, 0.07,
-        )))
+        .insert_resource(ClearColor(Color::srgb(0.05, 0.05, 0.07))) // Dark theme
         .add_plugins((
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Velyst Terminal".into(),
+                    title: "Velyst Specialized Terminal".into(),
                     ..default()
                 }),
                 ..default()
@@ -31,13 +30,186 @@ fn main() {
             bevy_vello::VelloPlugin::default(),
             velyst::VelystPlugin,
         ))
+        // Set Bevy to Reactive Mode (saves battery, stops e-ink flashing)
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Reactive {
+                wait: std::time::Duration::from_secs(5),
+                react_to_device_events: true,
+                react_to_user_events: true,
+                react_to_window_events: true,
+            },
+            unfocused_mode: UpdateMode::Reactive {
+                wait: std::time::Duration::from_secs(60),
+                react_to_device_events: false,
+                react_to_user_events: true,
+                react_to_window_events: true,
+            },
+        })
         .register_typst_func::<TerminalFuncV3>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (update_terminal_render, update_cursor, handle_input, auto_scroll),
+            (
+                update_terminal_render,
+                sync_button_hitboxes.after(update_terminal_render),
+                handle_button_interactions,
+                handle_button_navigation,
+                update_cursor,
+                handle_input,
+                auto_scroll,
+            ),
         )
         .run();
+}
+
+#[derive(Component)]
+struct TerminalButtonHitbox(String); // Holds the button ID
+
+fn sync_button_hitboxes(
+    mut commands: Commands,
+    view_query: Query<(Entity, &VelystFrame), With<TerminalView>>,
+    existing_hitboxes: Query<Entity, With<TerminalButtonHitbox>>,
+) {
+    for (view_entity, frame) in view_query.iter() {
+        // 1. Clear old hitboxes
+        for entity in existing_hitboxes.iter() {
+            commands.entity(entity).despawn();
+        }
+
+        // 2. Extract links and spawn new hitboxes
+        if let Some(f) = &frame.0 {
+            let mut buttons = Vec::new();
+            extract_typst_links(f, Vec2::ZERO, &mut buttons);
+
+            for (id, rect) in buttons {
+                let hitbox = commands.spawn((
+                    TerminalButtonHitbox(id),
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(rect.min.x),
+                        top: Val::Px(rect.min.y),
+                        width: Val::Px(rect.width()),
+                        height: Val::Px(rect.height()),
+                        ..default()
+                    },
+                    Interaction::default(),
+                )).id();
+                commands.entity(view_entity).add_child(hitbox);
+            }
+        }
+    }
+}
+
+// Recursively walks the Typst layout tree to find FrameItem::Link
+fn extract_typst_links(
+    frame: &typst::layout::Frame,
+    offset: Vec2,
+    buttons: &mut Vec<(String, Rect)>
+) {
+    use typst::layout::FrameItem;
+    use typst::model::Destination;
+
+    for (p, item) in frame.items() {
+        let item_pos = offset + Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
+        
+        match item {
+            FrameItem::Link(dest, size) => {
+                if let Destination::Url(url) = dest {
+                    if let Some(id) = url.as_str().strip_prefix("btn:") {
+                        let width = size.x.to_pt() as f32;
+                        let height = size.y.to_pt() as f32;
+                        let rect = Rect::from_corners(item_pos, item_pos + Vec2::new(width, height));
+                        buttons.push((id.to_string(), rect));
+                    }
+                }
+            }
+            FrameItem::Group(group) => {
+                extract_typst_links(&group.frame, item_pos, buttons);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn handle_button_interactions(
+    mut q_func: Query<&mut TerminalFuncV3, With<TerminalView>>,
+    hitboxes: Query<(&Interaction, &TerminalButtonHitbox), Changed<Interaction>>,
+    emulator: ResMut<TerminalEmulator>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    for mut func in q_func.iter_mut() {
+        let mut writer_lock = emulator.writer.lock().expect("failed to lock writer");
+
+        // Mouse interactions
+        for (interaction, hitbox) in hitboxes.iter() {
+            match *interaction {
+                Interaction::Hovered => {
+                    if func.focused_btn.as_deref() != Some(&hitbox.0) {
+                        func.focused_btn = Some(hitbox.0.clone());
+                    }
+                }
+                Interaction::Pressed => {
+                    let cmd = format!("{}\n", hitbox.0);
+                    let _ = writer_lock.write_all(cmd.as_bytes());
+                    let _ = writer_lock.flush();
+                }
+                Interaction::None => {
+                    // Only clear if the mouse was actually on it and now moved off.
+                    // This avoids fighting with keyboard focus.
+                    if func.focused_btn.as_deref() == Some(&hitbox.0) && !keys.any_pressed([KeyCode::Tab, KeyCode::ArrowDown, KeyCode::ArrowUp]) {
+                        func.focused_btn = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn handle_button_navigation(
+    mut q_func: Query<&mut TerminalFuncV3, With<TerminalView>>,
+    hitboxes: Query<&TerminalButtonHitbox>,
+    keys: Res<ButtonInput<KeyCode>>,
+    emulator: ResMut<TerminalEmulator>,
+) {
+    let mut func = match q_func.get_single_mut() {
+        Ok(f) => f,
+        _ => return,
+    };
+
+    let mut buttons: Vec<String> = hitboxes.iter().map(|h| h.0.clone()).collect();
+    if buttons.is_empty() { return; }
+    buttons.sort(); // Deterministic order
+
+    if keys.just_pressed(KeyCode::Tab) {
+        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        
+        let current_idx = if let Some(focused) = &func.focused_btn {
+            buttons.iter().position(|b| b == focused)
+        } else {
+            None
+        };
+
+        let next_idx = match (current_idx, shift) {
+            (Some(idx), false) => (idx + 1) % buttons.len(),
+            (Some(idx), true) => (idx + buttons.len() - 1) % buttons.len(),
+            (None, false) => 0,
+            (None, true) => buttons.len() - 1,
+        };
+
+        func.focused_btn = Some(buttons[next_idx].clone());
+    }
+
+    if keys.just_pressed(KeyCode::Enter) {
+        if let Some(focused) = &func.focused_btn {
+            // Only trigger if actually a button cmd (check if it exists in current hitboxes)
+            if buttons.contains(focused) {
+                let mut writer_lock = emulator.writer.lock().expect("failed to lock writer");
+                let cmd = format!("{}\n", focused);
+                let _ = writer_lock.write_all(cmd.as_bytes());
+                let _ = writer_lock.flush();
+            }
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -970,70 +1142,50 @@ fn update_terminal_render(
 fn render_group(
     text: &str,
     style: (VteColor, VteColor, Flags),
-    is_comment_mode: bool,
+    _is_comment_mode: bool,
 ) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-    let (fg, bg, flags) = style;
+    let mut markup = String::new();
+    let mut rest = text;
 
-    let mut result = if is_comment_mode {
-        let mut markup = String::new();
-        let mut last_idx = 0;
-        let chars: Vec<char> = text.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '$' {
-                for j in i + 1..chars.len() {
-                    if chars[j] == '$' {
-                        let prev: String =
-                            chars[last_idx..i].iter().collect();
-                        if !prev.is_empty() {
-                            markup.push_str(&format!(
-                                "#raw(\"{}\")",
-                                prev.replace('\\', "\\\\")
-                                    .replace('\"', "\\\"")
-                            ));
-                        }
-                        let math: String =
-                            chars[i..j + 1].iter().collect();
-                        markup.push_str(&math.replace('#', "\\#"));
-                        i = j;
-                        last_idx = j + 1;
-                        break;
-                    }
-                }
-            }
-            i += 1;
+    // Helper to format standard text
+    let wrap_raw = |s: &str| -> String {
+        let safe_text = s.replace('\\', "\\\\").replace('\"', "\\\"");
+        let mut res = format!("#raw(\"{}\")", safe_text);
+        if style.2.contains(Flags::BOLD) {
+            res = format!("#strong[{}]", res);
         }
-        let remaining: String = chars[last_idx..].iter().collect();
-        if !remaining.is_empty() {
-            markup.push_str(&format!(
-                "#raw(\"{}\")",
-                remaining.replace('\\', "\\\\").replace('\"', "\\\"")
-            ));
-        }
-        markup
-    } else {
-        format!(
-            "#raw(\"{}\")",
-            text.replace('\\', "\\\\").replace('\"', "\\\"")
-        )
+        res
     };
 
-    if flags.contains(Flags::BOLD) {
-        result = format!("#strong[{}]", result);
+    // Parse [BTN:id:label]
+    while let Some(start) = rest.find("[BTN:") {
+        let prefix = &rest[..start];
+        if !prefix.is_empty() {
+            markup.push_str(&wrap_raw(prefix));
+        }
+
+        rest = &rest[start + 5..];
+        if let Some(mid) = rest.find(':') {
+            let id = &rest[..mid];
+            rest = &rest[mid + 1..];
+            if let Some(end) = rest.find(']') {
+                let label = &rest[..end];
+                rest = &rest[end + 1..];
+
+                // Inject the Typst button call
+                markup.push_str(&format!("#btn(\"{}\", \"{}\")", id, label));
+                continue;
+            }
+        }
+        // Fallback if malformed
+        markup.push_str(&wrap_raw("[BTN:"));
     }
-    if flags.contains(Flags::ITALIC) {
-        result = format!("#emph[{}]", result);
+
+    if !rest.is_empty() {
+        markup.push_str(&wrap_raw(rest));
     }
-    if let Some(bg_str) = color_to_typst(bg) {
-        result = format!("#highlight(fill: {})[{}]", bg_str, result);
-    }
-    if let Some(fg_str) = color_to_typst(fg) {
-        result = format!("#text(fill: {})[{}]", fg_str, result);
-    }
-    result
+
+    markup
 }
 
 fn update_cursor(
@@ -1160,5 +1312,10 @@ typst_func!(
     "final_terminal_fix",
     #[derive(Component, Default)]
     struct TerminalFuncV3 {},
-    positional_args { content: String },
+    positional_args {
+        content: String,
+    },
+    named_args {
+        focused_btn: String,
+    },
 );

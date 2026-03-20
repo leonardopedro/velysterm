@@ -1,0 +1,70 @@
+    Checking velyst v0.1.0 (/media/leo/e7ed9d6f-5f0a-4e19-a74e-83424bc154ba/velysterm)
+error[E0432]: unresolved import `typst::foundations::Destination`
+   --> examples/terminal.rs:111:9
+    |
+111 |     use typst::foundations::Destination;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `Destination` in `foundations`
+    |
+help: consider importing one of these enums instead
+    |
+111 -     use typst::foundations::Destination;
+111 +     use crate::model::Destination;
+    |
+111 -     use typst::foundations::Destination;
+111 +     use typst::model::Destination;
+    |
+111 -     use typst::foundations::Destination;
+111 +     use typst_element::prelude::model::Destination;
+    |
+111 -     use typst::foundations::Destination;
+111 +     use velyst::prelude::model::Destination;
+    |
+
+error[E0425]: cannot find value `VelloView` in this scope
+   --> examples/terminal.rs:208:31
+    |
+208 |     commands.spawn((Camera2d, VelloView));
+    |                               ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this unit struct
+    |
+  1 + use bevy_vello::prelude::VelloView;
+    |
+
+error[E0599]: no variant named `ReactiveLowPower` found for enum `UpdateMode`
+  --> examples/terminal.rs:40:41
+   |
+40 |             unfocused_mode: UpdateMode::ReactiveLowPower {
+   |                                         ^^^^^^^^^^^^^^^^ variant not found in `UpdateMode`
+
+error[E0599]: no method named `get_single` found for struct `bevy::prelude::Query<'world, 'state, D, F>` in the current scope
+  --> examples/terminal.rs:71:49
+   |
+71 |     let (view_entity, frame) = match view_query.get_single() {
+   |                                                 ^^^^^^^^^^
+   |
+   = note: the full name for the type has been written to '/media/leo/e7ed9d6f-5f0a-4e19-a74e-83424bc154ba/velysterm/target/debug/examples/terminal-1eb6530c95e4cd87.long-type-15324810386674853523.txt'
+   = note: consider using `--verbose` to print the full type name to the console
+help: there is a method `single` with a similar name
+   |
+71 -     let (view_entity, frame) = match view_query.get_single() {
+71 +     let (view_entity, frame) = match view_query.single() {
+   |
+
+error[E0599]: no method named `get_single_mut` found for struct `bevy::prelude::Query<'world, 'state, D, F>` in the current scope
+   --> examples/terminal.rs:140:33
+    |
+140 |     let mut func = match q_func.get_single_mut() {
+    |                                 ^^^^^^^^^^^^^^
+    |
+    = note: the full name for the type has been written to '/media/leo/e7ed9d6f-5f0a-4e19-a74e-83424bc154ba/velysterm/target/debug/examples/terminal-1eb6530c95e4cd87.long-type-3270062038354641468.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+help: there is a method `single_mut` with a similar name
+    |
+140 -     let mut func = match q_func.get_single_mut() {
+140 +     let mut func = match q_func.single_mut() {
+    |
+
+Some errors have detailed explanations: E0425, E0432, E0599.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `velyst` (example "terminal") due to 5 previous errors

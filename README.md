@@ -32,6 +32,47 @@ The Typst logic for anchoring the cursor and rendering the text can be found in:
 The Bevy application, which includes state management, fast prediction rendering, and the slow synchronization with the Velyst Typst renderer, is implemented in:
 - `examples/editor.rs`
 
+## E-Ink Specialized Shell
+
+A specialized version of the terminal designed for E-Ink displays with high-contrast aesthetics, reactive rendering to save battery, and interactive hitboxes using Typst hyperlinks.
+
+Implementation:
+- `examples/terminal.rs`
+- `assets/typst/term_v3.typ`
+
+### Features
+
+1.  **Reactive Rendering:** Only redraws when content changes or user input occurs, preventing screen flashing and saving battery.
+2.  **Interactive Buttons:** Supports a custom syntax to inject interactive buttons into the terminal stream.
+3.  **High Contrast:** Pure black and white styling, optimized for 1-bit displays.
+
+### How to Test Interactive Buttons
+
+1.  **Run the terminal:**
+    ```sh
+    cargo run --example terminal --features embed-fonts
+    ```
+2.  **Inject a button from the shell:**
+    Inside the terminal, type:
+    ```sh
+    echo "[BTN:ls -la:List All Files]"
+    ```
+    A button with the label "List All Files" will appear.
+3.  **Click the button:**
+    Clicking it will send the command `ls -la` to the shell.
+
+4.  **Try the Demo Script:**
+    ```sh
+    bash button_demo.sh
+    ```
+
+### How it works
+
+1.  The Rust code parses the `[BTN:id:label]` syntax and converts it to a Typst `#btn("id", "label")` call.
+2.  Typst renders the button and uses the native `#link("btn:id")[...]` function.
+3.  The Rust application reads the `VelystFrame`, extracts the hyperlink bounding box, and spawns a Bevy UI node exactly over it.
+4.  When the UI node is clicked, the ID is sent to the PTY's `stdin`.
+
 ## Compiling and Running the Editor
 
 To ensure a consistent and reproducible development environment, this project uses Nix.
