@@ -29,6 +29,8 @@ fn main() {
             }),
             bevy_vello::VelloPlugin::default(),
             velyst::VelystPlugin,
+            bevy::remote::RemotePlugin::default(),
+            bevy::remote::http::RemoteHttpPlugin::default(),
         ))
         // Set Bevy to Reactive Mode (saves battery, stops e-ink flashing)
         .insert_resource(WinitSettings {
@@ -47,23 +49,51 @@ fn main() {
         })
         .register_typst_func::<TerminalFuncV3>()
         .add_systems(Startup, setup)
+        .init_resource::<TerminalSelection>()
         .add_systems(
             Update,
             (
                 update_terminal_render,
-                sync_button_hitboxes.after(update_terminal_render),
                 handle_button_interactions,
                 handle_button_navigation,
-                update_cursor,
                 handle_input,
-                auto_scroll,
+            ),
+        )
+        .add_systems(
+            PostUpdate,
+            (
+                sync_button_hitboxes.after(VelystSet::Layout),
+                update_cursor.after(VelystSet::Layout),
+                auto_scroll.after(update_cursor),
             ),
         )
         .run();
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect, Default)]
+#[reflect(Component)]
 struct TerminalButtonHitbox(String); // Holds the button ID
+
+#[derive(Resource, Default)]
+struct TerminalSelection {
+    anchor: Option<alacritty_terminal::index::Point>,
+    cursor: Option<alacritty_terminal::index::Point>,
+    active: bool,
+}
+
+impl TerminalSelection {
+    fn is_in_selection(
+        &self,
+        p: alacritty_terminal::index::Point,
+    ) -> bool {
+        if let (Some(a), Some(c)) = (self.anchor, self.cursor) {
+            let (start, end) = if a <= c { (a, c) } else { (c, a) };
+            p >= start && p <= end
+        } else {
+            false
+        }
+    }
+}
 
 fn sync_button_hitboxes(
     mut commands: Commands,
@@ -82,18 +112,20 @@ fn sync_button_hitboxes(
             extract_typst_links(f, Vec2::ZERO, &mut buttons);
 
             for (id, rect) in buttons {
-                let hitbox = commands.spawn((
-                    TerminalButtonHitbox(id),
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(rect.min.x),
-                        top: Val::Px(rect.min.y),
-                        width: Val::Px(rect.width()),
-                        height: Val::Px(rect.height()),
-                        ..default()
-                    },
-                    Interaction::default(),
-                )).id();
+                let hitbox = commands
+                    .spawn((
+                        TerminalButtonHitbox(id),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(rect.min.x),
+                            top: Val::Px(rect.min.y),
+                            width: Val::Px(rect.width()),
+                            height: Val::Px(rect.height()),
+                            ..default()
+                        },
+                        Interaction::default(),
+                    ))
+                    .id();
                 commands.entity(view_entity).add_child(hitbox);
             }
         }
@@ -104,21 +136,27 @@ fn sync_button_hitboxes(
 fn extract_typst_links(
     frame: &typst::layout::Frame,
     offset: Vec2,
-    buttons: &mut Vec<(String, Rect)>
+    buttons: &mut Vec<(String, Rect)>,
 ) {
     use typst::layout::FrameItem;
     use typst::model::Destination;
 
     for (p, item) in frame.items() {
-        let item_pos = offset + Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
-        
+        let item_pos = offset
+            + Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
+
         match item {
             FrameItem::Link(dest, size) => {
                 if let Destination::Url(url) = dest {
-                    if let Some(id) = url.as_str().strip_prefix("btn:") {
+                    if let Some(id) =
+                        url.as_str().strip_prefix("btn:")
+                    {
                         let width = size.x.to_pt() as f32;
                         let height = size.y.to_pt() as f32;
-                        let rect = Rect::from_corners(item_pos, item_pos + Vec2::new(width, height));
+                        let rect = Rect::from_corners(
+                            item_pos,
+                            item_pos + Vec2::new(width, height),
+                        );
                         buttons.push((id.to_string(), rect));
                     }
                 }
@@ -133,18 +171,23 @@ fn extract_typst_links(
 
 fn handle_button_interactions(
     mut q_func: Query<&mut TerminalFuncV3, With<TerminalView>>,
-    hitboxes: Query<(&Interaction, &TerminalButtonHitbox), Changed<Interaction>>,
+    hitboxes: Query<
+        (&Interaction, &TerminalButtonHitbox),
+        Changed<Interaction>,
+    >,
     emulator: ResMut<TerminalEmulator>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
     for mut func in q_func.iter_mut() {
-        let mut writer_lock = emulator.writer.lock().expect("failed to lock writer");
+        let mut writer_lock =
+            emulator.writer.lock().expect("failed to lock writer");
 
         // Mouse interactions
         for (interaction, hitbox) in hitboxes.iter() {
             match *interaction {
                 Interaction::Hovered => {
-                    if func.focused_btn.as_deref() != Some(&hitbox.0) {
+                    if func.focused_btn.as_deref() != Some(&hitbox.0)
+                    {
                         func.focused_btn = Some(hitbox.0.clone());
                     }
                 }
@@ -156,7 +199,13 @@ fn handle_button_interactions(
                 Interaction::None => {
                     // Only clear if the mouse was actually on it and now moved off.
                     // This avoids fighting with keyboard focus.
-                    if func.focused_btn.as_deref() == Some(&hitbox.0) && !keys.any_pressed([KeyCode::Tab, KeyCode::ArrowDown, KeyCode::ArrowUp]) {
+                    if func.focused_btn.as_deref() == Some(&hitbox.0)
+                        && !keys.any_pressed([
+                            KeyCode::Tab,
+                            KeyCode::ArrowDown,
+                            KeyCode::ArrowUp,
+                        ])
+                    {
                         func.focused_btn = None;
                     }
                 }
@@ -171,18 +220,23 @@ fn handle_button_navigation(
     keys: Res<ButtonInput<KeyCode>>,
     emulator: ResMut<TerminalEmulator>,
 ) {
-    let mut func = match q_func.get_single_mut() {
-        Ok(f) => f,
-        _ => return,
+    let mut func = if let Some(f) = q_func.iter_mut().next() {
+        f
+    } else {
+        return;
     };
 
-    let mut buttons: Vec<String> = hitboxes.iter().map(|h| h.0.clone()).collect();
-    if buttons.is_empty() { return; }
+    let mut buttons: Vec<String> =
+        hitboxes.iter().map(|h| h.0.clone()).collect();
+    if buttons.is_empty() {
+        return;
+    }
     buttons.sort(); // Deterministic order
 
     if keys.just_pressed(KeyCode::Tab) {
-        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-        
+        let shift = keys.pressed(KeyCode::ShiftLeft)
+            || keys.pressed(KeyCode::ShiftRight);
+
         let current_idx = if let Some(focused) = &func.focused_btn {
             buttons.iter().position(|b| b == focused)
         } else {
@@ -191,7 +245,9 @@ fn handle_button_navigation(
 
         let next_idx = match (current_idx, shift) {
             (Some(idx), false) => (idx + 1) % buttons.len(),
-            (Some(idx), true) => (idx + buttons.len() - 1) % buttons.len(),
+            (Some(idx), true) => {
+                (idx + buttons.len() - 1) % buttons.len()
+            }
             (None, false) => 0,
             (None, true) => buttons.len() - 1,
         };
@@ -203,7 +259,10 @@ fn handle_button_navigation(
         if let Some(focused) = &func.focused_btn {
             // Only trigger if actually a button cmd (check if it exists in current hitboxes)
             if buttons.contains(focused) {
-                let mut writer_lock = emulator.writer.lock().expect("failed to lock writer");
+                let mut writer_lock = emulator
+                    .writer
+                    .lock()
+                    .expect("failed to lock writer");
                 let cmd = format!("{}\n", focused);
                 let _ = writer_lock.write_all(cmd.as_bytes());
                 let _ = writer_lock.flush();
@@ -226,10 +285,12 @@ impl EventListener for DummyListener {
     fn send_event(&self, _event: Event) {}
 }
 
-#[derive(Component)]
+#[derive(Component, Reflect, Default)]
+#[reflect(Component)]
 struct TerminalView;
 
-#[derive(Component)]
+#[derive(Component, Reflect, Default)]
+#[reflect(Component)]
 struct Cursor;
 
 struct TermSize {
@@ -273,7 +334,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .try_clone_reader()
         .expect("failed to clone reader");
 
-    let dims = TermSize { cols: 120, rows: 24 };
+    let dims = TermSize {
+        cols: 120,
+        rows: 24,
+    };
     let term = Term::new(Config::default(), &dims, DummyListener);
     let term = Arc::new(Mutex::new(term));
     let writer = Arc::new(Mutex::new(writer));
@@ -744,8 +808,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                                         *cnt
                                     };
 
-                                    let marker_text =
-                                        format!("#{}", rfc1751::u64_to_rfc1751(solid_id as u64));
+                                    let marker_text = format!(
+                                        "#{}",
+                                        rfc1751::u64_to_rfc1751(
+                                            solid_id as u64
+                                        )
+                                    );
                                     let mut w_l =
                                         writer_clone.lock().unwrap();
 
@@ -848,7 +916,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                     ..default()
                 },
                 BackgroundColor(bevy::prelude::Color::srgba(
-                    1.0, 1.0, 1.0, 0.5,
+                    0.0, 0.0, 0.0, 0.0,
                 )),
                 ZIndex(2),
             ));
@@ -902,6 +970,7 @@ fn update_terminal_render(
     emulator: Res<TerminalEmulator>,
     keys: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut TerminalFuncV3, With<TerminalView>>,
+    selection: Res<TerminalSelection>,
 ) {
     let term_lock =
         emulator.term.lock().expect("failed to lock terminal");
@@ -921,10 +990,15 @@ fn update_terminal_render(
     for row_idx in 0..total_lines {
         // Alacritty line indexing: 0 is the top of scrollback.
         // Screen lines start after scrollback.
-        let line_idx = Line(-(grid.history_size() as i32) + row_idx as i32);
+        let line_idx =
+            Line(-(grid.history_size() as i32) + row_idx as i32);
         let row = &grid[line_idx];
-        let mut current_styles: Option<(VteColor, VteColor, Flags)> =
-            None;
+        let mut current_styles: Option<(
+            VteColor,
+            VteColor,
+            Flags,
+            bool,
+        )> = None;
         let mut group_text = String::new();
         let mut comment_seen = false;
 
@@ -948,7 +1022,7 @@ fn update_terminal_render(
             if c != ' ' {
                 line_has_content = true;
             }
-            
+
             let mut hidden_len = 0;
             // ... (keep marker hiding logic) ...
             if c == '#' {
@@ -1037,21 +1111,32 @@ fn update_terminal_render(
                 }
             }
 
-            if cursor_on_this_line
-                && col_idx == cursor_p.column.0
-            {
+            if cursor_on_this_line && col_idx == cursor_p.column.0 {
                 if let Some(current) = current_styles {
-                    final_markup.push_str(&render_group(
-                        &group_text,
-                        current,
-                        comment_seen,
-                    ));
+                    final_markup.push_str(
+                        &render_group_with_selection(
+                            &group_text,
+                            current,
+                            comment_seen,
+                        ),
+                    );
                     group_text.clear();
                 }
-                // Inject zero-width cursor marker
-                final_markup.push_str(
-                    "#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]",
-                );
+                // Marker for tracking
+                final_markup.push_str("#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]");
+
+                // Render CURRENT character 'c' with inverted block cursor
+                let safe_c = c
+                    .to_string()
+                    .replace('\\', "\\\\")
+                    .replace('\"', "\\\"");
+                final_markup.push_str(&format!(
+                    "#box(fill: white, outset: (y: 5pt), inset: 0pt)[#text(fill: black)[#raw(\"{}\")]]",
+                    safe_c
+                ));
+
+                col_idx += 1;
+                continue;
             }
 
             if hidden_len > 0 {
@@ -1060,16 +1145,18 @@ fn update_terminal_render(
                     && cursor_p.column.0 < col_idx + hidden_len
                 {
                     if let Some(current) = current_styles {
-                        final_markup.push_str(&render_group(
-                            &group_text,
-                            current,
-                            comment_seen,
-                        ));
+                        final_markup.push_str(
+                            &render_group_with_selection(
+                                &group_text,
+                                current,
+                                comment_seen,
+                            ),
+                        );
                         group_text.clear();
                     }
-                    final_markup.push_str(
-                        "#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]",
-                    );
+                    final_markup.push_str("#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]");
+                    // Inside hidden ranges, just show the block
+                    final_markup.push_str("#box(fill: white, outset: (y: 5pt), inset: 0pt)[#h(0.6em)]");
                 }
                 col_idx += hidden_len;
                 continue;
@@ -1080,18 +1167,25 @@ fn update_terminal_render(
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
-            let style = (fg, bg, cell.flags);
+            let p = alacritty_terminal::index::Point::new(
+                line_idx,
+                alacritty_terminal::index::Column(col_idx),
+            );
+            let is_selected = selection.is_in_selection(p);
+            let style = (fg, bg, cell.flags, is_selected);
             let hitting_first_hash = !comment_seen && c == '#';
 
             if let Some(current) = current_styles {
                 if current == style && !hitting_first_hash {
                     group_text.push(c);
                 } else {
-                    final_markup.push_str(&render_group(
-                        &group_text,
-                        current,
-                        comment_seen,
-                    ));
+                    final_markup.push_str(
+                        &render_group_with_selection(
+                            &group_text,
+                            current,
+                            comment_seen,
+                        ),
+                    );
                     if hitting_first_hash {
                         comment_seen = true;
                     }
@@ -1108,18 +1202,36 @@ fn update_terminal_render(
             col_idx += 1;
         }
 
+        // Handle cursor at the very end of the line
+        if cursor_on_this_line && col_idx == cursor_p.column.0 {
+            if let Some(current) = current_styles {
+                final_markup.push_str(&render_group_with_selection(
+                    &group_text,
+                    current,
+                    comment_seen,
+                ));
+                group_text.clear();
+                current_styles = None;
+            }
+            final_markup.push_str("#box(width: 0pt, height: 0pt, fill: rgb(255, 0, 255))[]");
+            final_markup.push_str("#box(fill: white, outset: (y: 5pt), inset: 0pt)[#h(0.6em)]");
+        }
+
         // Only emit the line if it has content or the cursor is on it.
         // This makes the terminal behave like a 1D stream that only exists where text is.
         if line_has_content || cursor_on_this_line {
             // Check if wrapping to next line
             if grid.columns() > 0 {
-                if row[Column(grid.columns() - 1)].flags.contains(Flags::WRAPLINE) {
+                if row[Column(grid.columns() - 1)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+                {
                     is_wrapped = true;
                 }
             }
 
             if let Some(current) = current_styles {
-                final_markup.push_str(&render_group(
+                final_markup.push_str(&render_group_with_selection(
                     &group_text,
                     current,
                     comment_seen,
@@ -1137,6 +1249,75 @@ fn update_terminal_render(
             func.content = final_markup.clone();
         }
     }
+}
+
+fn render_group_with_selection(
+    text: &str,
+    style: (
+        alacritty_terminal::vte::ansi::Color,
+        alacritty_terminal::vte::ansi::Color,
+        Flags,
+        bool, // is_selected
+    ),
+    is_comment: bool,
+) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let (fg, bg, flags, is_selected) = style;
+    let base = render_group(text, (fg, bg, flags), is_comment);
+    if is_selected {
+        format!(
+            "#box(fill: rgb(173, 214, 255, 50%), outset: (y: 5pt), inset: 0pt)[{}]",
+            base
+        )
+    } else {
+        base
+    }
+}
+
+fn get_selected_text(
+    term: &alacritty_terminal::term::Term<DummyListener>,
+    anchor: alacritty_terminal::index::Point,
+    cursor: alacritty_terminal::index::Point,
+) -> String {
+    let (start, end) = if anchor <= cursor {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    };
+    let mut result = String::new();
+    let grid = term.grid();
+    for line_idx_val in start.line.0..=end.line.0 {
+        if line_idx_val < -(grid.history_size() as i32)
+            || line_idx_val >= grid.total_lines() as i32
+        {
+            continue;
+        }
+        let line = alacritty_terminal::index::Line(line_idx_val);
+        let start_col = if line == start.line {
+            start.column.0
+        } else {
+            0
+        };
+        let end_col = if line == end.line {
+            end.column.0
+        } else {
+            grid.columns() - 1
+        };
+        let row = &grid[line];
+        for col_idx in start_col..=end_col {
+            if col_idx < grid.columns() {
+                result.push(
+                    row[alacritty_terminal::index::Column(col_idx)].c,
+                );
+            }
+        }
+        if line_idx_val < end.line.0 {
+            result.push('\n');
+        }
+    }
+    result
 }
 
 fn render_group(
@@ -1173,7 +1354,10 @@ fn render_group(
                 rest = &rest[end + 1..];
 
                 // Inject the Typst button call
-                markup.push_str(&format!("#btn(\"{}\", \"{}\")", id, label));
+                markup.push_str(&format!(
+                    "#btn(\"{}\", \"{}\")",
+                    id, label
+                ));
                 continue;
             }
         }
@@ -1192,12 +1376,14 @@ fn update_cursor(
     view_query: Query<(&VelystFrame,), With<TerminalView>>,
     mut cursor_query: Query<&mut Node, With<Cursor>>,
 ) {
-    for frame in &view_query {
+    for (frame,) in &view_query {
         for mut cursor_node in &mut cursor_query {
-            if let Some(f) = &frame.0.0 {
+            if let Some(f) = &frame.0 {
+                // Find the integrated magenta marker for precise auto-scrolling
                 if let Some(pos) = find_marker_position(f, Vec2::ZERO)
                 {
                     cursor_node.left = Val::Px(pos.x);
+                    // Standardize height offset relative to 20pt line metrics
                     cursor_node.top = Val::Px(pos.y - 19.5);
                 }
             }
@@ -1240,12 +1426,138 @@ fn find_marker_position(
 fn handle_input(
     emulator: ResMut<TerminalEmulator>,
     mut keyboard_evr: MessageReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut selection: ResMut<TerminalSelection>,
 ) {
     let mut writer_lock =
         emulator.writer.lock().expect("failed to lock writer");
+    let term_lock =
+        emulator.term.lock().expect("failed to lock terminal");
+
+    let shift = keys.pressed(KeyCode::ShiftLeft)
+        || keys.pressed(KeyCode::ShiftRight);
+    let ctrl = keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight);
 
     for ev in keyboard_evr.read() {
         if ev.state == bevy::input::ButtonState::Pressed {
+            // Handle Selection with Shift + Arrows
+            let is_selection_arrow = match ev.key_code {
+                KeyCode::ArrowUp
+                | KeyCode::ArrowDown
+                | KeyCode::ArrowLeft
+                | KeyCode::ArrowRight => true,
+                _ => false,
+            };
+
+            if shift && !ctrl && is_selection_arrow {
+                let grid = term_lock.grid();
+                let cursor_p = grid.cursor.point;
+
+                if selection.anchor.is_none() {
+                    selection.anchor = Some(cursor_p);
+                }
+
+                let mut current =
+                    selection.cursor.unwrap_or(cursor_p);
+                match ev.key_code {
+                    KeyCode::ArrowUp => {
+                        if current.line.0
+                            > -(grid.history_size() as i32)
+                        {
+                            current.line.0 -= 1;
+                        }
+                    }
+                    KeyCode::ArrowDown => {
+                        if current.line.0
+                            < grid.total_lines() as i32 - 1
+                        {
+                            current.line.0 += 1;
+                        }
+                    }
+                    KeyCode::ArrowLeft => {
+                        if current.column.0 > 0 {
+                            current.column.0 -= 1;
+                        } else if current.line.0
+                            > -(grid.history_size() as i32)
+                        {
+                            current.line.0 -= 1;
+                            current.column.0 = grid.columns() - 1;
+                        }
+                    }
+                    KeyCode::ArrowRight => {
+                        if current.column.0 < grid.columns() - 1 {
+                            current.column.0 += 1;
+                        } else if current.line.0
+                            < grid.total_lines() as i32 - 1
+                        {
+                            current.line.0 += 1;
+                            current.column.0 = 0;
+                        }
+                    }
+                    _ => {}
+                }
+                selection.cursor = Some(current);
+                selection.active = true;
+                continue;
+            }
+
+            // Handle Ctrl + V (Paste)
+            if ctrl && ev.key_code == KeyCode::KeyV {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() {
+                        let _ =
+                            writer_lock.write_all(text.as_bytes());
+                    }
+                }
+                continue;
+            }
+
+            // Handle Ctrl + C (Copy if selection active, else send ^C)
+            if ctrl && ev.key_code == KeyCode::KeyC {
+                if selection.active {
+                    if let (Some(a), Some(c)) =
+                        (selection.anchor, selection.cursor)
+                    {
+                        let text =
+                            get_selected_text(&term_lock, a, c);
+                        if let Ok(mut clipboard) =
+                            arboard::Clipboard::new()
+                        {
+                            let _ = clipboard.set_text(text);
+                        }
+                        continue;
+                    }
+                } else {
+                    let _ = writer_lock.write_all(b"\x03");
+                    continue;
+                }
+            }
+
+            // Regular typing clears selection if it's not a selection arrow, clipboard action, or modifier key
+            let is_clipboard_action = ctrl
+                && (ev.key_code == KeyCode::KeyC
+                    || ev.key_code == KeyCode::KeyV);
+            let is_modifier = matches!(
+                ev.key_code,
+                KeyCode::ShiftLeft
+                    | KeyCode::ShiftRight
+                    | KeyCode::ControlLeft
+                    | KeyCode::ControlRight
+                    | KeyCode::AltLeft
+                    | KeyCode::AltRight
+                    | KeyCode::SuperLeft
+                    | KeyCode::SuperRight
+            );
+            if !is_selection_arrow
+                && !is_clipboard_action
+                && !is_modifier
+            {
+                selection.active = false;
+                selection.anchor = None;
+                selection.cursor = None;
+            }
+
             if let Some(ref text) = ev.text {
                 let _ = writer_lock.write_all(text.as_bytes());
             } else {
@@ -1290,7 +1602,7 @@ fn auto_scroll(
         return;
     };
     let win_h = window.height();
-    
+
     if let Some(cursor_node) = q_cursor.iter().next() {
         if let Val::Px(top) = cursor_node.top {
             // Leave some room at the bottom
@@ -1299,7 +1611,7 @@ fn auto_scroll(
             } else {
                 0.0
             };
-            
+
             if let Some(mut view_node) = q_view.iter_mut().next() {
                 // Smooth-ish scroll by just updating
                 view_node.top = Val::Px(target_top);
@@ -1310,11 +1622,10 @@ fn auto_scroll(
 
 typst_func!(
     "final_terminal_fix",
-    #[derive(Component, Default)]
+    #[derive(Component, Default, Reflect)]
+    #[reflect(Component)]
     struct TerminalFuncV3 {},
-    positional_args {
-        content: String,
-    },
+    positional_args { content: String },
     named_args {
         focused_btn: String,
     },
