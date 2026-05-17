@@ -3,5 +3,5 @@ fn main() {
     println!("{:?}", Flags::BOLD);
     println!("{:?}", Flags::ITALIC);
     println!("{:?}", Flags::INVERSE);
-    println!("{:?}", Flags::WRAP);
+    println!("{:?}", Flags::WRAPLINE);
 }

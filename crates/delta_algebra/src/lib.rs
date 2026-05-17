@@ -233,7 +233,7 @@ impl DeltaAlgebraEngine {
             sender.send(v).expect("Failed to send map result");
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         receiver
             .await
             .expect("Failed to receive map result")
