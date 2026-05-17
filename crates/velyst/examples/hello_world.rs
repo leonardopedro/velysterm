@@ -25,17 +25,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         VelloView,
     ));
 
-    // let debug_bg = BackgroundColor(Srgba::RED.with_alpha(0.2).into());
-    let debug_bg = BackgroundColor::DEFAULT;
-
     commands.spawn((
-        debug_bg,
-        VelystFuncBundle {
-            handle: VelystSourceHandle(
-                asset_server.load("typst/hello_world.typ"),
-            ),
-            func: MainFunc::default(),
-        },
+        VelystFunc::new(
+            asset_server.load("typst/hello_world.typ"),
+            MainFunc::default(),
+        ),
+        UiScene,
         Node {
             width: percent(100.0),
             height: percent(100.0),
@@ -45,18 +40,18 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 fn main_func(
-    mut func: Query<&mut MainFunc>,
+    mut q_func: Query<&mut VelystFunc<MainFunc>>,
     time: Res<Time>,
 ) -> Result {
-    let mut func = func.single_mut()?;
-    func.animate = time.elapsed_secs_f64();
+    let mut func = q_func.single_mut()?;
+    func.data.animate = time.elapsed_secs_f64();
 
     Ok(())
 }
 
 typst_func!(
     "main",
-    #[derive(Component, Default)]
+    #[derive(Default)]
     struct MainFunc {},
     positional_args { animate: f64 },
 );
