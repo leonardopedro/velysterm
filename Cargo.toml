@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "crates/delta_sirk", "crates/nested_fock_algebra"]
+members = ["crates/*", "crates/delta_sirk"]
 
 [workspace.package]
 version = "0.1.0"
