@@ -1,0 +1,16 @@
+[package]
+name = "mathed_core"
+description = "Document model for the mathed editor: Loro-backed source text with hidden semantic markers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+loro = { workspace = true }
+thiserror = { workspace = true }
+typst = { workspace = true }
+unicode-math-class = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,135 @@
+# mathed — Design
+
+A math-specialized editor. Its purpose is not just typesetting math but
+*defining* it: every notation can carry machine-readable semantics. Not a
+terminal emulator — but it adapts algorithms from the `foot` terminal and
+reuses this repo's velyst/typst rendering pipeline.
+
+## Document model (the core idea)
+
+The source of truth is **one Loro `LoroText`** (`MathDoc`,
+`crates/mathed_core/src/doc.rs`) holding Typst-flavored source extended
+with two hidden token kinds (`crates/mathed_core/src/markers.rs`):
+
+- **Markers** `#<id>`, id starting with a digit (`#1`, `#2`, `#3fx`).
+  Digit-start ids can never collide with Typst code (`#set`, `#strong`,
+  ...) because Typst identifiers cannot start with a digit. A marker is a
+  zero-width anchor; because it is *text*, it moves with edits for free —
+  no overlay synchronization problem.
+- **Property statements** `\name(args...)`, e.g. `\function(#1,#2)`,
+  `\bold(#3,#4)`, `\def(#5,#6, group)`. A statement whose first two args
+  are marker refs defines a **segment**: the text between the two markers
+  carries the property. This is the textual form of Loro/Peritext
+  start/finish segments; on save, segments are mirrored into `LoroText`
+  marks (`mark_utf8`, key `prop:<name>`, ExpandType::None) so the Loro
+  document itself carries the semantics.
+
+Property kinds (`PropKind`): visual (`bold`/`italic`/`underline` —
+applied at render time) and semantic (`function`, `def`, `var`, `ref`,
+`statement` — populate the semantic index; v1 semantics = resolved
+references, no type checking, but `statement`/`def` leave room for a
+formal layer later).
+
+## Render pipeline
+
+```
+input → MathDoc (LoroText, byte-offset edits, UndoManager)
+      → markers::scan + resolve_segments
+      → transform::to_render_text          (doc text → valid Typst)
+      → typst Source (stable FileId, Source::replace)
+      → VelystWorld::eval_source → Module::content() → VelystContent
+      → velyst PostUpdate systems: layout_ui_content → VelystFrame
+      → typst_imaging/vello scene on the UiScene entity
+```
+
+`transform::to_render_text` (crates/mathed_core/src/transform.rs):
+- hides marker/statement tokens (+ one trailing space, exactly like the
+  marker hiding in `velyst/examples/terminal.rs:1028-1111`) unless the
+  caret/selection touches them or the show-hidden chord (Ctrl+Shift) is
+  held;
+- revealed tokens are emitted with Typst escapes (`\#`, `\\`) so they
+  display literally instead of executing;
+- visual segments wrap each uniform visible run in `#strong[..]` /
+  `#emph[..]` / `#underline[..]`; runs inside `$..$` are left unwrapped
+  in v1 (math styling needs different wrappers — future work);
+- returns an `OffsetMap` of verbatim copy-spans for bidirectional
+  doc↔render byte mapping (caret, click). On exact span boundaries the
+  *later* span wins so a caret after a hidden token lands after it.
+
+The editor bypasses velyst's asset/`typst_func!` machinery (which is
+.typ-asset-driven) and calls `VelystWorld::eval_source` /
+`layout_frame` directly with a self-owned `Source` — spans in the laid
+out frame are resolved against that same `Source` object, never via
+world file slots.
+
+Known limitation inherited from velyst (`world.rs:183`): `layout_frame`
+does not loop introspection, so Typst counters/state/refs are unreliable.
+Numbering must be editor-computed and injected (see Blocks below).
+
+## Loro specifics (verified against loro 1.13.1)
+
+- `insert_utf8` / `delete_utf8` / `mark_utf8` take UTF-8 byte offsets —
+  no char↔byte bridging needed. A mirror `String` is kept for reads and
+  validated against loro in debug builds.
+- `config_default_text_style(Some(StyleConfig { expand: ExpandType::None }))`
+  is required before using arbitrary mark keys.
+- Undo/redo via `UndoManager` (merge interval 400 ms); the text change is
+  recovered as a minimal `ByteDelta` by prefix/suffix diff (cheap, and
+  also restores marks). Event-subscription deltas only become necessary
+  for network sync, which is out of scope for v1 (Loro is the data model
+  + file format: `doc.export(Snapshot)`).
+
+## foot algorithm adaptations (planned, see TASKS.md)
+
+| foot | mathed |
+|---|---|
+| per-row dirty flags + pixman damage (render.c:3225+) | per-block dirty set; only dirty blocks re-eval; clean blocks keep their stale-but-valid `VelystFrame` (Bevy `Changed<>` gives region damage for free) |
+| two-tier refresh/pending + delayed render timer (render.c:5134-5205) | `Scheduler` resource: damage accumulates; lower bound ~8-30 ms batches keystrokes (foot uses 0.5 ms/half-frame because its render is µs-scale; typst eval is ms-scale), upper bound forces a fire mid-burst; overlay damage (caret) never deferred |
+| word-boundary walk (selection.c:346-528) | same walk-while-class-constant algorithm; char classes from `unicode-math-class` in math; segments/marker tokens are atomic "words" |
+| incremental search (search.c:269-620) | case-fold iff query lowercase, start-from-last-match, match iterator drawn as overlay rects |
+
+## Block model (H2, not yet implemented)
+
+Split the doc at blank-line runs and before `=`-headings (suspended
+while `$` math is open). Each block gets its own persistent `Source`
+(`/__block_<id>.typ`) = generated prelude + block text, its own
+`UiScene` entity in a flex column, and a dirty flag. Block boundaries
+are derived data recomputed by local rescan around each edit; block
+identity matched by (order, fingerprint) so unchanged blocks keep their
+entity and frame. Heading numbers are computed by the editor and
+injected into the prelude as literals.
+
+## Crate layout
+
+- `crates/mathed_core` — no Bevy. `doc` (MathDoc), `markers` (scan /
+  segments), `transform` (render text + OffsetMap). Planned: `blocks`,
+  `semantics`, `search`, `wordnav`, `format`, `prelude_gen`.
+- `crates/mathed` — Bevy binary. `main.rs` (app, input, recompile,
+  caret), `glyphs.rs` (interim span-walk; to be replaced by the cached
+  `GlyphIndex` with real font metrics). Planned: `scheduler`,
+  `blocks_view`, `overlay`, `popup`, `search_sys`, `files`.
+
+## Status
+
+- **M0 done**: workspace + `mathed_core` (22 unit tests green: doc,
+  markers, transform).
+- **M1 done**: runnable single-block editor — typing, caret,
+  click-to-position, shift/drag selection, marker hide/reveal-on-caret,
+  Ctrl+Shift show-hidden, Ctrl+B/Ctrl+U visual segments, Ctrl+F(unction)
+  semantic segment, undo/redo, Ctrl+S snapshot save (`.mathed` = loro
+  snapshot; segments mirrored to loro marks on save).
+- Next milestones: M2 blocks+damage (H2), M3 scheduler (H3), M4
+  GlyphIndex+selection overlays (H5), M5 semantics/resolver+rename+
+  go-to-def (H4), M6 search, M7 IME/polish. Hard tasks H2-H5 are for a
+  strong model; the self-contained leaf tasks are specified in
+  `TASKS.md` for a smaller model.
+
+## Risks / open questions
+
+- Visual properties inside math are not styled yet (needs `bold()` /
+  `class(..)` wrappers with syntactic validity checks).
+- Marks accumulate on save without garbage collection of stale segment
+  marks (markers deleted after a save); needs an unmark pass (H4).
+- `comemo::evict(4)` per frame in velyst's renderer may evict too
+  aggressively once many block sources exist — measure in M2.
+- Bevy IME (`Ime::Preedit/Commit`) not wired yet; plain keyboard works.

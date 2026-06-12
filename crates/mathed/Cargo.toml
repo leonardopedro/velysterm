@@ -1,0 +1,18 @@
+[package]
+name = "mathed"
+description = "Math-semantics editor: Loro document, hidden markers, Typst rendering."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mathed_core = { workspace = true }
+velyst = { path = "../velyst", version = "0.1.0" }
+bevy = { workspace = true }
+bevy_vello = { workspace = true }
+typst = { workspace = true }
+arboard = "3.6.1"
+
+[lints]
+workspace = true
