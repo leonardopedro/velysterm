@@ -15,6 +15,7 @@
 //! - [`transform`]: doc text → renderable Typst markup with hiding,
 //!   reveal-on-caret, visual wrapping and a bidirectional offset map.
 
+pub mod accessibility;
 pub mod blocks;
 pub mod doc;
 pub mod format;
@@ -24,6 +25,9 @@ pub mod semantics;
 pub mod transform;
 pub mod wordnav;
 
+pub use accessibility::{
+    build_access_nodes, describe_segment, AccessNode, AccessRole,
+};
 pub use doc::{ByteDelta, DocError, MathDoc, ReplaceOp};
 pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, Segment,

@@ -1,0 +1,37 @@
+[package]
+name = "mathed_mini"
+description = "Minimal, Bevy-free math editor frontend: typst_imaging (CPU) renderer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mathed_core = { path = "../mathed_core" }
+typst_imaging = { workspace = true }
+
+typst = { workspace = true }
+typst-library = { workspace = true }
+typst-eval = { workspace = true }
+typst-assets = { workspace = true, features = ["fonts"] }
+
+# CPU rasterizer (software vello) + the shared RGBA8 image type. No GPU, so the
+# renderer runs on constrained hardware.
+imaging = { workspace = true, features = ["std"] }
+imaging_vello_cpu = { git = "https://github.com/forest-rs/imaging", rev = "79f02ae", features = ["std"] }
+
+# Optional lightweight windowing — kept behind the `gui` feature so the render
+# core stays headless-capable. winit 0.30 matches the one Bevy already pulls.
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+
+[features]
+default = ["gui"]
+gui = ["dep:winit", "dep:softbuffer"]
+
+[[bin]]
+name = "mathed_mini"
+required-features = ["gui"]
+
+[lints]
+workspace = true
