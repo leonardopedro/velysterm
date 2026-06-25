@@ -278,13 +278,11 @@ mod tests {
 
     #[test]
     fn operator_break_in_math() {
-        let text = "x+y";
         // In math, + is an Operator, x and y are Word.
         assert!(is_in_math("$x+y$", 2));
-        // Test with explicit math context.
-        let text2 = "$x+y$";
-        assert_eq!(word_boundary_left(text2, 3, &[]), 2);
-        assert_eq!(word_boundary_right(text2, 2, &[]), 3);
+        let text = "$x+y$";
+        assert_eq!(word_boundary_left(text, 3, &[]), 2);
+        assert_eq!(word_boundary_right(text, 2, &[]), 3);
     }
 
     #[test]

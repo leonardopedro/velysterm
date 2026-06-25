@@ -1,14 +1,13 @@
 use bevy::prelude::*;
 use bevy_vello::prelude::*;
-use velyst::prelude::*;
-use velyst::typst::syntax::{FileId, Source, VirtualPath};
 use mathed_core::blocks::BlockId;
 use mathed_core::{OffsetMap, RenderOutput};
 use std::collections::HashMap;
+use velyst::prelude::*;
+use velyst::typst::syntax::{FileId, Source, VirtualPath};
 
-pub const PRELUDE: &str = r#"\set text(font: "DejaVu Sans", size: 12pt)
-#set page(width: 100%, height: auto)
-"#;
+pub const PRELUDE: &str = "#set text(font: \"DejaVu Sans\", size: 12pt)\n\
+    #set page(width: 100%, height: auto)\n";
 
 #[derive(Component)]
 pub struct BlockView {
@@ -32,7 +31,10 @@ impl Blocks {
         &self.index.blocks
     }
 
-    pub fn block_for_cursor(&self, cursor: usize) -> Option<&mathed_core::blocks::Block> {
+    pub fn block_for_cursor(
+        &self,
+        cursor: usize,
+    ) -> Option<&mathed_core::blocks::Block> {
         self.index.blocks.iter().find(|b| b.range.contains(&cursor))
     }
 }

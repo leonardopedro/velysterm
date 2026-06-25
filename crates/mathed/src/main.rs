@@ -13,9 +13,11 @@
 mod blocks_view;
 mod glyphs;
 mod keymap;
+mod kernel_sys;
 mod overlay;
 mod popup;
 mod scheduler;
+mod search_sys;
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -28,8 +30,8 @@ use bevy_vello::prelude::*;
 use keymap::{EditorCmd, Mods, Motion};
 use mathed_core::{
     MathDoc, TransformOptions, next_marker_id, resolve_segments,
-    scan, to_render_text, to_render_text_range,
-    semantics::SemanticIndex,
+    scan, semantics::SemanticIndex, to_render_text,
+    to_render_text_range,
 };
 use velyst::prelude::*;
 use velyst::typst::syntax::{FileId, Source, VirtualPath};
@@ -38,6 +40,7 @@ use blocks_view::{BlockView, Blocks, EditorRoot, PRELUDE};
 use glyphs::GlyphIndex;
 use mathed_core::blocks::BlockId as CoreBlockId;
 use scheduler::Scheduler;
+use search_sys::Searching;
 
 /// Caret blink timer.
 #[derive(Resource)]
@@ -108,9 +111,21 @@ fn main() {
         .init_resource::<Scheduler>()
         .init_resource::<CaretBlink>()
         .init_resource::<SemanticIndexWrapper>()
+        .init_resource::<Searching>()
+        .init_resource::<LastChange>()
+        .init_resource::<kernel_sys::KernelBridge>()
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, (handle_keyboard, handle_mouse))
-        .add_systems(Update, sync_blocks)
+        .add_systems(Update, (sync_blocks, popup::sync_popup_ui))
+        .add_systems(
+            Update,
+            (
+                kernel_sys::dispatch_kernel_requests,
+                kernel_sys::apply_kernel_results,
+            )
+                .after(sync_blocks),
+        )
+        .add_systems(Update, autosave)
         .add_systems(
             PostUpdate,
             (glyphs::build_glyph_indices, draw_overlay)
@@ -122,7 +137,7 @@ fn main() {
 }
 
 #[derive(Resource)]
-struct SemanticIndexWrapper(SemanticIndex);
+pub(crate) struct SemanticIndexWrapper(SemanticIndex);
 
 impl Default for SemanticIndexWrapper {
     fn default() -> Self {
@@ -162,6 +177,8 @@ struct EditorState {
     /// Selection anchor (doc byte) while selecting; None = no selection.
     anchor: Option<usize>,
     show_hidden: bool,
+    /// Index of the definition being renamed via popup.
+    rename_def_idx: Option<usize>,
 }
 
 impl Default for EditorState {
@@ -170,6 +187,7 @@ impl Default for EditorState {
             cursor: 0,
             anchor: None,
             show_hidden: false,
+            rename_def_idx: None,
         }
     }
 }
@@ -196,6 +214,10 @@ struct PaddedRoot;
 #[derive(Component)]
 struct OverlayLayer;
 
+/// Tracks when the document was last mutated for autosave.
+#[derive(Resource, Default)]
+struct LastChange(Option<f64>);
+
 fn setup(mut commands: Commands) {
     commands.spawn((Camera2d, VelloView));
 
@@ -206,8 +228,10 @@ fn setup(mut commands: Commands) {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
                 padding: UiRect::all(Val::Px(16.0)),
+                overflow: Overflow::scroll_y(),
                 ..default()
             },
+            ScrollPosition::default(),
         ))
         .with_children(|parent| {
             // EditorRoot: flex-column container for block entities.
@@ -244,6 +268,10 @@ fn handle_keyboard(
     mut editor: ResMut<EditorDoc>,
     mut state: ResMut<EditorState>,
     mut scheduler: ResMut<Scheduler>,
+    mut searching: ResMut<Searching>,
+    mut popup_state: ResMut<popup::PopupState>,
+    semantics: Res<SemanticIndexWrapper>,
+    mut last_change: ResMut<LastChange>,
     mut clipboard: Local<Option<arboard::Clipboard>>,
 ) {
     let now = time.elapsed_secs_f64();
@@ -258,6 +286,52 @@ fn handle_keyboard(
         if ev.state != ButtonState::Pressed {
             continue;
         }
+
+        // Popup intercept: when a rename popup is open, route keys
+        // to the popup instead of the normal keymap.
+        if popup_state.kind == Some(popup::PopupKind::Rename) {
+            match ev.logical_key {
+                Key::Enter => {
+                    if let Some(def_idx) = state.rename_def_idx {
+                        let new_name = popup_state.input.clone();
+                        let ops = SemanticIndex::plan_rename(
+                            &semantics.0,
+                            def_idx,
+                            &new_name,
+                        );
+                        if !ops.is_empty() {
+                            editor.doc.replace_many(ops);
+                            editor.doc.commit();
+                            notify_doc_changed(&mut scheduler, now);
+                            last_change.0 = Some(now);
+                        }
+                    }
+                    state.rename_def_idx = None;
+                    popup_state.kind = None;
+                    popup_state.items.clear();
+                    popup_state.input.clear();
+                    continue;
+                }
+                Key::Escape => {
+                    state.rename_def_idx = None;
+                    popup_state.kind = None;
+                    popup_state.items.clear();
+                    popup_state.input.clear();
+                    continue;
+                }
+                Key::Backspace => {
+                    popup_state.input.pop();
+                    continue;
+                }
+                _ => {
+                    if let Some(text) = ev.text.as_deref() {
+                        popup_state.input.push_str(text);
+                    }
+                    continue;
+                }
+            }
+        }
+
         let mods = Mods {
             ctrl,
             shift,
@@ -267,7 +341,7 @@ fn handle_keyboard(
             &ev.logical_key,
             ev.text.as_deref(),
             mods,
-            false, // searching = false until Stage F
+            searching.active,
         ) else {
             continue;
         };
@@ -280,6 +354,57 @@ fn handle_keyboard(
             *clipboard = arboard::Clipboard::new().ok();
         }
 
+        // Search text interception: when searching, printable text
+        // goes to the query instead of the document.
+        if searching.active {
+            match &cmd {
+                EditorCmd::InsertText(s) => {
+                    for c in s.chars() {
+                        searching.state.query.push(c);
+                    }
+                    let q = searching.state.query.clone();
+                    searching
+                        .state
+                        .update_query(editor.doc.text(), &q);
+                    if let Some(i) = searching.state.current {
+                        state.cursor =
+                            searching.state.matches[i].start;
+                        state.anchor = None;
+                        snap_to_boundary(
+                            editor.doc.text(),
+                            &mut state.cursor,
+                        );
+                        scheduler.note_reveal();
+                    }
+                    popup_state.input = searching.state.query.clone();
+                    continue;
+                }
+                EditorCmd::Backspace => {
+                    searching.state.query.pop();
+                    let q = searching.state.query.clone();
+                    searching
+                        .state
+                        .update_query(editor.doc.text(), &q);
+                    if let Some(i) = searching.state.current {
+                        state.cursor =
+                            searching.state.matches[i].start;
+                        state.anchor = None;
+                        snap_to_boundary(
+                            editor.doc.text(),
+                            &mut state.cursor,
+                        );
+                        scheduler.note_reveal();
+                    }
+                    popup_state.input = searching.state.query.clone();
+                    continue;
+                }
+                EditorCmd::SearchNext
+                | EditorCmd::SearchPrev
+                | EditorCmd::SearchCancel => {}
+                _ => continue,
+            }
+        }
+
         match cmd {
             EditorCmd::InsertText(s) => {
                 insert_text(
@@ -289,6 +414,7 @@ fn handle_keyboard(
                     &mut scheduler,
                     now,
                 );
+                last_change.0 = Some(now);
             }
             EditorCmd::Newline => {
                 insert_text(
@@ -298,6 +424,7 @@ fn handle_keyboard(
                     &mut scheduler,
                     now,
                 );
+                last_change.0 = Some(now);
             }
             EditorCmd::InsertTab => {
                 insert_text(
@@ -307,6 +434,7 @@ fn handle_keyboard(
                     &mut scheduler,
                     now,
                 );
+                last_change.0 = Some(now);
             }
             EditorCmd::Backspace => {
                 let sel = state.selection();
@@ -318,6 +446,7 @@ fn handle_keyboard(
                         &mut scheduler,
                         now,
                     );
+                    last_change.0 = Some(now);
                 } else if state.cursor > 0 {
                     let text = editor.doc.text().to_owned();
                     let start = prev_boundary(&text, state.cursor);
@@ -329,6 +458,7 @@ fn handle_keyboard(
                         &mut scheduler,
                         now,
                     );
+                    last_change.0 = Some(now);
                 }
             }
             EditorCmd::DeleteForward => {
@@ -341,6 +471,7 @@ fn handle_keyboard(
                         &mut scheduler,
                         now,
                     );
+                    last_change.0 = Some(now);
                 } else if state.cursor < editor.doc.len() {
                     let text = editor.doc.text().to_owned();
                     let end = next_boundary(&text, state.cursor);
@@ -352,6 +483,7 @@ fn handle_keyboard(
                         &mut scheduler,
                         now,
                     );
+                    last_change.0 = Some(now);
                 }
             }
             EditorCmd::Move { motion, extend } => {
@@ -398,9 +530,11 @@ fn handle_keyboard(
             }
             EditorCmd::Undo => {
                 undo(&mut editor, &mut state, &mut scheduler, now);
+                last_change.0 = Some(now);
             }
             EditorCmd::Redo => {
                 redo(&mut editor, &mut state, &mut scheduler, now);
+                last_change.0 = Some(now);
             }
             EditorCmd::Cut => {
                 if let Some(sel) = state.selection() {
@@ -417,6 +551,7 @@ fn handle_keyboard(
                         &mut scheduler,
                         now,
                     );
+                    last_change.0 = Some(now);
                 }
             }
             EditorCmd::Copy => {
@@ -440,6 +575,7 @@ fn handle_keyboard(
                                 &mut scheduler,
                                 now,
                             );
+                            last_change.0 = Some(now);
                         }
                     }
                 }
@@ -450,7 +586,9 @@ fn handle_keyboard(
                 let s = scan(text);
                 let segs = resolve_segments(&s);
                 let out = to_render_text(
-                    &editor.doc,
+                    text,
+                    &s,
+                    &segs,
                     &TransformOptions::default(),
                 );
                 let full = format!("{PRELUDE}{}", out.text);
@@ -468,14 +606,103 @@ fn handle_keyboard(
                     &mut scheduler,
                     now,
                 );
+                last_change.0 = Some(now);
             }
-            EditorCmd::GotoDefinition
-            | EditorCmd::RenameAtCursor
-            | EditorCmd::SearchStart
-            | EditorCmd::SearchNext
-            | EditorCmd::SearchPrev
-            | EditorCmd::SearchCancel => {
-                debug!("stub: {:?}", cmd);
+            EditorCmd::SearchStart => {
+                searching.active = true;
+                searching.state.start(state.cursor);
+                popup_state.kind = Some(popup::PopupKind::Search);
+                popup_state.input.clear();
+                popup_state.items.clear();
+                popup_state.anchor_px = Vec2::new(0.0, 0.0);
+            }
+            EditorCmd::SearchNext => {
+                searching.state.next();
+                if let Some(i) = searching.state.current {
+                    state.cursor = searching.state.matches[i].start;
+                    state.anchor = None;
+                    snap_to_boundary(
+                        editor.doc.text(),
+                        &mut state.cursor,
+                    );
+                    scheduler.note_reveal();
+                }
+            }
+            EditorCmd::SearchPrev => {
+                searching.state.prev();
+                if let Some(i) = searching.state.current {
+                    state.cursor = searching.state.matches[i].start;
+                    state.anchor = None;
+                    snap_to_boundary(
+                        editor.doc.text(),
+                        &mut state.cursor,
+                    );
+                    scheduler.note_reveal();
+                }
+            }
+            EditorCmd::SearchCancel => {
+                searching.active = false;
+                searching.state.start(state.cursor);
+                popup_state.kind = None;
+                popup_state.items.clear();
+                popup_state.input.clear();
+            }
+            EditorCmd::GotoDefinition => {
+                let cursor = state.cursor;
+                if let Some(occ) =
+                    semantics.0.occurrences.iter().find(|o| {
+                        o.resolved.is_some()
+                            && o.range.contains(&cursor)
+                    })
+                {
+                    if let Some(def_idx) = occ.resolved {
+                        if let Some(def) =
+                            semantics.0.defs.get(def_idx)
+                        {
+                            state.cursor = def.span.start;
+                            state.anchor = None;
+                            snap_to_boundary(
+                                editor.doc.text(),
+                                &mut state.cursor,
+                            );
+                            scheduler.note_reveal();
+                        }
+                    }
+                }
+            }
+            EditorCmd::RenameAtCursor => {
+                let cursor = state.cursor;
+                let def_idx = semantics
+                    .0
+                    .defs
+                    .iter()
+                    .position(|d| {
+                        d.span.contains(&cursor)
+                            || d.name_range
+                                .as_ref()
+                                .map_or(false, |r| {
+                                    r.contains(&cursor)
+                                })
+                    })
+                    .or_else(|| {
+                        semantics
+                            .0
+                            .occurrences
+                            .iter()
+                            .find(|o| {
+                                o.resolved.is_some()
+                                    && o.range.contains(&cursor)
+                            })
+                            .and_then(|o| o.resolved)
+                    });
+                if let Some(idx) = def_idx {
+                    let name = semantics.0.defs[idx].name.clone();
+                    state.rename_def_idx = Some(idx);
+                    popup_state.kind = Some(popup::PopupKind::Rename);
+                    popup_state.input = name;
+                    popup_state.items.clear();
+                    popup_state.selected = 0;
+                }
             }
         }
     }
@@ -662,7 +889,7 @@ fn sync_blocks(
     let doc_changed = scheduler.doc_changed;
     if doc_changed {
         scheduler.doc_changed = false;
-        
+
         // Rebuild semantic index using current block renders
         let mut render_outputs = Vec::new();
         for block in blocks.index.blocks.iter() {
@@ -672,7 +899,11 @@ fn sync_blocks(
                 }
             }
         }
-        semantics.0.build_index(text_content, &segments, &render_outputs);
+        semantics.0.build_index(
+            text_content,
+            &segments,
+            &render_outputs,
+        );
     }
 
     let text_content = editor.doc.text();
@@ -694,7 +925,7 @@ fn sync_blocks(
         let to_spawn: Vec<(CoreBlockId, std::ops::Range<usize>)> =
             blocks
                 .index
-                .blocks()
+                .blocks
                 .iter()
                 .filter(|b| !blocks.entities.contains_key(&b.id))
                 .map(|b| (b.id, b.range.clone()))
@@ -805,12 +1036,14 @@ fn sync_blocks(
             }
         };
         let opts = TransformOptions {
-            reveal_caret: block_reveal.first().cloned(),
+            reveal: block_reveal,
             show_hidden,
         };
 
         let out = to_render_text_range(
-            &editor.doc,
+            text_content,
+            &s,
+            &segments,
             block.range.clone(),
             &opts,
         );
@@ -914,6 +1147,7 @@ fn draw_overlay(
     state: Res<EditorState>,
     blink: Res<CaretBlink>,
     semantics: Res<SemanticIndexWrapper>,
+    kernel_bridge: Res<kernel_sys::KernelBridge>,
     block_q: Query<(&ComputedNode, &GlobalTransform, &GlyphIndex)>,
     root_q: Query<
         (&ComputedNode, &GlobalTransform),
@@ -930,8 +1164,8 @@ fn draw_overlay(
     let root_origin = node_origin(root_tf, root_cn);
 
     // Caret geometry.
-        let caret = blocks
-            .block_for_cursor(state.cursor)
+    let caret = blocks
+        .block_for_cursor(state.cursor)
         .and_then(|b| blocks.entities.get(&b.id).copied())
         .and_then(|e| block_q.get(e).ok())
         .and_then(|(cn, tf, gi)| {
@@ -982,9 +1216,15 @@ fn draw_overlay(
         for block in blocks.index.blocks.iter() {
             let cs = occ.range.start.max(block.range.start);
             let ce = occ.range.end.min(block.range.end);
-            if cs >= ce { continue; }
-            let Some(&entity) = blocks.entities.get(&block.id) else { continue; };
-            let Ok((cn, tf, gi)) = block_q.get(entity) else { continue; };
+            if cs >= ce {
+                continue;
+            }
+            let Some(&entity) = blocks.entities.get(&block.id) else {
+                continue;
+            };
+            let Ok((cn, tf, gi)) = block_q.get(entity) else {
+                continue;
+            };
             let block_origin = node_origin(tf, cn);
             let offset = block_origin - root_origin;
             for mut r in gi.rects_for_range(cs..ce) {
@@ -1002,9 +1242,15 @@ fn draw_overlay(
         for block in blocks.index.blocks.iter() {
             let cs = range.start.max(block.range.start);
             let ce = range.end.min(block.range.end);
-            if cs >= ce { continue; }
-            let Some(&entity) = blocks.entities.get(&block.id) else { continue; };
-            let Ok((cn, tf, gi)) = block_q.get(entity) else { continue; };
+            if cs >= ce {
+                continue;
+            }
+            let Some(&entity) = blocks.entities.get(&block.id) else {
+                continue;
+            };
+            let Ok((cn, tf, gi)) = block_q.get(entity) else {
+                continue;
+            };
             let block_origin = node_origin(tf, cn);
             let offset = block_origin - root_origin;
             for mut r in gi.rects_for_range(cs..ce) {
@@ -1017,6 +1263,47 @@ fn draw_overlay(
         }
     }
 
+    // Kernel prob overlays: green underline for success, red dashed for error.
+    let mut prob_ok_rects = Vec::new();
+    let mut prob_err_rects = Vec::new();
+    for ks in &semantics.0.kernel_statements {
+        if ks.kind != mathed_core::PropKind::Prob {
+            continue;
+        }
+        let Some(result) = kernel_bridge.results.get(&ks.block) else {
+            continue;
+        };
+        for block in blocks.index.blocks.iter() {
+            let cs = ks.span.start.max(block.range.start);
+            let ce = ks.span.end.min(block.range.end);
+            if cs >= ce {
+                continue;
+            }
+            let Some(&entity) = blocks.entities.get(&block.id) else {
+                continue;
+            };
+            let Ok((cn, tf, gi)) = block_q.get(entity) else {
+                continue;
+            };
+            let block_origin = node_origin(tf, cn);
+            let offset = block_origin - root_origin;
+            for mut r in gi.rects_for_range(cs..ce) {
+                r.x0 += offset.x as f64;
+                r.x1 += offset.x as f64;
+                r.y0 += offset.y as f64;
+                r.y1 += offset.y as f64;
+                match result {
+                    kernel_sys::KernelResult::Value(_) => {
+                        prob_ok_rects.push(r)
+                    }
+                    kernel_sys::KernelResult::Error { .. } => {
+                        prob_err_rects.push(r)
+                    }
+                }
+            }
+        }
+    }
+
     let input = overlay::OverlayInput {
         caret,
         caret_visible: blink.visible,
@@ -1025,6 +1312,8 @@ fn draw_overlay(
         search_current: None,
         unresolved: &unresolved_rects,
         def_sites: &def_rects,
+        prob_ok: &prob_ok_rects,
+        prob_err: &prob_err_rects,
     };
 
     *ui_scene =
@@ -1109,6 +1398,26 @@ fn caret_blink(
     blink.timer.tick(time.delta());
     if blink.timer.just_finished() {
         blink.visible = !blink.visible;
+    }
+}
+
+/// Autosave: if 2s have passed since the last change, save.
+fn autosave(
+    time: Res<Time>,
+    mut editor: ResMut<EditorDoc>,
+    last: ResMut<LastChange>,
+    searching: Res<Searching>,
+    popup_state: Res<popup::PopupState>,
+) {
+    let Some(t) = last.0 else {
+        return;
+    };
+    let now = time.elapsed_secs_f64();
+    if now - t > 2.0
+        && !searching.active
+        && popup_state.kind.is_none()
+    {
+        save(&mut editor);
     }
 }
 

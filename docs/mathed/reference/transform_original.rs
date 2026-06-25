@@ -136,36 +136,12 @@ pub fn to_render_text(
     segments: &[Segment],
     opts: &TransformOptions,
 ) -> RenderOutput {
-    to_render_text_range(
-        doc_text,
-        scan,
-        segments,
-        0..doc_text.len(),
-        opts,
-    )
-}
-
-/// Like [`to_render_text`] but restricted to one block: only
-/// `doc_text[range]` is emitted. Tokens must not straddle `range`
-/// boundaries (the block splitter guarantees this); visual segment
-/// spans are clamped to `range`. `OffsetMap` doc offsets stay
-/// **absolute** (`map.doc_len == doc_text.len()`), so positions outside
-/// `range` clamp to the block's nearest end.
-pub fn to_render_text_range(
-    doc_text: &str,
-    scan: &MarkerScan,
-    segments: &[Segment],
-    range: Range<usize>,
-    opts: &TransformOptions,
-) -> RenderOutput {
-    // 1. Token ranges inside `range`, sorted; decide hidden/revealed
-    //    per token.
+    // 1. Token ranges, sorted; decide hidden/revealed per token.
     let mut tokens: Vec<Range<usize>> = scan
         .markers
         .iter()
         .map(|m| m.range.clone())
         .chain(scan.stmts.iter().map(|s| s.range.clone()))
-        .filter(|r| range.start <= r.start && r.end <= range.end)
         .collect();
     tokens.sort_by_key(|r| r.start);
 
@@ -186,9 +162,7 @@ pub fn to_render_text_range(
             shown.push(tok.clone());
         } else {
             let mut end = tok.end;
-            if end < range.end
-                && doc_text.as_bytes().get(end) == Some(&b' ')
-            {
+            if doc_text.as_bytes().get(end) == Some(&b' ') {
                 end += 1;
             }
             hidden.push(tok.start..end);
@@ -196,11 +170,10 @@ pub fn to_render_text_range(
     }
 
     // 2. Math toggle positions over visible, non-token text.
-    let toggles =
-        math_toggles(doc_text, range.clone(), &hidden, &shown);
+    let toggles = math_toggles(doc_text, &hidden, &shown);
 
-    // 3. Visual segment boundaries (clamped to `range`).
-    let mut bounds: Vec<usize> = vec![range.start, range.end];
+    // 3. Visual segment boundaries.
+    let mut bounds: Vec<usize> = vec![0, doc_text.len()];
     for r in hidden.iter().chain(shown.iter()) {
         bounds.push(r.start);
         bounds.push(r.end);
@@ -208,10 +181,8 @@ pub fn to_render_text_range(
     for seg in segments {
         if seg.kind.is_visual() {
             if let Some(span) = &seg.span {
-                if span.start < range.end && range.start < span.end {
-                    bounds.push(span.start.max(range.start));
-                    bounds.push(span.end.min(range.end));
-                }
+                bounds.push(span.start);
+                bounds.push(span.end);
             }
         }
     }
@@ -238,23 +209,20 @@ pub fn to_render_text_range(
                 match seg.kind {
                     crate::markers::PropKind::Bold => v.bold += 1,
                     crate::markers::PropKind::Italic => v.italic += 1,
-                    crate::markers::PropKind::Underline => {
-                        v.underline += 1
-                    }
+                    crate::markers::PropKind::Underline => v.underline += 1,
                     _ => {}
                 }
             }
         }
         v
     };
-    let math_at =
-        |pos: usize| toggles.partition_point(|&t| t <= pos) % 2 == 1;
-    let hidden_at = |pos: usize| {
-        hidden.iter().any(|r| r.start <= pos && pos < r.end)
+    let math_at = |pos: usize| {
+        toggles.partition_point(|&t| t <= pos) % 2 == 1
     };
-    let shown_token_at = |pos: usize| {
-        shown.iter().any(|r| r.start <= pos && pos < r.end)
-    };
+    let hidden_at =
+        |pos: usize| hidden.iter().any(|r| r.start <= pos && pos < r.end);
+    let shown_token_at =
+        |pos: usize| shown.iter().any(|r| r.start <= pos && pos < r.end);
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
@@ -292,7 +260,6 @@ pub fn to_render_text_range(
 /// the closing `$` right after itself, so both delimiters count as math.
 fn math_toggles(
     text: &str,
-    range: Range<usize>,
     hidden: &[Range<usize>],
     shown: &[Range<usize>],
 ) -> Vec<usize> {
@@ -305,8 +272,8 @@ fn math_toggles(
     let bytes = text.as_bytes();
     let mut toggles = Vec::new();
     let mut in_math = false;
-    let mut i = range.start;
-    while i < range.end {
+    let mut i = 0;
+    while i < bytes.len() {
         match bytes[i] {
             b'\\' => {
                 i += 1;
@@ -366,12 +333,7 @@ fn emit_escaped(
     let mut run_start = 0;
     for (i, c) in chunk.char_indices() {
         if c == '#' || c == '\\' {
-            push_copy(
-                &chunk[run_start..i],
-                doc_start + run_start,
-                out,
-                map,
-            );
+            push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
             out.push('\\'); // render-only escape byte, not in the map
             run_start = i;
         }
@@ -413,10 +375,7 @@ mod tests {
         let text = "#1 f(x) #2 ok";
         let out = render(
             text,
-            &TransformOptions {
-                reveal: vec![1..1],
-                show_hidden: false,
-            },
+            &TransformOptions { reveal: vec![1..1], show_hidden: false },
         );
         // First marker revealed (escaped), second still hidden.
         assert_eq!(out.text, "\\#1 f(x) ok");
@@ -427,10 +386,7 @@ mod tests {
         let text = "#1 x \\b(#1,#1)";
         let out = render(
             text,
-            &TransformOptions {
-                reveal: vec![],
-                show_hidden: true,
-            },
+            &TransformOptions { reveal: vec![], show_hidden: true },
         );
         assert_eq!(out.text, "\\#1 x \\\\b(\\#1,\\#1)");
     }
@@ -489,58 +445,5 @@ mod tests {
     fn escaped_hash_not_hidden() {
         let out = render(r"\#1 stays", &TransformOptions::default());
         assert_eq!(out.text, r"\#1 stays");
-    }
-
-    fn render_range(
-        text: &str,
-        range: Range<usize>,
-        opts: &TransformOptions,
-    ) -> RenderOutput {
-        let s = scan(text);
-        let segs = resolve_segments(&s);
-        to_render_text_range(text, &s, &segs, range, opts)
-    }
-
-    #[test]
-    fn range_restricted_per_block() {
-        let text = "#1 a #2 \\bold(#1,#2)\n\nplain";
-        // Block 1: the marked line. Markers/statement hidden, "a "
-        // bold-wrapped exactly as in the full transform.
-        let out =
-            render_range(text, 0..20, &TransformOptions::default());
-        assert_eq!(out.text, "#strong[a ]");
-        // Block 2: plain text with absolute doc offsets in the map.
-        let out =
-            render_range(text, 22..27, &TransformOptions::default());
-        assert_eq!(out.text, "plain");
-        assert_eq!(out.map.doc_to_render(22), 0);
-        assert_eq!(out.map.render_to_doc(0), 22);
-        assert_eq!(out.map.render_to_doc(5), 27);
-    }
-
-    #[test]
-    fn segment_spanning_blocks_clamps_per_block() {
-        // Bold segment runs from block 1 into block 2; each block wraps
-        // only its own part.
-        let text = "#1 a\n\nb #2 \\bold(#1,#2)";
-        let out =
-            render_range(text, 0..4, &TransformOptions::default());
-        assert_eq!(out.text, "#strong[a]");
-        let out =
-            render_range(text, 6..23, &TransformOptions::default());
-        assert_eq!(out.text, "#strong[b ]");
-    }
-
-    #[test]
-    fn full_text_delegates_to_range() {
-        let text = "#1 f(x) #2 tail";
-        let full = render(text, &TransformOptions::default());
-        let ranged = render_range(
-            text,
-            0..text.len(),
-            &TransformOptions::default(),
-        );
-        assert_eq!(full.text, ranged.text);
-        assert_eq!(full.map, ranged.map);
     }
 }

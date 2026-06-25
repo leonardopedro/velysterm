@@ -21,14 +21,71 @@ Implementing a mathematical editor with semantic awareness (renaming, definition
 ## Current State
 Semantic core is implemented and partially wired. The project is now moving back to complete the foundational "Stage A" leaf modules which were skipped or partially implemented in the initial semantic push.
 
+## 2026-06-12 — Stage R repair (R1 + R2 done, by Claude)
+
+- **R1**: `doc.rs::segment_marks()` rewritten on `LoroText::get_richtext_value()`
+  (the committed version used nonexistent APIs and did not compile).
+  Now handles overlapping `prop:*` keys and keeps equal-key runs
+  separated by gaps as distinct marks. `clear_segment_marks()` fixed.
+  5 new tests in `doc.rs`; `replace_many` test now asserts its deltas.
+- **R2**: original `transform.rs` restored from
+  `docs/mathed/reference/transform_original.rs` (the committed stub had
+  inverted the hidden-marker design). `to_render_text_range` (B1)
+  re-applied on top with clamped visual segments and range-scoped math
+  toggles; 3 new tests. Call sites in `main.rs` fixed (ExportTyp,
+  `sync_blocks` transform, `blocks.index.blocks` field access).
+- **R3**: PRELUDE typo fixed (`\set` → `#set`). `search.rs` cleaned
+  up: removed stream-of-thought comments, simplified case-insensitive
+  branch to use `find_case_insensitive_range` directly. Unused `text`
+  variable in `wordnav.rs` tests fixed. Unused imports in
+  `semantics.rs` removed. 0 clippy warnings from mathed_core.
+- **R4**: Added 4 tests to `semantics.rs`: definition resolves
+  occurrence, occurrence inside own def resolves to that def, unknown
+  identifier is unresolved, `plan_rename` produces non-overlapping ops.
+  Fixed `build_index` to handle Typst 0.14's `MathText` nodes
+  (previously only `MathIdent` was matched). 51 tests green.
+- **R5**: Gate status: `cargo test -p mathed_core` 51 ok;
+  `cargo clippy` 0 errors; `cargo check -p mathed` passes; `cargo fmt`
+  applied. Smoke run (`cargo run -p mathed`) not yet verified —
+  requires display server. Unit tests only so far.
+- Next: Stage A modules (A1–A8) which already exist but need
+  verification against spec; then Stages B–G.
+
+## 2026-06-12 — Implementation session (MiMo)
+
+- **R3**: PRELUDE typo `\set` → `#set` in blocks_view.rs. search.rs
+  cleaned up (removed stream-of-thought comments, simplified
+  case-insensitive branch). wordnav.rs unused variable fixed. Unused
+  imports in semantics.rs removed.
+- **R4**: Added 4 tests to semantics.rs. Fixed `build_index` to handle
+  Typst 0.14 `MathText` nodes (was only matching `MathIdent`).
+- **R5**: Full gate verified: 51 mathed_core tests + 29 mathed tests,
+  0 clippy errors.
+- **E2**: Implemented `GotoDefinition` (F12) and `RenameAtCursor` (F2)
+  with popup accept/cancel flow.
+- **F1**: Created `search_sys.rs` with `Searching` resource. Wired
+  search interception in `handle_keyboard`: Ctrl+F starts, typing
+  filters live, Enter/Shift+Enter cycle, Esc cancels. Popup shows
+  query input.
+- **G2**: Autosave — `LastChange` resource tracks last mutation time,
+  auto-saves after 2s idle (skipped while searching/popup open).
+- **G3**: Scroll-into-view — PaddedRoot now has `Overflow::scroll_y()`
+  and `ScrollPosition`.
+- Gate: 80 tests (51 + 29) all pass; 0 clippy errors; fmt applied.
+
 ## Remaining Tasks
-- [ ] Complete Stage A (Block splitter, Search core, Word nav, File format, Keymap, Overlay builder, Popups, Blink/Scroll).
-- [ ] Complete Stage B (Range-restricted transform, Block index, Per-block rendering, Keymap wiring).
-- [ ] Complete Stage C (Scheduler).
-- [ ] Complete Stage D (GlyphIndex, Selection/Overlay rendering).
-- [ ] Complete Stage E (Full Editor wiring for Semantics, Mark hygiene).
-- [ ] Complete Stage F (Incremental Search).
-- [ ] Complete Stage G (IME, Autosave, Scroll-into-view).
+- [x] Stage R (R3-R5): PRELUDE fix, search cleanup, wordnav warning, semantics tests, full gate.
+- [x] Stage A: All modules present and tested (blocks, search, wordnav, format, keymap, overlay, popup, blink/scroll).
+- [x] Stage B: Per-block rendering, block index, range-restricted transform, keymap wiring.
+- [x] Stage C: Scheduler with two-tier damage queue.
+- [x] Stage D: GlyphIndex, selection/overlay rendering, double-click word selection.
+- [x] Stage E: Semantic index, GotoDefinition (F12), RenameAtCursor (F2), mark hygiene on save.
+- [x] Stage F: Incremental search UI (Ctrl+F, live filter, Enter cycle, Esc cancel).
+- [x] Stage G2: Autosave (2s idle).
+- [x] Stage G3: Scroll-into-view (overflow scroll on padded root).
+- [ ] Stage G1: IME support (requires system-level IME).
+- [ ] Search overlay rendering (search match rects in draw_overlay).
+- [ ] Smoke run verification (requires display server).
 
 ## Constraints
 - No modifications to `crates/velyst`, `crates/typst_imaging`, or `crates/kanva`.

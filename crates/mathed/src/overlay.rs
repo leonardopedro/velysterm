@@ -19,6 +19,10 @@ pub struct OverlayInput<'a> {
     pub search_current: Option<kurbo::Rect>,
     pub unresolved: &'a [kurbo::Rect],
     pub def_sites: &'a [kurbo::Rect],
+    /// Probability results: green underline for success.
+    pub prob_ok: &'a [kurbo::Rect],
+    /// Probability errors: red dashed underline.
+    pub prob_err: &'a [kurbo::Rect],
 }
 
 fn rgba(r: f64, g: f64, b: f64, a: f64) -> peniko::Color {
@@ -104,6 +108,37 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         );
     }
 
+    // Prob success: solid green underline.
+    let prob_ok_color = rgba(0.30, 0.85, 0.40, 0.9);
+    for &r in input.prob_ok {
+        let line = kurbo::Rect::new(r.x0, r.y1 - 2.0, r.x1, r.y1);
+        scene.fill(
+            peniko::Fill::NonZero,
+            ident,
+            &prob_ok_color,
+            None,
+            &line,
+        );
+    }
+
+    // Prob errors: red dashed underline.
+    let prob_err_color = rgba(0.95, 0.25, 0.25, 0.9);
+    for &r in input.prob_err {
+        let y = r.y1;
+        let mut x = r.x0;
+        while x + 3.0 <= r.x1 {
+            let seg = kurbo::Rect::new(x, y - 2.0, x + 3.0, y);
+            scene.fill(
+                peniko::Fill::NonZero,
+                ident,
+                &prob_err_color,
+                None,
+                &seg,
+            );
+            x += 5.0;
+        }
+    }
+
     // Caret.
     if input.caret_visible {
         if let Some(c) = input.caret {
@@ -154,6 +189,8 @@ mod tests {
             search_current: Some(kurbo::Rect::new(0., 0., 10., 10.)),
             unresolved: &unr,
             def_sites: &defs,
+            prob_ok: &[],
+            prob_err: &[],
         };
         let _scene = build_overlay_scene(&input);
     }

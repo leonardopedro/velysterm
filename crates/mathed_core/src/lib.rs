@@ -29,6 +29,9 @@ pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, Segment,
     next_marker_id, resolve_segments, scan,
 };
+pub use semantics::{
+    Definition, KernelStatement, Occurrence, SemanticIndex,
+};
 pub use transform::{
     CopySpan, OffsetMap, RenderOutput, TransformOptions,
     to_render_text, to_render_text_range,

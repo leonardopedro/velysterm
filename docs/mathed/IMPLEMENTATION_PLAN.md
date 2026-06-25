@@ -9,6 +9,61 @@ to write, and the command that must pass before moving on.
 Read `docs/mathed/DESIGN.md` once before starting. `docs/mathed/TASKS.md`
 contains earlier specs; where they overlap, THIS file wins.
 
+## Status — audited 2026-06-12, after commit `bfa9675`
+
+A first implementation pass created every planned file and committed it
+as `bfa9675` (see `PROGRESS.md`, the implementer's log). Audit verdict:
+
+**The workspace does not compile.** `cargo test -p mathed_core` fails
+with 4 errors, all in `doc.rs::segment_marks()` /
+`clear_segment_marks()` (wrong loro APIs). In addition, ground rule 2
+was violated: `transform.rs` was **replaced** instead of extended, which
+deleted the hidden-marker rendering pipeline (hide/reveal/escape/visual
+wrapping) and its 9 tests — the core feature of the editor. The original
+file was recovered and saved at
+`docs/mathed/reference/transform_original.rs`.
+
+> **Update, 2026-06-12 (Claude):** tasks **R1 and R2 are DONE.**
+> `segment_marks` rewritten on `get_richtext_value()` (now also handles
+> overlapping `prop:*` keys and gaps; 5 new tests), the original
+> transform restored with `to_render_text_range` re-applied on top
+> (3 new range tests), and all `main.rs` call sites fixed — including a
+> pre-existing `blocks.index.blocks()` method-vs-field error. The full
+> gate passes: `cargo test -p mathed_core` 47 ok, `cargo test -p mathed`
+> 29 ok, clippy 0 errors, fmt applied. **Resume at R3.** R5's smoke run
+> is still required — only unit tests have been run, not the app.
+
+Per-stage state (nothing is runtime-verified until Stage R restores a
+compiling baseline):
+
+| Stage | State | Notes |
+|---|---|---|
+| A1 split_blocks | present | `blocks.rs`, 1 test; math-aware, `=`-heading splitting |
+| A2 search core | present | `search.rs`, 6 tests; needs cleanup (R3) |
+| A3 wordnav | present | `wordnav.rs` with tests; one unused-var warning (R3) |
+| A4 format | present | `format.rs`, `MAGIC b"MATHED01"`, atomic save |
+| A5 keymap | present | `keymap.rs` |
+| A6 overlay | present | `overlay.rs::build_overlay_scene` |
+| A7 popup | present | `popup.rs` |
+| A8 blink/scroll | present | `caret_blink` + `scroll_adjust` in `main.rs` |
+| B1 range transform | **done (R2)** | original restored + `to_render_text_range` re-applied; 12 transform tests green |
+| B2 BlockIndex | present | `blocks.rs::BlockIndex::update`, 1 test; deviation: fingerprint match gated by `dist < 1000` heuristic (acceptable) |
+| B3 block rendering | present | `blocks_view.rs` types + `sync_blocks` in `main.rs:631` (acceptable location); PRELUDE typo `\set` → `#set` (R3) |
+| B4 keymap wiring | present, unverified | `handle_keyboard` in `main.rs` |
+| C scheduler | present | `scheduler.rs`; constants match spec |
+| D1 GlyphIndex | present | `glyphs.rs` rewritten per spec |
+| D2 selection/overlay | present, unverified | `draw_overlay` in `main.rs` |
+| E1 semantics | present, **zero tests** | `semantics.rs`; tests added in R4 |
+| E2 editor wiring | partial | wired into `sync_blocks`/`draw_overlay` |
+| E mark sync | **done (R1)** | `segment_marks()` rewritten + tested; `clear_segment_marks()` works |
+| F1 search UI | **missing** | core done; `crates/mathed/src/search_sys.rs` was never created — spec below still applies |
+| G polish | not started | IME, autosave, scroll-into-view |
+
+**Next step: execute Stage R below starting at R3 (R1/R2 are done).**
+After Stage R the remaining open work, in order, is: F1 (search UI),
+any E2 gaps found while testing, then Stage G. Keep `PROGRESS.md`
+updated, and record honestly which gate commands actually passed.
+
 ## Ground rules (apply to every task)
 
 1. Never modify `crates/velyst`, `crates/typst_imaging`, `crates/kanva`,
@@ -32,13 +87,119 @@ Existing building blocks you will reuse constantly:
 - `mathed_core::scan(&str) -> MarkerScan`, `resolve_segments(&MarkerScan) -> Vec<Segment>`
 - `mathed_core::to_render_text(text, &scan, &segments, &TransformOptions) -> RenderOutput`
   (`RenderOutput { text: String, map: OffsetMap }`,
-   `OffsetMap::{doc_to_render, render_to_doc}`)
+   `OffsetMap::{doc_to_render, render_to_doc}`) — this is the signature
+  *after task R2 restores it*; the currently committed stub differs
+
 - `mathed_core::MathDoc` (insert/delete/replace_many/undo/redo/snapshot,
   all byte-offset)
 - `crates/mathed/src/main.rs`: resources `EditorDoc`, `EditorState`,
   `RenderCache`; systems `handle_keyboard`, `handle_mouse`, `recompile`,
   `update_caret`; helpers `prev_boundary`, `next_boundary`,
   `snap_to_boundary`, `line_range`, `vertical_move`.
+
+---
+
+# Stage R — Repair (DO THIS FIRST)
+
+The previous pass committed without running the gate commands and broke
+ground rule 2. Stage R restores a compiling, tested baseline. Run all
+four ground-rule commands after every task below.
+
+## R1. Fix `doc.rs` compile errors (`segment_marks`)
+
+`crates/mathed_core/src/doc.rs::segment_marks()` uses APIs that do not
+exist. Exact fixes:
+
+1. `self.text.get_value()` → `self.text.get_richtext_value()`. It
+   returns a `LoroValue::List` of `LoroValue::Map`s shaped
+   `{ "insert": <string>, "attributes": <map> }` (attributes optional).
+2. `LoroValue::List(list)`: `list` is an `Arc`-wrapped vec, not an
+   iterator — iterate with `list.iter()` and bind items by reference.
+3. Same for the attributes map: iterate with `attrs.iter()`.
+4. In `clear_segment_marks`: `self.unmark_segment(range, &key)` (the
+   key is a `String`, the parameter is `&str`).
+
+Fix the run-merging logic at the same time: a delta run continues the
+current mark only when it is contiguous (`offset == current_range.end`)
+AND carries the same key; a run *without* the key always terminates the
+current mark. The committed version merges across gaps.
+
+Add tests to the existing `mod tests` in `doc.rs`:
+- mark `0..4` with `prop:function`, commit → `segment_marks()` returns
+  exactly `[(0..4, "prop:function".into())]`;
+- mark `0..2` and `6..8` with the same key (gap unmarked) → two entries;
+- `clear_segment_marks()` → `segment_marks()` is empty afterwards;
+- in `replace_many_descending_and_ascending_deltas`, assert the returned
+  deltas (e.g. `deltas[0].range == (0..3)`) instead of dropping them —
+  this also fixes the unused-variable warning.
+
+## R2. Restore the real transform (hidden-marker rendering)
+
+The committed `transform.rs` is a stub that inverts the design: it emits
+only segment contents and drops all other text; it does not hide marker
+tokens, escape revealed tokens, wrap visual segments, or skip math runs.
+The original, fully tested implementation is preserved at
+**`docs/mathed/reference/transform_original.rs`** (9 tests).
+
+1. Copy that file verbatim over `crates/mathed_core/src/transform.rs`.
+2. Public API after the copy (do not alter it):
+   - `CopySpan { doc_start, render_start, len }`
+   - `OffsetMap { spans, doc_len, render_len }` with
+     `doc_to_render(pos)` / `render_to_doc(pos)`
+   - `TransformOptions { reveal: Vec<Range<usize>>, show_hidden: bool }`
+   - `to_render_text(doc_text: &str, scan: &MarkerScan,
+     segments: &[Segment], opts: &TransformOptions) -> RenderOutput`
+3. Re-apply task **B1** on top of it — B1 was always specified as an
+   ADD to this file and its spec below remains valid
+   (`to_render_text_range` with absolute doc offsets).
+4. Update the call sites in `crates/mathed/src/main.rs` (three spots,
+   near lines 452, 720 and 807) to the restored signatures:
+   - build inputs with `scan(text)` + `resolve_segments(&scan)`;
+   - `TransformOptions { reveal: vec![sel_or_caret_range], show_hidden }`
+     replaces the stub's `reveal_caret: Option<Range>`;
+   - the synthesized empty `RenderOutput` (~line 720) must also fill
+     `map.doc_len` / `map.render_len`.
+   `blocks_view.rs` stores `RenderOutput` opaquely; change it only where
+   the compiler demands.
+5. `cargo test -p mathed_core` passes with the 9 restored transform
+   tests plus the B1 tests.
+
+## R3. Typst prelude + cleanups
+
+1. `crates/mathed/src/blocks_view.rs`: the first PRELUDE line is
+   `\set text(...)` — invalid Typst. It must be `#set text(...)`.
+2. `crates/mathed_core/src/search.rs::find_matches`: delete the
+   stream-of-thought comments (~lines 88–103). The case-insensitive
+   branch scans twice (`rem_lower.find(...)` then
+   `find_case_insensitive_range`); call
+   `find_case_insensitive_range(remainder, query)` once and use its
+   range directly. Existing tests must keep passing unchanged.
+3. `crates/mathed_core/src/wordnav.rs`: fix the unused-`text` warning
+   in tests (use the variable or remove it).
+
+## R4. Semantics tests
+
+`semantics.rs` shipped with zero tests. Add `#[cfg(test)] mod tests`
+covering at least:
+- a definition via `\def(#1,#2, f)` plus an occurrence of `f` inside a
+  math run in other text resolves to def 0 (build inputs by calling
+  `scan` / `resolve_segments` / `to_render_text` directly);
+- an occurrence inside its own definition's span resolves to that def;
+- an unknown identifier has `resolved == None` and appears in
+  `unresolved_occurrences()`;
+- `plan_rename` renames the name literal plus all resolved occurrences,
+  and the returned `ReplaceOp`s do not overlap (assert it).
+
+## R5. Full gate + smoke run
+
+1. All four ground-rule commands pass (this is the first time the
+   whole workspace must compile again).
+2. `cargo run -p mathed` opens the editor: typing works; `#1` /
+   `\bold(#1,#2)` tokens are hidden and revealed when the caret touches
+   them; Ctrl+B bolds a selection; Ctrl+Z undoes; Ctrl+S saves without
+   panicking.
+3. Record in `PROGRESS.md` which gates passed and what was verified by
+   eye. Do not mark a stage done on the strength of files existing.
 
 ---
 

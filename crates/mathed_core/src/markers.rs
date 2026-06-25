@@ -76,6 +76,14 @@ pub enum PropKind {
     Variable,
     Reference,
     Statement,
+    /// Kernel: populates `SemanticIndex.kernel_statements` for the
+    /// probability kernel bridge (Stage 15). The body text between the
+    /// two marker refs is the kernel payload (model spec, event
+    /// predicate, etc.); an optional literal extra-arg names the result.
+    Model,
+    Prior,
+    Event,
+    Prob,
     /// Unknown property: kept, semantically inert in v1.
     Other,
 }
@@ -93,12 +101,25 @@ impl PropKind {
             "statement" | "theorem" | "lemma" | "axiom" => {
                 Self::Statement
             }
+            "model" => Self::Model,
+            "prior" => Self::Prior,
+            "event" => Self::Event,
+            "prob" => Self::Prob,
             _ => Self::Other,
         }
     }
 
     pub fn is_visual(self) -> bool {
         matches!(self, Self::Bold | Self::Italic | Self::Underline)
+    }
+
+    /// Kernel statements populate `SemanticIndex.kernel_statements`
+    /// and drive the probability kernel bridge.
+    pub fn is_kernel(self) -> bool {
+        matches!(
+            self,
+            Self::Model | Self::Prior | Self::Event | Self::Prob
+        )
     }
 }
 

@@ -23,7 +23,11 @@ impl SearchState {
         if self.matches.is_empty() {
             self.current = None;
         } else {
-            self.current = self.matches.iter().position(|r| r.start >= self.origin).or(Some(0));
+            self.current = self
+                .matches
+                .iter()
+                .position(|r| r.start >= self.origin)
+                .or(Some(0));
         }
     }
 
@@ -56,7 +60,11 @@ impl SearchState {
         if self.matches.is_empty() {
             self.current = None;
         } else {
-            self.current = self.matches.iter().position(|r| r.start >= self.origin).or(Some(0));
+            self.current = self
+                .matches
+                .iter()
+                .position(|r| r.start >= self.origin)
+                .or(Some(0));
         }
     }
 }
@@ -66,62 +74,44 @@ pub fn find_matches(text: &str, query: &str) -> Vec<Range<usize>> {
         return vec![];
     }
 
-    let is_case_insensitive = query.chars().all(|c| !c.is_uppercase());
+    let is_case_insensitive =
+        query.chars().all(|c| !c.is_uppercase());
     let mut matches = Vec::new();
     let mut cursor = 0;
 
     while cursor < text.len() {
         let remainder = &text[cursor..];
         let found = if is_case_insensitive {
-            // Case-insensitive search
-            // We find the first index where the lowercase versions match
-            let q_lower = query.to_lowercase();
-            let rem_lower = remainder.to_lowercase();
-            rem_lower.find(&q_lower)
+            find_case_insensitive_range(remainder, query)
         } else {
-            remainder.find(query)
+            remainder.find(query).map(|o| o..o + query.len())
         };
 
-        if let Some(offset) = found {
-            let start = cursor + offset;
-
-            // Correct end: we need the byte length of the matched slice in the original text
-
-
-            // Correct end: we need the byte length of the matched slice in the original text
-            
-            // To get the exact range in original text, we need to be careful with case folding
-            // The simple approach for case-insensitive is to find the match in lowercase, 
-            // but the match length in original bytes might differ.
-            // However, the requirement says "returned ranges are byte ranges in the original text".
-            
-            // Let's refine the case-insensitive match to find the original byte range.
-            let match_len = if is_case_insensitive {
-                // Find the original substring that corresponds to the lowercase match
-                // Since to_lowercase can change length, we must match char by char or use a better method.
-                // For now, let's implement the char-by-char matching as suggested in a similar foot port.
-                find_case_insensitive_range(remainder, query)
-                    .map(|r| r.end - r.start)
-                    .unwrap_or(0)
-            } else {
-                query.len()
-            };
-
-            if match_len == 0 { break; } // Safety
-
-            matches.push(start..start + match_len);
-            cursor = start + match_len;
-        } else {
-            break;
+        match found {
+            Some(range) => {
+                let start = cursor + range.start;
+                let len = range.end - range.start;
+                if len == 0 {
+                    break;
+                }
+                matches.push(start..start + len);
+                cursor = start + len;
+            }
+            None => break,
         }
     }
 
     matches
 }
 
-fn find_case_insensitive_range(text: &str, query: &str) -> Option<Range<usize>> {
+fn find_case_insensitive_range(
+    text: &str,
+    query: &str,
+) -> Option<Range<usize>> {
     let q_chars: Vec<char> = query.chars().collect();
-    if q_chars.is_empty() { return None; }
+    if q_chars.is_empty() {
+        return None;
+    }
 
     let text_len = text.len();
     let mut search_pos = 0;
@@ -130,11 +120,13 @@ fn find_case_insensitive_range(text: &str, query: &str) -> Option<Range<usize>> 
         let current_slice = &text[search_pos..];
         let mut match_found = true;
         let mut current_offset = 0;
-        
+
         let mut text_iter = current_slice.chars();
         for &q_char in &q_chars {
             if let Some(t_char) = text_iter.next() {
-                if t_char.to_lowercase().next() != Some(q_char.to_lowercase().next().unwrap()) {
+                if t_char.to_lowercase().next()
+                    != Some(q_char.to_lowercase().next().unwrap())
+                {
                     match_found = false;
                     break;
                 }
@@ -167,7 +159,10 @@ mod tests {
     fn test_case_sensitivity() {
         // Case-insensitive: query is all lowercase
         assert_eq!(find_matches("Hello World", "hello"), vec![0..5]);
-        assert_eq!(find_matches("Hello World", "WORLD"), Vec::<Range<usize>>::new()); // Query has uppercase -> case-sensitive
+        assert_eq!(
+            find_matches("Hello World", "WORLD"),
+            Vec::<Range<usize>>::new()
+        ); // Query has uppercase -> case-sensitive
         assert_eq!(find_matches("Hello World", "Hello"), vec![0..5]);
     }
 
@@ -192,7 +187,7 @@ mod tests {
         let mut state = SearchState::default();
         state.start(0);
         state.update_query("aaaa", "aa");
-        
+
         assert_eq!(state.current, Some(0));
         state.next();
         assert_eq!(state.current, Some(1));
@@ -208,7 +203,7 @@ mod tests {
         state.start(0);
         state.update_query("ab", "ab");
         assert_eq!(state.current, Some(0));
-        
+
         // User extends query to "abc"
         state.update_query("abc", "abc");
         assert_eq!(state.current, Some(0));
@@ -222,11 +217,14 @@ mod tests {
         assert_eq!(state.matches.len(), 4);
         state.current = Some(2); // at 'a' in banana
         state.origin = state.matches[2].start;
-        
+
         state.on_doc_changed("apple bnanana");
         assert_eq!(state.matches.len(), 4);
         // Should still be at 'a' in bnanana
         assert!(state.current.is_some());
-        assert!(state.matches[state.current.unwrap()].start >= state.origin);
+        assert!(
+            state.matches[state.current.unwrap()].start
+                >= state.origin
+        );
     }
 }

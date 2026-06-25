@@ -256,52 +256,61 @@ impl MathDoc {
             .expect("loro unmark failed");
     }
 
-    /// All current `prop:*` marks as (byte range, key).
+    /// All current `prop:*` marks as (byte range, key), sorted by start.
+    ///
+    /// Walks the richtext delta runs; a mark spans consecutive runs that
+    /// all carry its key, and ends at the first run that doesn't (so two
+    /// equal-key marks separated by unmarked text stay separate).
     pub fn segment_marks(&self) -> Vec<(Range<usize>, String)> {
-        let mut marks = Vec::new();
-        let mut current_range: Option<(Range<usize>, String)> = None;
-        
-        let val = self.text.get_value();
-        if let loro::LoroValue::List(list) = val {
-            let mut offset = 0;
-            for item in list {
-                if let loro::LoroValue::Map(map) = item {
-                    let text_val = map.get("insert").and_then(|v| v.as_string());
-                    let attributes = map.get("attributes").and_then(|v| v.as_map());
-                    
-                    let len = text_val.map(|s| s.len()).unwrap_or(0);
-                    
-                    if let Some(attrs) = attributes {
-                        for (k, _v) in attrs {
-                            if k.starts_with("prop:") {
-                                let range = offset..offset + len;
-                                if let Some((ref mut r, ref mut key)) = current_range {
-                                    if key == k {
-                                        r.end = offset + len;
-                                    } else {
-                                        marks.push(current_range.take().unwrap());
-                                        current_range = Some((range, k.clone()));
-                                    }
-                                } else {
-                                    current_range = Some((range, k.clone()));
-                                }
-                            }
-                        }
-                    }
-                    offset += len;
+        let mut marks: Vec<(Range<usize>, String)> = Vec::new();
+        let mut open: Vec<(Range<usize>, String)> = Vec::new();
+
+        let value = self.text.get_richtext_value();
+        let Some(deltas) = value.as_list() else {
+            return marks;
+        };
+        let mut offset = 0;
+        for delta in deltas.iter() {
+            let Some(map) = delta.as_map() else { continue };
+            let len = map
+                .get("insert")
+                .and_then(|v| v.as_string())
+                .map(|s| s.len())
+                .unwrap_or(0);
+            let keys: Vec<String> = map
+                .get("attributes")
+                .and_then(|v| v.as_map())
+                .map(|attrs| {
+                    attrs
+                        .keys()
+                        .filter(|k| k.starts_with("prop:"))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (kept, closed): (Vec<_>, Vec<_>) =
+                open.drain(..).partition(|(_, k)| keys.contains(k));
+            marks.extend(closed);
+            open = kept;
+            for key in keys {
+                match open.iter_mut().find(|(_, k)| *k == key) {
+                    Some(run) => run.0.end = offset + len,
+                    None => open.push((offset..offset + len, key)),
                 }
             }
+            offset += len;
         }
-        if let Some(m) = current_range {
-            marks.push(m);
-        }
+        marks.extend(open);
+        marks.sort_by(|a, b| {
+            (a.0.start, &a.1).cmp(&(b.0.start, &b.1))
+        });
         marks
     }
 
     pub fn clear_segment_marks(&mut self) {
         let marks = self.segment_marks();
         for (range, key) in marks {
-            self.unmark_segment(range, key);
+            self.unmark_segment(range, &key);
         }
     }
 
@@ -378,16 +387,20 @@ mod tests {
     fn replace_many_descending_and_ascending_deltas() {
         let mut d = MathDoc::with_text("aaa bbb ccc");
         let deltas = d.replace_many(vec![
-        ReplaceOp {
-            range: 8..11,
-            with: "C".into(),
-        },
-        ReplaceOp {
-            range: 0..3,
-            with: "AA".into(),
-        },
+            ReplaceOp {
+                range: 8..11,
+                with: "C".into(),
+            },
+            ReplaceOp {
+                range: 0..3,
+                with: "AA".into(),
+            },
         ]);
         assert_eq!(d.text(), "AA bbb C");
+        assert_eq!(deltas[0].range, 0..3);
+        assert_eq!(deltas[0].inserted, "AA");
+        assert_eq!(deltas[1].range, 8..11);
+        assert_eq!(deltas[1].inserted, "C");
     }
 
     #[test]
@@ -414,5 +427,62 @@ mod tests {
         let bytes = d.snapshot();
         let d2 = MathDoc::from_snapshot(&bytes).unwrap();
         assert_eq!(d2.text(), "f(x) is nice");
+        assert_eq!(
+            d2.segment_marks(),
+            vec![(0..4, "prop:function".to_owned())]
+        );
+    }
+
+    #[test]
+    fn segment_marks_single_range() {
+        let mut d = MathDoc::with_text("f(x) is nice");
+        d.mark_segment(0..4, "prop:function", "seg1");
+        d.commit();
+        assert_eq!(
+            d.segment_marks(),
+            vec![(0..4, "prop:function".to_owned())]
+        );
+    }
+
+    #[test]
+    fn segment_marks_gap_keeps_runs_separate() {
+        let mut d = MathDoc::with_text("ab cd ef");
+        d.mark_segment(0..2, "prop:bold", "seg1");
+        d.mark_segment(6..8, "prop:bold", "seg2");
+        d.commit();
+        assert_eq!(
+            d.segment_marks(),
+            vec![
+                (0..2, "prop:bold".to_owned()),
+                (6..8, "prop:bold".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn segment_marks_overlapping_keys() {
+        let mut d = MathDoc::with_text("abcdef");
+        d.mark_segment(0..4, "prop:bold", "seg1");
+        d.mark_segment(2..6, "prop:function", "seg2");
+        d.commit();
+        assert_eq!(
+            d.segment_marks(),
+            vec![
+                (0..4, "prop:bold".to_owned()),
+                (2..6, "prop:function".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn clear_segment_marks_removes_all() {
+        let mut d = MathDoc::with_text("ab cd ef");
+        d.mark_segment(0..2, "prop:bold", "seg1");
+        d.mark_segment(3..5, "prop:function", "seg2");
+        d.commit();
+        assert_eq!(d.segment_marks().len(), 2);
+        d.clear_segment_marks();
+        d.commit();
+        assert_eq!(d.segment_marks(), vec![]);
     }
 }
