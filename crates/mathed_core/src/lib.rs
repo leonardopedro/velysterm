@@ -19,6 +19,7 @@ pub mod accessibility;
 pub mod blocks;
 pub mod doc;
 pub mod format;
+pub mod glyphs;
 pub mod markers;
 pub mod search;
 pub mod semantics;
@@ -29,6 +30,9 @@ pub use accessibility::{
     build_access_nodes, describe_segment, AccessNode, AccessRole,
 };
 pub use doc::{ByteDelta, DocError, MathDoc, ReplaceOp};
+pub use glyphs::{
+    build_glyph_index, CaretGeom, GlyphEntry, GlyphIndex, LineBand, RectF, V2,
+};
 pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, Segment,
     next_marker_id, resolve_segments, scan,

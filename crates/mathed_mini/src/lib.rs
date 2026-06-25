@@ -15,7 +15,7 @@ pub mod render;
 pub mod world;
 
 pub use render::{
-    doc_to_markup, render_doc, render_markup, render_world, RenderError,
-    DEFAULT_WIDTH_PT,
+    doc_to_markup, doc_to_render, layout_doc, render_doc, render_markup,
+    render_world, DocLayout, RenderError, DEFAULT_WIDTH_PT,
 };
 pub use world::MiniWorld;

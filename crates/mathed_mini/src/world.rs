@@ -56,6 +56,12 @@ impl MiniWorld {
         self.main = Source::detached(markup);
     }
 
+    /// The main source document — needed to resolve glyph spans to byte
+    /// offsets when building a glyph index.
+    pub fn main_source(&self) -> &Source {
+        &self.main
+    }
+
     /// Evaluate the main source into a [`Content`] tree, or `None` on error.
     pub fn eval_main(&self) -> Option<Content> {
         let world: &dyn World = self;

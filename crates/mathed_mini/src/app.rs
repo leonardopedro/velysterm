@@ -1,17 +1,18 @@
 //! Minimal winit + softbuffer window for the math editor.
 //!
-//! Pure-CPU presentation: every redraw lays out the document with
-//! [`crate::render`] into an [`imaging::RgbaImage`] and blits it (alpha-composited
-//! over white) into a softbuffer surface. No GPU, no Bevy.
+//! Pure-CPU presentation: an edit lays out the document with [`crate::render`]
+//! into a cached [`DocLayout`] (image + glyph index) and blits it
+//! (alpha-composited over white) into a softbuffer surface. No GPU, no Bevy.
 //!
-//! Editing in this increment is deliberately minimal — character insertion,
-//! Backspace and Enter at the end of the document — enough to prove the
-//! input → model → re-render → present loop. Caret rendering and cursor
-//! navigation come in the next increment.
+//! Following `foot`'s philosophy, the expensive content render is cached and
+//! only recomputed on edit/resize; moving the caret reuses the cached layout
+//! and just re-blits a cheap vertical bar over it — cursor motion never re-runs
+//! Typst layout.
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
+use mathed_core::glyphs::CaretGeom;
 use mathed_core::MathDoc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -19,7 +20,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::render::{doc_to_markup, render_markup};
+use crate::render::{layout_doc, DocLayout};
 
 type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
@@ -35,59 +36,171 @@ struct App {
     window: Option<Rc<Window>>,
     surface: Option<Surface>,
     doc: MathDoc,
+    /// Caret position as a document byte offset.
+    caret: usize,
+    /// Cached laid-out page; `None` until first render or after invalidation.
+    layout: Option<DocLayout>,
+    /// Width (px) the cached layout was laid out at.
+    layout_width: u32,
 }
 
 impl App {
     fn new(initial: &str) -> Self {
+        let doc = MathDoc::with_text(initial);
+        let caret = doc.len();
         Self {
             window: None,
             surface: None,
-            doc: MathDoc::with_text(initial),
+            doc,
+            caret,
+            layout: None,
+            layout_width: 0,
         }
     }
 
-    /// Insert text at the end of the document.
+    /// Drop the cached layout so the next redraw recomputes it.
+    fn invalidate(&mut self) {
+        self.layout = None;
+    }
+
+    fn request_redraw(&self) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Insert text at the caret and advance the caret past it.
     fn insert(&mut self, s: &str) {
-        let at = self.doc.len();
-        self.doc.insert(at, s);
+        self.doc.insert(self.caret, s);
+        self.caret += s.len();
+        self.invalidate();
     }
 
-    /// Delete the last character (Backspace).
+    /// Delete the character before the caret (Backspace).
     fn backspace(&mut self) {
+        if self.caret == 0 {
+            return;
+        }
+        let prev = prev_char_boundary(self.doc.text(), self.caret);
+        self.doc.delete(prev..self.caret);
+        self.caret = prev;
+        self.invalidate();
+    }
+
+    /// Delete the character after the caret (Delete).
+    fn delete_forward(&mut self) {
         let text = self.doc.text();
-        if let Some(c) = text.chars().last() {
-            let len = text.len();
-            self.doc.delete(len - c.len_utf8()..len);
+        if self.caret >= text.len() {
+            return;
+        }
+        let next = next_char_boundary(text, self.caret);
+        self.doc.delete(self.caret..next);
+        self.invalidate();
+    }
+
+    /// Move the caret one character left (no relayout).
+    fn move_left(&mut self) {
+        if self.caret > 0 {
+            self.caret = prev_char_boundary(self.doc.text(), self.caret);
+            self.request_redraw();
         }
     }
 
-    /// Lay out the current document and present it to the window.
+    /// Move the caret one character right (no relayout).
+    fn move_right(&mut self) {
+        let text = self.doc.text();
+        if self.caret < text.len() {
+            self.caret = next_char_boundary(text, self.caret);
+            self.request_redraw();
+        }
+    }
+
+    /// Move to the start of the current line.
+    fn move_home(&mut self) {
+        let text = self.doc.text();
+        self.caret = text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+        self.request_redraw();
+    }
+
+    /// Move to the end of the current line.
+    fn move_end(&mut self) {
+        let text = self.doc.text();
+        self.caret = text[self.caret..]
+            .find('\n')
+            .map_or(text.len(), |i| self.caret + i);
+        self.request_redraw();
+    }
+
+    /// Lay out the current document (if the cache is stale) and present it.
     fn redraw(&mut self) {
         let Some(window) = self.window.clone() else { return };
-        let Some(surface) = self.surface.as_mut() else { return };
-
         let size = window.inner_size();
         let (Some(w), Some(h)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
             return;
         };
+
+        // Recompute the cached layout only when invalidated or the width
+        // changed (foot-style: edits/resizes pay; caret moves do not).
+        if self.layout.is_none() || self.layout_width != size.width {
+            self.layout = layout_doc(self.doc.text(), size.width as f64).ok();
+            self.layout_width = size.width;
+        }
+
+        let Some(surface) = self.surface.as_mut() else { return };
         if surface.resize(w, h).is_err() {
             return;
         }
         let (win_w, win_h) = (size.width as usize, size.height as usize);
 
-        // Render the document at the window width (1px == 1pt).
-        let markup = doc_to_markup(self.doc.text());
-        let image = render_markup(&markup, size.width as f64).ok();
-
         let Ok(mut buffer) = surface.buffer_mut() else { return };
         buffer.fill(0x00FF_FFFF); // white page
 
-        if let Some(img) = image {
-            blit_over_white(&mut buffer, win_w, win_h, &img);
+        if let Some(layout) = &self.layout {
+            blit_over_white(&mut buffer, win_w, win_h, &layout.image);
+            if let Some(geom) = layout.glyphs.caret_for_byte(self.caret) {
+                draw_caret(&mut buffer, win_w, win_h, geom);
+            }
         }
         let _ = buffer.present();
+    }
+}
+
+/// The unsigned distance to the previous UTF-8 char boundary before `at`.
+fn prev_char_boundary(text: &str, at: usize) -> usize {
+    text[..at].char_indices().next_back().map_or(0, |(i, _)| i)
+}
+
+/// The next UTF-8 char boundary at or after `at` (assumes `at < len`).
+fn next_char_boundary(text: &str, at: usize) -> usize {
+    text[at..]
+        .char_indices()
+        .nth(1)
+        .map_or(text.len(), |(i, _)| at + i)
+}
+
+/// Draw a 1–2px vertical caret bar at the glyph geometry (frame pt == px at
+/// scale 1, image blitted at the window origin), clipped to the window.
+fn draw_caret(
+    buffer: &mut [u32],
+    win_w: usize,
+    win_h: usize,
+    geom: CaretGeom,
+) {
+    const CARET: u32 = 0x0020_60F0; // a calm blue
+    let x = geom.x.round().max(0.0) as usize;
+    let top = geom.top.round().max(0.0) as usize;
+    let bottom = (geom.top + geom.height).round().max(0.0) as usize;
+    if x >= win_w {
+        return;
+    }
+    let x_end = (x + 2).min(win_w); // 2px wide for visibility
+    for y in top..bottom.min(win_h) {
+        let row = y * win_w;
+        for px in &mut buffer[row + x..row + x_end] {
+            *px = CARET;
+        }
     }
 }
 
@@ -130,8 +243,8 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("mathed (minimal)");
+        let attrs =
+            Window::default_attributes().with_title("mathed (minimal)");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -167,11 +280,7 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => {
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
+            WindowEvent::Resized(_) => self.request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::KeyboardInput {
                 event:
@@ -183,23 +292,35 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                let mut changed = true;
                 match logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        event_loop.exit();
-                        return;
+                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Backspace) => {
+                        self.backspace();
+                        self.request_redraw();
                     }
-                    Key::Named(NamedKey::Backspace) => self.backspace(),
-                    Key::Named(NamedKey::Enter) => self.insert("\n"),
-                    Key::Named(NamedKey::Space) => self.insert(" "),
-                    _ => match &text {
-                        Some(t) if !t.is_empty() => self.insert(t),
-                        _ => changed = false,
-                    },
-                }
-                if changed {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                    Key::Named(NamedKey::Delete) => {
+                        self.delete_forward();
+                        self.request_redraw();
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.insert("\n");
+                        self.request_redraw();
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        self.insert(" ");
+                        self.request_redraw();
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => self.move_left(),
+                    Key::Named(NamedKey::ArrowRight) => self.move_right(),
+                    Key::Named(NamedKey::Home) => self.move_home(),
+                    Key::Named(NamedKey::End) => self.move_end(),
+                    _ => {
+                        if let Some(t) = &text
+                            && !t.is_empty()
+                        {
+                            self.insert(t);
+                            self.request_redraw();
+                        }
                     }
                 }
             }
