@@ -33,7 +33,7 @@ mathed (bevy)  existing rich GPU frontend → now just one OPTIONAL frontend    
 mathed_a11y    OPTIONAL AccessKit bridge over accessibility nodes             ⏳ TODO
 ```
 
-## Done (committed: velysterm `0ed6015`, branch `gitbutler/workspace`, NOT pushed)
+## Done (committed: velysterm `0ed6015` + `a456156`, branch `gitbutler/workspace`, NOT pushed)
 
 - **`mathed_core::accessibility`** (`crates/mathed_core/src/accessibility.rs`):
   `AccessRole`, `AccessNode { role, label, value, range }`, `describe_segment`,
@@ -62,59 +62,49 @@ mathed_a11y    OPTIONAL AccessKit bridge over accessibility nodes             �
   **Cannot run the GUI in the dev environment (no display)** — verified compile
   + link + unit-tested render path only.
 
-## NEXT: Increment 3 — caret + cursor navigation (foot-inspired)
+## Increment 3 — caret + cursor navigation (foot-inspired) ✓ DONE
 
 Design: cache the laid-out content (Frame + glyph index + RGBA8 image); only
 recompute on edit/resize. The caret is a **cheap overlay** re-blitted on cursor
 moves — cursor motion must NOT re-run Typst layout.
 
-### Step 1 — Port the glyph index into `mathed_core` (pure)
-The Bevy crate already has the full algorithm in `crates/mathed/src/glyphs.rs`:
-`build_glyph_index`, `walk_records`, `GlyphIndex { entries, bands }`,
-`GlyphEntry { doc_byte, x, band, advance }`, `LineBand { top, bottom, baseline }`,
-`CaretGeom { x, top, height }`, `caret_for_byte`, `byte_for_point`,
-`hit_test_entries`, `rects_for_range`.
-- Create `crates/mathed_core/src/glyphs.rs` porting these, **removing Bevy**:
-  replace `bevy::Vec2` with a local `struct V2 { x: f32, y: f32 }` (or tuples);
-  drop `#[derive(Component)]`; replace `bevy_vello::vello::kurbo::Rect` in
-  `rects_for_range` with a local `RectF { x0, y0, x1, y1 }`; drop the
-  `build_glyph_indices` system + `PRELUDE`/`PRELUDE_LEN` consts.
-- `walk_records` essentials (unchanged logic): for `FrameItem::Text(text)`:
-  `text.font.metrics()` → `ascender/descender.at(text.size).to_pt()`; per glyph
-  `glyph.x_advance.at(text.size).to_pt()`; `glyph.span = (Span, cluster)`; if
-  `span.id() == Some(source.id())` and `source.find(span)` → `source_byte =
-  node.range().start + cluster`. Then `body_byte = source_byte - prelude_len`
-  and `doc_byte = map.render_to_doc(body_byte)`. Recurse into `FrameItem::Group`.
-- `mathed_core` already deps `typst` → `typst::layout::{Frame, FrameItem}`,
-  `typst::syntax::Source` available. Export the new module from `lib.rs`.
-- (Later, optional) refactor `mathed/glyphs.rs` to reuse the core version; leave
-  the Bevy crate untouched for now.
+### Step 1 — Port the glyph index into `mathed_core` (pure) ✓
+- Created `crates/mathed_core/src/glyphs.rs` porting `build_glyph_index`,
+  `walk_records`, `GlyphIndex { entries, bands }`,
+  `GlyphEntry { doc_byte, x, band, advance }`, `LineBand { top, bottom, baseline }`,
+  `CaretGeom { x, top, height }`, `caret_for_byte`, `byte_for_point`,
+  `rects_for_range` — **Bevy-free**: `bevy::Vec2` → local `V2 { x, y }`;
+  `bevy_vello::vello::kurbo::Rect` → local `RectF { x0, y0, x1, y1 }`;
+  dropped `#[derive(Component)]` + `build_glyph_indices` system + `PRELUDE`/`PRELUDE_LEN`.
+- Added `band_for_byte(usize) -> Option<usize>` helper for Up/Down navigation.
+- Exported from `lib.rs` (re-exports: `build_glyph_index`, `CaretGeom`,
+  `GlyphEntry`, `GlyphIndex`, `LineBand`, `RectF`, `V2`).
 
-### Step 2 — `mathed_mini` layout result carrying the glyph index
-- `mathed_mini` has **no prelude** → `prelude_len = 0`. The `map` is
-  `RenderOutput.map` from `to_render_text`; the `source` is the
-  `Source::detached(markup)` used by `MiniWorld`.
-- Add `doc_to_render(doc_text) -> RenderOutput` (keep the map; current
-  `doc_to_markup` drops it). Produce a `DocLayout { image, glyphs: GlyphIndex,
-  width, height }` from: eval+layout → `Frame`; `build_glyph_index(&frame,
-  &source, &map, 0)`; rasterize `Frame` → `RgbaImage`. Expose `MiniWorld.main`
-  (or return the Source) so the glyph index can resolve spans.
+### Step 2 — `mathed_mini` layout result carrying the glyph index ✓
+- `render.rs`: `doc_to_render(doc_text) -> RenderOutput` (keeps the map);
+  `DocLayout { image, glyphs, width, height }` from `layout_doc(doc_text,
+  width_pt)`: eval+layout → `Frame`; `build_glyph_index(&frame, &source, &map, 0)`
+  (prelude_len=0); rasterize `Frame` → `RgbaImage`.
 
-### Step 3 — `app.rs` caret + navigation + foot-style caching
-- `App { doc: MathDoc, caret: usize, layout: Option<DocLayout>, dirty: bool }`.
-- Edit (insert/delete) → mutate doc, adjust `caret`, `dirty = true`,
-  `request_redraw`.
-- `redraw()`: if `dirty`, recompute `DocLayout` (cache), `dirty = false`. Blit
-  cached image over white; `caret_geom = layout.glyphs.caret_for_byte(caret)`
-  (fallback origin if `None`); draw a 1–2 px vertical bar at `(x, top..top+height)`
-  (frame pt = px at scale 1, image at window origin); `present`.
-- Navigation (no relayout — just `request_redraw`): Left/Right by char boundary
-  (`doc.text()` char_indices); Home/End (doc or line start/end); Backspace
-  deletes char before caret (caret -= len); Delete char after; Up/Down via
-  `byte_for_point(caret.x, adjacent band)`.
+### Step 3 — `app.rs` caret + navigation + foot-style caching ✓
+- `App { doc, caret, layout: Option<DocLayout>, layout_width }`.
+- `redraw()`: if layout stale or width changed, recompute `DocLayout` (cache);
+  blit cached image over white; `caret_geom = layout.glyphs.caret_for_byte(caret)`;
+  draw 2px vertical bar at `(x, top..top+height)`.
+- Edit (insert/delete) → mutate doc, adjust `caret`, `invalidate()`,
+  `request_redraw()`.
+- Navigation (no relayout — just `request_redraw()`):
+  - Left/Right by char boundary (`prev_char_boundary`/`next_char_boundary`).
+  - Home/End (line start/end via `rfind`/`find` `'\n'`).
+  - Backspace deletes char before caret; Delete char after.
+  - **Up/Down** via `band_for_byte(caret)` → adjacent band →
+    `byte_for_point(caret.x, mid_y)` (sticks to caret x).
 - Insert at caret: `doc.insert(caret, t); caret += t.len()`.
+- Clippy-clean for new code; 3 new tests pass
+  (`band_for_byte_returns_topmost_for_single_line`,
+  `band_for_byte_distinguishes_lines`, `byte_for_point_hits_within_band`).
 
-### Step 4 (optional, defer) — caret blink via `ControlFlow::WaitUntil` +
+### Step 4 (optional, deferred) — caret blink via `ControlFlow::WaitUntil` +
 `about_to_wait`.
 
 ## AFTER Increment 3: `mathed_a11y` (optional crate)
@@ -148,15 +138,17 @@ node name; range → text bounds`. Build `TreeUpdate` from `build_access_nodes`.
   `map.render_to_doc(usize)`. `markers::{scan, resolve_segments}`.
   `MathDoc::{ with_text, text, len, insert(at, &str), delete(Range) }`.
 
-## Git state (as of this writing)
+## Git state (updated 2026-06-25)
 
-- **velysterm**: branch `gitbutler/workspace`, HEAD `0ed6015` (a11y +
-  mathed_mini). Pushed remote tip is `30be64b`; **`0ed6015` is local-only**.
-  GitButler is present but the user works with **plain git** — do NOT run `but`;
-  commit normally on `gitbutler/workspace`. (Earlier teardown left it out of
-  GitButler mode; user re-enters via `but setup` on their own.)
+- **velysterm**: branch `gitbutler/workspace`, HEAD `a456156` (Increment 3:
+  caret + cursor navigation). Uncommitted working-tree additions: `band_for_byte`
+  method on `GlyphIndex`, `move_up`/`move_down` in `app.rs`, ArrowUp/ArrowDown
+  key bindings, 3 new tests in `render.rs`. GitButler is present but the user
+  works with **plain git** — do NOT run `but`; commit normally on
+  `gitbutler/workspace`.
 - **unfer**: HEAD `a3d8a52` (deps + lints + docs + demo_module), **ahead 1, not
   pushed**. Push to `main` is harness-blocked → user runs
   `! git -C .../unfer push origin main`.
 - **australVM**: HEAD `5efb03d3` (auth + JIT symbols + modhost), **ahead 1, not
-  pushed** → `! git -C .../australVM push origin master`.
+  pushed** → `! git -C .../australVM push origin master`. **Note:** 6 `cps.rs.*`
+  backup files are committed and need `git rm` in a follow-up.

@@ -27,6 +27,19 @@ codes, typed repair hints.
   (`KernelBridge` resource + `dispatch_kernel_requests`/`apply_kernel_results`
   systems); `draw_overlay` renders `= 0.42` (green) or `UK-2003` + hint (red)
   next to `\prob` spans.
+- `crates/mathed_mini/` — **optional Bevy-free CPU frontend** for constrained
+  hardware. winit + softbuffer window (gated by `gui` feature);
+  `--no-default-features` builds the headless render core. `MiniWorld` is a
+  standalone `typst::World` (embedded fonts, no system-font discovery).
+  `DocLayout` caches the rasterized page + `GlyphIndex` (foot-style: layout
+  recomputed only on edit/resize, caret moves re-blit). Caret navigation:
+  Left/Right/Home/End/Backspace/Delete/Up/Down. See
+  `docs/mathed/MINI_FRONTEND_PLAN.md`.
+- `crates/mathed_core/` — also exports `glyphs` (Bevy-free `GlyphIndex`,
+  `CaretGeom`, `build_glyph_index`, `caret_for_byte`, `byte_for_point`,
+  `band_for_byte` — ported from `mathed::glyphs`) and `accessibility`
+  (`AccessNode`, `build_access_nodes` — toolkit-neutral a11y for the optional
+  `mathed_a11y` AccessKit bridge).
 
 ## Conventions
 
@@ -40,7 +53,8 @@ codes, typed repair hints.
 
 ## Verify
 
-- `cargo test -p kernel_client -p mathed_core` (CPU, fast).
+- `cargo test -p kernel_client -p mathed_core -p mathed_mini` (CPU, fast).
 - `printf '{"id":"1","op":"version","params":{}}\n' | cargo run -p kernel_client
   --bin unfer_agent` → `{"id":"1","ok":true,...}`.
+- `cargo build -p mathed_mini --features gui` (winit + softbuffer link check).
 - `cargo build -p mathed` (heavy — Bevy).

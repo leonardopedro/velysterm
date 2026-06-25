@@ -181,4 +181,73 @@ mod tests {
             start.x
         );
     }
+
+    #[test]
+    fn band_for_byte_returns_topmost_for_single_line() {
+        let layout = layout_doc("one line", 400.0)
+            .expect("layout should succeed");
+        // Single-line document: every byte maps to band 0.
+        let band = layout
+            .glyphs
+            .band_for_byte(0)
+            .expect("band should resolve");
+        assert_eq!(band, 0, "single-line doc has only band 0");
+    }
+
+    #[test]
+    fn band_for_byte_distinguishes_lines() {
+        // Long enough text to wrap onto multiple visual lines at a narrow
+        // width (Typst treats `\n` as whitespace, so we rely on wrapping).
+        let text = "the quick brown fox jumps over the lazy dog \
+                    and then keeps running through the wide green field";
+        let layout = layout_doc(text, 200.0)
+            .expect("layout should succeed");
+        let bands = layout.glyphs.bands.len();
+        assert!(bands >= 2, "expected at least 2 bands, got {bands}");
+        // Byte 0 is on the top band; a byte well into the text should be on
+        // a later band once the content wraps.
+        let top_band = layout
+            .glyphs
+            .band_for_byte(0)
+            .expect("band for first line");
+        let later_band = layout
+            .glyphs
+            .band_for_byte(60)
+            .expect("band for later content");
+        assert!(
+            later_band >= top_band,
+            "later content should be in same or later band ({later_band} >= {top_band})"
+        );
+        if bands >= 2 {
+            assert!(
+                later_band > top_band,
+                "expected wrapped content to be on a later band ({later_band} > {top_band})"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_for_point_hits_within_band() {
+        let layout = layout_doc("hello world", 400.0)
+            .expect("layout should succeed");
+        let caret = layout
+            .glyphs
+            .caret_for_byte(6)
+            .expect("caret geometry for byte 6");
+        let band = &layout.glyphs.bands
+            [layout.glyphs.band_for_byte(6).expect("band for byte 6")];
+        let mid_y = (band.top + band.bottom) * 0.5;
+        let (b, _after) = layout
+            .glyphs
+            .byte_for_point(mathed_core::glyphs::V2::new(
+                caret.x,
+                mid_y,
+            ))
+            .expect("hit-test should resolve");
+        // The hit-test at the caret x should land on or near byte 6.
+        assert!(
+            (b as isize - 6).abs() <= 1,
+            "byte_for_point near caret x should hit byte ~6, got {b}"
+        );
+    }
 }

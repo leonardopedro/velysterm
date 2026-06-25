@@ -87,7 +87,81 @@ Semantic core is implemented and partially wired. The project is now moving back
 - [ ] Search overlay rendering (search match rects in draw_overlay).
 - [ ] Smoke run verification (requires display server).
 
+## 2026-06-24 — unfer kernel integration (S14–S18)
+
+The velysterm workspace was extended to integrate with the unfer modular
+probability kernel (see `unfer/docs/IMPLEMENTATION_PLAN.md` stages S14–S18):
+
+- **S14 `kernel_client` crate** (`crates/kernel_client/`): Bevy-free worker-thread
+  client for `prob_kernel::Session`. `KernelClient` dispatches requests via
+  crossbeam mpsc to a worker thread that owns `HashMap<u64, Session>` keyed by
+  model-block id with spec-hash caching. `parse.rs` translates the editor DSL
+  (`name(k: v)` builtins, `latex"..."`, `n(mode)==k` events, `occupied(mode)`,
+  `vacuum`, `& | !` combinators) into `ModelSpec`/`EventPredicate`. 7 tests.
+- **S15 PropKinds in mathed_core**: `PropKind::{Model, Prior, Event, Prob}` +
+  `is_kernel()` method. `KernelStatement` collected in
+  `SemanticIndex::build_index`. `find_block_for_doc_pos` helper. 53→59 tests
+  (6 new tests for kernel-bearing statements + glyph index).
+- **S16 Bevy bridge** (`crates/mathed/src/kernel_sys.rs`): `KernelBridge`
+  resource with `dispatch_kernel_requests` + `apply_kernel_results` systems.
+  `statements_needing_dispatch` pure helper (7 tests). Overlay renders
+  `= 0.4231` (green `prob_ok`) or `UK-2003` + hint (red `prob_err`) next to
+  `\prob` spans. Systems registered after `sync_blocks`.
+- **S17 AI-agent interface** (`crates/kernel_client/src/bin/unfer_agent.rs`):
+  NDJSON request/response loop on stdin/stdout. 8 ops (`version`,
+  `create_model`, `set_prior`, `evolve`, `condition`, `probability`,
+  `snapshot`, `list_codes`). Unknown op → UK-1001 + `ReplaceValue` hint.
+- **S18 docs**: `unfer/docs/ARCHITECTURE.md`, `PROTOCOL.md`, `MODULE_RECIPE.md`,
+  `BUILD_PIPELINE.md` written. `AGENTS.md` files updated in all three repos.
+
+## 2026-06-25 — mathed_mini: Bevy-free CPU frontend
+
+A new optional frontend, `crates/mathed_mini`, targets constrained hardware
+(no GPU, no Bevy). Tracked in `docs/mathed/MINI_FRONTEND_PLAN.md`.
+
+- **Increment 1 + 2** (committed `0ed6015`): `MiniWorld` — standalone
+  `typst::World` with embedded `typst-assets` fonts (no system fonts).
+  CPU renderer: Typst `Frame` → `imaging_vello_cpu::VelloCpuRenderer` →
+  `RgbaImage`. winit 0.30 + softbuffer 0.4 window. `gui` feature gates the
+  window code; `--no-default-features` builds the headless render core.
+  Editing v1: insert / Backspace / Enter / Space / Esc at END only.
+- **`mathed_core::accessibility`** (committed `0ed6015`): `AccessRole`,
+  `AccessNode { role, label, value, range }`, `describe_segment`,
+  `build_access_nodes`. Toolkit-neutral (no Bevy/AccessKit). 6 tests.
+- **`mathed_core::glyphs`** (committed `a456156`): Bevy-free port of
+  `mathed::glyphs`. `GlyphIndex`, `GlyphEntry`, `LineBand`, `CaretGeom`,
+  `V2`, `RectF`, `build_glyph_index`, `caret_for_byte`, `byte_for_point`,
+  `rects_for_range`. Replaces `bevy::Vec2` → `V2`, `kurbo::Rect` → `RectF`,
+  drops `#[derive(Component)]` + ECS system.
+- **Increment 3** (committed `a456156` + uncommitted additions): Caret +
+  cursor navigation (foot-inspired caching). `DocLayout { image, glyphs,
+  width, height }` cached and recomputed only on edit/resize. Navigation:
+  Left/Right (char boundary), Home/End (line), Backspace/Delete, Up/Down
+  (via `band_for_byte` → `byte_for_point`). Uncommitted additions:
+  `band_for_byte()` method on `GlyphIndex`, `move_up`/`move_down` in
+  `app.rs`, 3 new tests. 6 mathed_mini tests total.
+- **Deferred:** Step 4 (caret blink via `ControlFlow::WaitUntil`),
+  `mathed_a11y` (AccessKit bridge crate).
+
+## 2026-06-25 — Dependency updates
+
+All three workspaces had `cargo update` run successfully:
+- **unfer**: 45 packages updated.
+- **australVM**: 57 packages updated.
+- **velysterm**: 73 packages updated.
+
 ## Constraints
 - No modifications to `crates/velyst`, `crates/typst_imaging`, or `crates/kanva`.
 - Use UTF-8 byte offsets.
 - Compliance with `cargo fmt`, `cargo test`, `cargo clippy`, and `cargo check`.
+- `mathed_mini` is an optional crate (`gui` feature); `--no-default-features`
+  builds the headless render core. Cannot run the GUI in the dev environment
+  (no display) — verified compile + link + unit-tested render path only.
+- The kernel is reached only through `prob_kernel::Session` — the same code
+  path for the GUI, the `unfer_agent` binary, and Austral modules (via FFI).
+
+## Test counts (CPU, 2026-06-25)
+- mathed_core: 59 tests
+- mathed_mini: 6 tests
+- kernel_client: 7 tests
+- mathed (Bevy): 36 tests

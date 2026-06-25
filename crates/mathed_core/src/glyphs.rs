@@ -266,6 +266,29 @@ impl GlyphIndex {
         })
     }
 
+    /// Index (into `self.bands`) of the line band containing `doc_byte`, or
+    /// the nearest band if there is no exact entry. Bands are sorted by `top`,
+    /// so the index is also the visual line number (0 = topmost).
+    ///
+    /// Used for Up/Down caret motion: find the current band, then move to the
+    /// adjacent one and hit-test at the caret's x.
+    pub fn band_for_byte(&self, doc_byte: usize) -> Option<usize> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let idx = self.entries.partition_point(|e| e.doc_byte < doc_byte);
+        let band_idx = if idx < self.entries.len()
+            && self.entries[idx].doc_byte == doc_byte
+        {
+            self.entries[idx].band
+        } else if idx > 0 {
+            self.entries[idx - 1].band
+        } else {
+            self.entries[0].band
+        };
+        Some(band_idx as usize)
+    }
+
     /// Hit-test a point to a doc byte offset.
     ///
     /// Returns `(doc_byte, after)` where `after` is true when the point falls

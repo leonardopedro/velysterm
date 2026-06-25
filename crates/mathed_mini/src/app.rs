@@ -131,6 +131,52 @@ impl App {
         self.request_redraw();
     }
 
+    /// Move the caret up one visual line (no relayout). Sticks to the
+    /// caret's current x; falls back to the line start when there is
+    /// no layout or the target is off-page.
+    fn move_up(&mut self) {
+        if let Some(layout) = &self.layout
+            && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
+            && bi > 0
+        {
+            let target_band = &layout.glyphs.bands[bi - 1];
+            let mid_y = (target_band.top + target_band.bottom) * 0.5;
+            let x = layout
+                .glyphs
+                .caret_for_byte(self.caret)
+                .map_or(0.0, |g| g.x);
+            if let Some((b, _)) = layout
+                .glyphs
+                .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
+            {
+                self.caret = b;
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Move the caret down one visual line (no relayout).
+    fn move_down(&mut self) {
+        if let Some(layout) = &self.layout
+            && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
+            && bi + 1 < layout.glyphs.bands.len()
+        {
+            let target_band = &layout.glyphs.bands[bi + 1];
+            let mid_y = (target_band.top + target_band.bottom) * 0.5;
+            let x = layout
+                .glyphs
+                .caret_for_byte(self.caret)
+                .map_or(0.0, |g| g.x);
+            if let Some((b, _)) = layout
+                .glyphs
+                .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
+            {
+                self.caret = b;
+            }
+        }
+        self.request_redraw();
+    }
+
     /// Lay out the current document (if the cache is stale) and present it.
     fn redraw(&mut self) {
         let Some(window) = self.window.clone() else { return };
@@ -312,6 +358,8 @@ impl ApplicationHandler for App {
                     }
                     Key::Named(NamedKey::ArrowLeft) => self.move_left(),
                     Key::Named(NamedKey::ArrowRight) => self.move_right(),
+                    Key::Named(NamedKey::ArrowUp) => self.move_up(),
+                    Key::Named(NamedKey::ArrowDown) => self.move_down(),
                     Key::Named(NamedKey::Home) => self.move_home(),
                     Key::Named(NamedKey::End) => self.move_end(),
                     _ => {
