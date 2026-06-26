@@ -192,3 +192,30 @@ and resume state for a new agent. P3 #10 in
 layer: `PropKind::Translator`, `TranslatorDef`,
 `KernelStatement.translator`) is safe to start. Step 2 (typst-eval API
 investigation) blocks Step 3.
+
+## 2026-06-26 — P3 #10 translator pipeline (Steps 1–4 implemented)
+
+Core pipeline (document → semantic layer → typst-eval → kernel payload)
+is complete and tested. Remaining: Step 5 (collapsible panel rendering)
+and full kernel wiring (P3 #11).
+
+- **Step 1** (`d16e4bd`) — `PropKind::Translator`, `TranslatorDef`,
+  `SemanticIndex.translators`, `KernelStatement.translator`,
+  `extract_named_string`, `AccessRole::Translator` in `mathed_core`.
+- **Step 2** — typst-eval (0.14.2) resolved via the **let-binding path**:
+  append `#let __mathed_result = translate(<body>)` to the translator
+  source so Typst calls the function during eval, then read the binding.
+  No `Vm`/`Args` construction. (TRANSLATOR_DESIGN.md §5 Risk A.)
+- **Step 3** (`14d0c9d`) — `mathed_mini::translate` (`Translator`,
+  `TranslateError`), `MiniWorld::eval_binding`, `builtin_translator.typ`
+  (default: mode-0 number operator). 9 tests.
+- **Step 4** (`12864ce`) — `mathed_mini::dispatch`
+  (`statement_to_model_spec` → `HamiltonianSpec::Terms` + vacuum prior;
+  `statement_to_event_json`; `resolve_translator_src` named → unnamed
+  → builtin). Added `unfer_protocol` + `serde_json` to `mathed_mini`.
+  4 tests. mathed_mini: 19 tests total.
+
+**Deviation:** the engine + dispatcher live in `mathed_mini` (owns
+`MiniWorld` + typst-eval), not `kernel_client`, keeping the agent binary
+typst-free. `parse.rs` is intentionally **not** deleted yet (design §6
+constraint: keep until the worker is wired).

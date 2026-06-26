@@ -1,8 +1,19 @@
 # P3 #10 — User-Defined Translator Pipeline
 
-> **Status:** DESIGN — not yet implemented. Last updated 2026-06-26.
+> **Status:** Steps 1–4 IMPLEMENTED (2026-06-26). Core pipeline —
+> semantic layer → typst-eval → dispatcher — is complete and tested.
+> Remaining: Step 5 (collapsible panel rendering) and full kernel wiring
+> (P3 #11, dispatch output → `kernel_client` worker). Last updated
+> 2026-06-26.
 > **Supersedes** the "Typst-math → Hamiltonian compiler" item in
 > `unfer/docs/IMPLEMENTATION_PLAN.md` (P3 #10, line 345).
+>
+> **Deviation from the original sketch:** the `translate` engine and the
+> dispatcher live in `crates/mathed_mini` (which owns `MiniWorld` +
+> `typst-eval`), **not** in `kernel_client`. This keeps `kernel_client`
+> and the `unfer_agent` binary typst-free. `kernel_client` still owns the
+> worker/`Session`; `mathed_mini::dispatch` produces the `ModelSpec` /
+> event JSON that the worker consumes.
 
 ## 1. Motivation & pivot
 
@@ -384,12 +395,24 @@ pub enum TranslateError {
 
 ### Risk A — typst-eval function invocation (Step 2 blocker)
 
-**The question:** can we call a `Value::Func` from Rust with a string
-argument and read the return value, without constructing a full `Vm`
-(Route, Tracer, Introspector)?
+**RESOLVED (2026-06-26):** use the **let-binding path** (a variant of the
+bare-expression fallback). We do *not* call `Value::Func` from Rust.
+Instead the engine appends `#let __mathed_result = translate(<body>)` to
+the translator source, so **Typst itself** invokes `translate(body)`
+during module evaluation. We then read `__mathed_result` from the module
+scope: `module.scope().get(name)` → `&Binding` → `binding.read()` →
+`&Value`, matching `Value::Str`. This reuses the existing
+`typst_eval::eval` call (mirrored from `MiniWorld::eval_main` as the new
+`MiniWorld::eval_binding`) with no `Vm`/`Args` construction. typst
+version: 0.14.2. Implemented in `mathed_mini/src/translate.rs`.
 
-**If no:** use the **bare-expression fallback** — inject `body` as a
-`#let __body = "..."` binding, translator source becomes
+**The original question:** can we call a `Value::Func` from Rust with a
+string argument and read the return value, without constructing a full
+`Vm` (Route, Tracer, Introspector)? — moot; the let-binding path sidesteps
+it entirely.
+
+**The bare-expression fallback** (unused, kept for reference): inject
+`body` as a `#let __body = "..."` binding, translator source becomes
 `#let __result = (... expression referencing __body ...)`, we read
 `__result` from the module scope. No function call needed.
 
@@ -472,15 +495,31 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
 
 ## 9. Resume state for a new agent
 
-- **Done so far:** design decisions locked (§2), architecture drafted
-  (§3), this doc written. No code written yet.
-- **Next action:** Step 1 (mathed_core layer — no external deps, safe
-  to start immediately). In parallel, Step 2 (typst-eval API
-  investigation — blocks Step 3).
-- **Read first:** `crates/mathed_core/src/markers.rs` (PropKind),
-  `crates/mathed_core/src/semantics.rs` (SemanticIndex),
-  `crates/kernel_client/src/parse.rs` (what we're deleting),
-  `crates/mathed/src/kernel_sys.rs` (dispatcher to modify).
+- **Done (2026-06-26):**
+  - **Step 1** — `PropKind::Translator`, `TranslatorDef`,
+    `SemanticIndex.translators`, `KernelStatement.translator`,
+    `extract_named_string` in `mathed_core` (+ `AccessRole::Translator`).
+    Commit `d16e4bd`. 5 tests.
+  - **Step 2** — typst-eval API resolved via the let-binding path (see
+    §5 Risk A). typst 0.14.2.
+  - **Step 3** — `mathed_mini::translate` (`Translator`,
+    `TranslateError`, `MiniWorld::eval_binding`) +
+    `builtin_translator.typ`. Commit `14d0c9d`. 9 tests.
+  - **Step 4** — `mathed_mini::dispatch`
+    (`statement_to_model_spec`/`statement_to_event_json`,
+    `resolve_translator_src`, `DispatchError`); added `unfer_protocol` +
+    `serde_json` deps to `mathed_mini`. Commit `12864ce`. 4 tests.
+- **Next action:** **Step 5** (collapsible panel rendering in
+  `transform.rs` + `mathed_mini/src/app.rs`) and full kernel wiring
+  (P3 #11: feed `dispatch` output into the `kernel_client` worker so a
+  `\prob` overlay shows a real number). Note `crates/mathed` (Bevy) does
+  not currently compile (pre-existing velyst example breakage,
+  unrelated); `mathed_mini` is the working integration target.
+- **Read first:** `crates/mathed_mini/src/{translate,dispatch,world}.rs`
+  (the engine), `crates/mathed_core/src/semantics.rs` (SemanticIndex),
+  `crates/mathed_mini/src/app.rs` (where the panel + overlay land),
+  `crates/kernel_client/src/{worker,parse}.rs` (worker to feed; parse.rs
+  is the still-present v1 shortcut, not yet deleted per §6 constraint).
 - **Key constraint:** translator body is Typst *code* (not rendered
   math). Math content between `\model` markers is rendered math
   (display only). The translator receives the math as a raw string.
