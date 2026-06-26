@@ -1271,7 +1271,8 @@ fn draw_overlay(
         if ks.kind != mathed_core::PropKind::Prob {
             continue;
         }
-        let Some(result) = kernel_bridge.results.get(&ks.block)
+        let Some(result) =
+            kernel_bridge.results().get(&ks.span.start)
         else {
             continue;
         };

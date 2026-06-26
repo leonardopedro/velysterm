@@ -5519,6 +5519,7 @@ dependencies = [
  "bevy_vello",
  "kernel_client",
  "mathed_core",
+ "mathed_mini",
  "typst",
  "velyst",
 ]

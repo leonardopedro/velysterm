@@ -1,4 +1,3 @@
-pub mod parse;
 pub mod worker;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
