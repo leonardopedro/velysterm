@@ -19,10 +19,16 @@ pub enum KernelRequest {
         t: f64,
     },
     Probability {
+        /// Session to query (the `\model` block).
+        model_id: BlockId,
+        /// Result key, echoed back in the response (the `\prob` block).
         block_id: BlockId,
         event_json: String,
     },
     Condition {
+        /// Session to mutate (the `\model` block).
+        model_id: BlockId,
+        /// Result key, echoed back in the response.
         block_id: BlockId,
         event_json: String,
     },

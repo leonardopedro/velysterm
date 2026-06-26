@@ -80,11 +80,12 @@ impl KernelWorker {
                     }
                 }
                 KernelRequest::Probability {
+                    model_id,
                     block_id,
                     event_json,
                 } => {
                     if let Some(session) =
-                        self.sessions.get(&block_id)
+                        self.sessions.get(&model_id)
                     {
                         match serde_json::from_str::<
                             unfer_protocol::EventPredicate,
@@ -129,11 +130,12 @@ impl KernelWorker {
                     }
                 }
                 KernelRequest::Condition {
+                    model_id,
                     block_id,
                     event_json,
                 } => {
                     if let Some(session) =
-                        self.sessions.get_mut(&block_id)
+                        self.sessions.get_mut(&model_id)
                     {
                         match serde_json::from_str::<
                             unfer_protocol::EventPredicate,
