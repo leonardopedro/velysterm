@@ -26,6 +26,13 @@ use typst::foundations::Value;
 pub const BUILTIN_TRANSLATOR: &str =
     include_str!("builtin_translator.typ");
 
+/// The default event translator, used when a `\event`/`\prob` segment names
+/// no translator. Emits the `Vacuum` predicate — the simplest valid
+/// `EventPredicate` — so a document with no event translator still produces a
+/// well-formed kernel request.
+pub const BUILTIN_EVENT_TRANSLATOR: &str =
+    include_str!("builtin_event_translator.typ");
+
 /// The scope binding the engine reads back after evaluation.
 const RESULT_BINDING: &str = "__mathed_result";
 

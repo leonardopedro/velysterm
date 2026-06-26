@@ -61,6 +61,10 @@ pub struct Occurrence {
 /// - `translator` — optional translator name (from a `translator: "name"`
 ///   named extra-arg); `None` means the dispatcher falls back to the
 ///   builtin default translator (P3 #10).
+/// - `model_name` — optional model binding for `\prob`/`\event`
+///   statements (from a `model: "name"` named extra-arg, P3 #10
+///   follow-up). When present, the bridge binds the statement to the
+///   `\model` with that `name` instead of its nearest preceding model.
 /// - `span` — doc byte range of the body text (exclusive of markers).
 #[derive(Debug, Clone)]
 pub struct KernelStatement {
@@ -69,6 +73,7 @@ pub struct KernelStatement {
     pub name: Option<String>,
     pub body_text: String,
     pub translator: Option<String>,
+    pub model_name: Option<String>,
     pub span: Range<usize>,
 }
 
@@ -217,12 +222,19 @@ impl SemanticIndex {
             });
             let translator =
                 extract_named_string(&seg.extra_args, "translator");
+            let model_name = match seg.kind {
+                PropKind::Prob | PropKind::Event => {
+                    extract_named_string(&seg.extra_args, "model")
+                }
+                _ => None,
+            };
             kernel_statements.push(KernelStatement {
                 kind: seg.kind,
                 block,
                 name,
                 body_text,
                 translator,
+                model_name,
                 span,
             });
         }
@@ -516,5 +528,48 @@ mod tests {
         let p = &idx.kernel_statements[0];
         assert_eq!(p.name.as_deref(), Some("heads"));
         assert_eq!(p.translator.as_deref(), Some("ho"));
+    }
+
+    #[test]
+    fn prob_model_name_extracted() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\
+                   #3 a #4 \\model(#1,#2, m2)\n\
+                   #5 vac #6 \\prob(#5,#6, model: \"m2\")";
+        let idx = build_index_for(doc);
+        let prob = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Prob)
+            .expect("a prob statement");
+        assert_eq!(
+            prob.model_name.as_deref(),
+            Some("m2"),
+            "model: arg extracted on prob"
+        );
+    }
+
+    #[test]
+    fn model_without_prob_has_no_model_name() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)";
+        let idx = build_index_for(doc);
+        let m = &idx.kernel_statements[0];
+        assert_eq!(m.kind, PropKind::Model);
+        assert!(
+            m.model_name.is_none(),
+            "model_name only on prob/event"
+        );
+    }
+
+    #[test]
+    fn event_model_name_extracted() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\
+                   #3 vac #4 \\event(#3,#4, model: \"m1\")";
+        let idx = build_index_for(doc);
+        let ev = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Event)
+            .expect("an event statement");
+        assert_eq!(ev.model_name.as_deref(), Some("m1"));
     }
 }

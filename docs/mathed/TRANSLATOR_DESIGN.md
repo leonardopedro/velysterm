@@ -1,16 +1,20 @@
 # P3 #10 — User-Defined Translator Pipeline
 
-> **Status:** Steps 1–5 + kernel wiring (P3 #11) IMPLEMENTED (2026-06-26).
-> The full chain runs end-to-end in `mathed_mini`: document → semantic
-> layer → typst-eval translator → dispatcher → `kernel_client` worker →
-> `prob_kernel::Session`, with the computed `\prob` value shown in a
-> results panel below the document. A `\prob` over a vacuum model computes
-> P(vacuum) = 1.0 through the real worker thread (test), shown **inline**
-> next to the `\prob` (a coloured value spliced into the render via
-> `TransformOptions.annotations`). **COMPLETE** — the Bevy `mathed`
+> **Status:** Steps 1–6 + kernel wiring (P3 #11) + follow-ups (translator
+> caching, multi-model binding, richer event predicates) IMPLEMENTED
+> (2026-06-26). The full chain runs end-to-end in `mathed_mini`: document →
+> semantic layer → typst-eval translator → dispatcher → `kernel_client`
+> worker → `prob_kernel::Session`, with the computed `\prob` value shown
+> in a results panel below the document. A `\prob` over a vacuum model
+> computes P(vacuum) = 1.0 through the real worker thread (test), shown
+> **inline** next to the `\prob` (a coloured value spliced into the render
+> via `TransformOptions.annotations`). **COMPLETE** — the Bevy `mathed`
 > frontend was ported to the same `mathed_mini::KernelBridge` and the v1
 > `parse.rs` shortcut was deleted, so both frontends share one kernel
-> path. Last updated 2026-06-26.
+> path. Follow-ups implemented: translator-aware change detection (Risk
+> C), `\prob`/`\event` `model: "name"` explicit binding, separate builtin
+> event translator + typed `EventPredicate` validation. Last updated
+> 2026-06-26.
 > **Supersedes** the "Typst-math → Hamiltonian compiler" item in
 > `unfer/docs/IMPLEMENTATION_PLAN.md` (P3 #10, line 345).
 >
@@ -443,11 +447,16 @@ return `Result<Hamiltonian, CasError>` (small, separate PR).
 
 ### Risk C — translator caching
 
-Evaluating Typst on every keystroke is expensive. The existing
-`spec_hashes` change-detection (hash of `body_text`) should be
-extended to hash `(translator_src, body_text)` so the translator is
-only re-evaluated when either changes. `comemo::evict()` may also
-cache typst eval — verify in Step 2.
+**RESOLVED (2026-06-26):** `model_hashes` and `prob_hashes` in
+`KernelBridge` now include translator source alongside body text.
+`hash_many(&[&body, trans_src])` for models;
+`hash_many(&[&prob_body, prob_trans, &model_body, model_trans])` for
+probs. The builtin fallback differs by statement kind
+(`BUILTIN_TRANSLATOR` for models, `BUILTIN_EVENT_TRANSLATOR` for
+events/probs) and is included in the hash. A `\translator` edit now
+re-dispatches all dependent models/probs without a worker round-trip
+when the body is unchanged. `comemo::evict()` is not needed — the hash
+short-circuit is sufficient.
 
 ## 6. What gets deleted
 
@@ -543,10 +552,22 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
     (`parse_model`/`parse_event`) deleted. Both frontends share one
     kernel path. Commit `675b064`. (`cargo build -p mathed` was already
     fine — the velyst breakage is confined to velyst's *examples*.)
-- **Next action:** none outstanding for this design. Possible follow-ups:
-  multi-model documents (currently a prob binds to its nearest preceding
-  model), translator caching (Risk C), and richer event-predicate
-  translators.
+- **Next action:** none outstanding for this design. Follow-ups completed:
+  - **Translator caching (Risk C):** `model_hashes` and `prob_hashes` now
+    include translator source (`BUILTIN_TRANSLATOR` /
+    `BUILTIN_EVENT_TRANSLATOR`) so editing a `\translator` segment
+    re-dispatches dependent models/probs. Test: `translator_change_triggers_redispatch`.
+  - **Multi-model documents:** `\prob(#1,#2, model: "m2")` /
+    `\event(#1,#2, model: "m1")` explicitly bind to a named `\model` instead
+    of the nearest preceding one. Missing names produce a synchronous
+    `model-not-found` error. Tests: `prob_binds_to_named_model_not_nearest_preceding`,
+    `missing_named_model_surfaces_error`.
+  - **Richer event-predicate translators:** separate builtin event
+    translator (`builtin_event_translator.typ` → `{"kind":"vacuum"}`) +
+    typed `EventPredicate` validation in `statement_to_event_json` catches
+    bad predicate shapes before the worker round-trip. Tests:
+    `event_typed_validation_catches_bad_predicate`,
+    `event_combinator_predicate_validates`.
 - **Read first:** `crates/mathed_mini/src/{translate,dispatch,kernel_bridge,render}.rs`,
   `crates/mathed_core/src/{semantics,transform}.rs`,
   `crates/kernel_client/src/worker.rs`. `parse.rs` is the v1 shortcut,

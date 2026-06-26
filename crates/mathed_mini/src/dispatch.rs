@@ -14,12 +14,14 @@
 //! (`""`) block-local default, else the embedded [`BUILTIN_TRANSLATOR`].
 
 use crate::translate::{
-    BUILTIN_TRANSLATOR, TranslateError, Translator,
+    BUILTIN_EVENT_TRANSLATOR, BUILTIN_TRANSLATOR, TranslateError,
+    Translator,
 };
 use mathed_core::{KernelStatement, PropKind, TranslatorDef};
 use std::collections::HashMap;
 use unfer_protocol::{
-    HamiltonianSpec, ModelSpec, PriorSpec, SolverSpec, TermSpec,
+    EventPredicate, HamiltonianSpec, ModelSpec, PriorSpec, SolverSpec,
+    TermSpec,
 };
 
 /// Why a statement could not be turned into a kernel payload.
@@ -53,10 +55,11 @@ impl std::fmt::Display for DispatchError {
 impl std::error::Error for DispatchError {}
 
 /// Resolve the translator source for a statement: its named translator, then
-/// the unnamed block-local default (`""`), then the built-in default.
+/// the unnamed block-local default (`""`), then the provided built-in default.
 pub fn resolve_translator_src<'a>(
     translators: &'a HashMap<String, TranslatorDef>,
     name: Option<&str>,
+    builtin: &'a str,
 ) -> &'a str {
     if let Some(n) = name
         && let Some(def) = translators.get(n)
@@ -66,7 +69,7 @@ pub fn resolve_translator_src<'a>(
     if let Some(def) = translators.get("") {
         return &def.body_text;
     }
-    BUILTIN_TRANSLATOR
+    builtin
 }
 
 /// Translate a `\model` statement into a [`ModelSpec`].
@@ -85,6 +88,7 @@ pub fn statement_to_model_spec(
     let src = resolve_translator_src(
         translators,
         stmt.translator.as_deref(),
+        BUILTIN_TRANSLATOR,
     );
     let json = engine
         .run(src, &stmt.body_text)
@@ -99,8 +103,10 @@ pub fn statement_to_model_spec(
 }
 
 /// Translate an `\event`/`\prob` statement into an `EventPredicate` JSON string
-/// (forwarded verbatim to the kernel). The string is validated as JSON but its
-/// predicate schema is checked kernel-side.
+/// (forwarded verbatim to the kernel). The translator's output is validated
+/// against the `EventPredicate` schema *here* (typed check) so a malformed
+/// predicate is caught before the worker round-trip — producing a structured
+/// error with the specific field that failed, not a generic UK-1003.
 pub fn statement_to_event_json(
     engine: &mut Translator,
     translators: &HashMap<String, TranslatorDef>,
@@ -112,12 +118,14 @@ pub fn statement_to_event_json(
     let src = resolve_translator_src(
         translators,
         stmt.translator.as_deref(),
+        BUILTIN_EVENT_TRANSLATOR,
     );
     let json = engine
         .run(src, &stmt.body_text)
         .map_err(DispatchError::Translate)?;
-    // Validate it parses as JSON; the kernel checks the predicate shape.
-    serde_json::from_str::<serde_json::Value>(&json)
+    // Typed validation: parse as EventPredicate so a bad predicate shape is
+    // caught here with a specific message, not a generic kernel rejection.
+    serde_json::from_str::<EventPredicate>(&json)
         .map_err(|e| DispatchError::Json(e.to_string()))?;
     Ok(json)
 }
@@ -195,7 +203,7 @@ mod tests {
 
     #[test]
     fn event_with_translator_returns_json() {
-        let doc = "#3 #let translate(body) = { \"{\\\"Vacuum\\\":null}\" } #4 \\translator(#3,#4, name: \"e\")\n\n#1 vac #2 \\event(#1,#2, translator: \"e\")";
+        let doc = "#3 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #4 \\translator(#3,#4, name: \"e\")\n\n#1 vac #2 \\event(#1,#2, translator: \"e\")";
         let idx = index_for(doc);
         let stmt = idx
             .kernel_statements
@@ -209,7 +217,62 @@ mod tests {
             stmt,
         )
         .expect("event dispatch");
-        assert!(json.contains("Vacuum"), "got: {json}");
+        assert!(json.contains("vacuum"), "got: {json}");
+    }
+
+    #[test]
+    fn event_typed_validation_catches_bad_predicate() {
+        // Translator emits JSON with an unknown `kind` tag — valid JSON,
+        // but not a valid EventPredicate variant. The typed validation in
+        // statement_to_event_json should catch it with a Json error.
+        let doc = "#3 #let translate(b) = { \"{\\\"kind\\\":\\\"nonexistent\\\"}\" } #4 \\translator(#3,#4, name: \"bad\")\n\n#1 vac #2 \\event(#1,#2, translator: \"bad\")";
+        let idx = index_for(doc);
+        let stmt = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Event)
+            .expect("event statement");
+        let mut engine = Translator::new();
+        let err = statement_to_event_json(
+            &mut engine,
+            &idx.translators,
+            stmt,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DispatchError::Json(_)),
+            "expected Json validation error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn event_combinator_predicate_validates() {
+        // A translator emitting an `And` combinator over `BosonModeTotal`
+        // and `Vacuum` — exercises the recursive EventPredicate schema.
+        let src = r#"#let translate(b) = {
+          let p1 = (kind: "boson_mode_total", mode: 0, cmp: "eq", value: 1)
+          let p2 = (kind: "vacuum",)
+          json.encode((kind: "and", parts: (p1, p2)))
+        }"#;
+        let doc = format!(
+            "#3 {src} #4 \\translator(#3,#4, name: \"cmp\")\n\n\
+             #1 vac #2 \\prob(#1,#2, translator: \"cmp\")"
+        );
+        let idx = index_for(&doc);
+        let stmt = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Prob)
+            .expect("prob statement");
+        let mut engine = Translator::new();
+        let json = statement_to_event_json(
+            &mut engine,
+            &idx.translators,
+            stmt,
+        )
+        .expect("combinator predicate should validate");
+        assert!(json.contains("and"), "got: {json}");
+        assert!(json.contains("boson_mode_total"), "got: {json}");
     }
 
     #[test]

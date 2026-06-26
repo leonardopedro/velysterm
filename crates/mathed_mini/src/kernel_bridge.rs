@@ -27,7 +27,8 @@ use mathed_core::semantics::{KernelStatement, SemanticIndex};
 use mathed_core::transform::{TransformOptions, to_render_text};
 
 use crate::dispatch::{
-    DispatchError, statement_to_event_json, statement_to_model_spec,
+    DispatchError, resolve_translator_src, statement_to_event_json,
+    statement_to_model_spec,
 };
 use crate::translate::{Translator, typst_str_lit};
 
@@ -144,9 +145,18 @@ impl KernelBridge {
             .collect();
         models.sort_by_key(|s| s.span.start);
 
-        // Dispatch each model whose body changed.
+        // Dispatch each model whose body or translator changed. The translator
+        // source is resolved exactly as the dispatcher resolves it (named →
+        // unnamed `""` default → builtin), so editing the *resolved* translator
+        // — including an unnamed block-local default — changes the hash and
+        // triggers a redispatch.
         for m in &models {
-            let h = hash_one(&m.body_text);
+            let trans_src = resolve_translator_src(
+                &idx.translators,
+                m.translator.as_deref(),
+                crate::translate::BUILTIN_TRANSLATOR,
+            );
+            let h = hash_many(&[&m.body_text, trans_src]);
             if self.model_hashes.get(&m.span.start) == Some(&h) {
                 continue;
             }
@@ -171,18 +181,37 @@ impl KernelBridge {
             }
         }
 
-        // Dispatch each prob/event against its nearest preceding model.
+        // Dispatch each prob/event against its bound model (named
+        // `model: "..."` arg) or, lacking that, its nearest preceding
+        // `\model` (document order).
         for stmt in idx.kernel_statements.iter().filter(|s| {
             matches!(s.kind, PropKind::Prob | PropKind::Event)
         }) {
             self.prob_names
                 .insert(stmt.span.start, stmt.name.clone());
             let Some(model) =
-                nearest_preceding_model(&models, stmt.span.start)
+                resolve_model(&models, stmt, &mut self.results)
             else {
                 continue;
             };
-            let key = hash_two(&stmt.body_text, &model.body_text);
+            
+            let prob_trans_src = resolve_translator_src(
+                &idx.translators,
+                stmt.translator.as_deref(),
+                crate::translate::BUILTIN_EVENT_TRANSLATOR,
+            );
+            let model_trans_src = resolve_translator_src(
+                &idx.translators,
+                model.translator.as_deref(),
+                crate::translate::BUILTIN_TRANSLATOR,
+            );
+
+            let key = hash_many(&[
+                &stmt.body_text,
+                prob_trans_src,
+                &model.body_text,
+                model_trans_src,
+            ]);
             if self.prob_hashes.get(&stmt.span.start) == Some(&key) {
                 continue;
             }
@@ -253,6 +282,36 @@ fn build_index(doc_text: &str) -> SemanticIndex {
     idx
 }
 
+/// Resolve which `\model` a `\prob`/`\event` statement applies to.
+///
+/// - If the statement carries a `model: "name"` arg, bind to the `\model`
+///   whose `name` matches. If no such model exists, record an error
+///   result under the prob's offset and return `None`.
+/// - Otherwise, bind to the model nearest before the statement's body
+///   offset (or the first model if none precede it).
+fn resolve_model<'a>(
+    models: &[&'a KernelStatement],
+    stmt: &KernelStatement,
+    results: &mut HashMap<usize, KernelResult>,
+) -> Option<&'a KernelStatement> {
+    if let Some(name) = &stmt.model_name {
+        if let Some(m) = models.iter().find(|m| {
+            m.kind == PropKind::Model && m.name.as_deref() == Some(name.as_str())
+        }) {
+            return Some(m);
+        }
+        results.insert(
+            stmt.span.start,
+            KernelResult::Error {
+                code_name: "model-not-found".into(),
+                message: format!("no \\model named {name:?}"),
+            },
+        );
+        return None;
+    }
+    nearest_preceding_model(models, stmt.span.start)
+}
+
 /// The model nearest before `pos` (or the first model if none precede it).
 fn nearest_preceding_model<'a>(
     models: &[&'a KernelStatement],
@@ -277,16 +336,11 @@ fn dispatch_error_result(e: &DispatchError) -> KernelResult {
     }
 }
 
-fn hash_one(s: &str) -> u64 {
+fn hash_many(strs: &[&str]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
-
-fn hash_two(a: &str, b: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    a.hash(&mut h);
-    b.hash(&mut h);
+    for s in strs {
+        s.hash(&mut h);
+    }
     h.finish()
 }
 
@@ -372,17 +426,146 @@ mod tests {
 
     #[test]
     fn bad_event_translator_surfaces_error() {
-        // The prob uses the builtin translator, which emits TermSpec[] JSON —
-        // not a valid EventPredicate — so the kernel rejects it (UK-1003).
-        let doc = "#1 a #2 \\model(#1,#2)\n\n#3 vac #4 \\prob(#3,#4)";
+        // The prob uses a named translator that emits TermSpec[] JSON —
+        // valid JSON but not a valid EventPredicate. The typed validation
+        // in statement_to_event_json catches it (Json error, no worker
+        // round-trip needed).
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\n\
+                   #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let key = prob_offset(doc);
+        // The error is recorded synchronously by the dispatcher.
+        match bridge.results().get(&key) {
+            Some(KernelResult::Error { code_name, .. }) => {
+                assert_eq!(code_name, "translator-json");
+            }
+            other => panic!("expected translator-json error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_named_model_surfaces_error() {
+        // A prob references model: "nonexistent" — no model has that name.
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
+                   #3 vac #4 \\prob(#3,#4, model: \"nonexistent\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let key = prob_offset(doc);
+        // The error is recorded synchronously by resolve_model (no worker
+        // round-trip needed).
+        match bridge.results().get(&key) {
+            Some(KernelResult::Error { code_name, .. }) => {
+                assert_eq!(code_name, "model-not-found");
+            }
+            other => panic!("expected model-not-found error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prob_binds_to_named_model_not_nearest_preceding() {
+        // Two models: m1 (vacuum) and m2 (vacuum). The prob explicitly
+        // binds to m2 even though m1 is its nearest preceding model.
+        // Both produce vacuum, so P(vacuum) = 1.0 regardless — we just
+        // verify the bridge dispatches the prob (no model-not-found error).
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
+                   #3 a #4 \\model(#1,#2, m2)\n\n\
+                   #7 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #8 \\translator(#7,#8, name: \"ev\")\n\n\
+                   #5 vac #6 \\prob(#5,#6, model: \"m2\", translator: \"ev\")";
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc);
         let key = prob_offset(doc);
         let result =
             wait_for(&mut bridge, key, Duration::from_secs(15));
+        match result {
+            Some(KernelResult::Value(p)) => {
+                assert!(
+                    (p - 1.0).abs() < 1e-9,
+                    "P(vacuum) should be 1.0, got {p}"
+                );
+            }
+            other => panic!("expected a Value result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translator_change_triggers_redispatch() {
+        // First pass: builtin translator (empty terms → vacuum model).
+        let doc1 = "#1 a #2 \\model(#1,#2)\n\n\
+                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"ho\")\n\n\
+                    #1b a #2b \\model(#1b,#2b, translator: \"ho\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc1);
+        // The model that uses translator "ho" should have a hash recorded.
+        let idx1 = build_index(doc1);
+        let ho_model = idx1
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Model && s.translator.as_deref() == Some("ho"))
+            .expect("model with ho translator");
         assert!(
-            matches!(result, Some(KernelResult::Error { .. })),
-            "expected an error result, got {result:?}"
+            bridge.model_hashes.contains_key(&ho_model.span.start),
+            "model hash recorded after first refresh"
+        );
+        let hash1 = *bridge.model_hashes.get(&ho_model.span.start).unwrap();
+
+        // Second pass: same model body, but translator changed to emit
+        // a non-empty term. The model hash MUST change (translator-aware).
+        let doc2 = "#1 a #2 \\model(#1,#2)\n\n\
+                    #5 #let translate(b) = { \"[{\\\"coeff_re\\\":1.0,\\\"coeff_im\\\":0.0,\\\"ops\\\":[]}]\" } #6 \\translator(#5,#6, name: \"ho\")\n\n\
+                    #1b a #2b \\model(#1b,#2b, translator: \"ho\")";
+        bridge.refresh(doc2);
+        let idx2 = build_index(doc2);
+        let ho_model2 = idx2
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Model && s.translator.as_deref() == Some("ho"))
+            .expect("model with ho translator");
+        let hash2 = *bridge.model_hashes.get(&ho_model2.span.start).unwrap();
+        assert_ne!(
+            hash1, hash2,
+            "translator change must produce a different hash → redispatch"
+        );
+    }
+
+    #[test]
+    fn unnamed_default_translator_change_triggers_redispatch() {
+        // The model names no translator, so it resolves the unnamed (`""`)
+        // block-local default. Editing that default must change the model's
+        // hash — the gap closed by routing hashing through
+        // `resolve_translator_src` (which honours the `""` fallback) rather
+        // than looking up a literal "builtin" key.
+        let doc1 = "#5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6)\n\n\
+                    #1 a #2 \\model(#1,#2)";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc1);
+        let model1 = {
+            let idx = build_index(doc1);
+            idx.kernel_statements
+                .iter()
+                .find(|s| s.kind == PropKind::Model)
+                .map(|s| s.span.start)
+                .expect("model")
+        };
+        let hash1 = *bridge.model_hashes.get(&model1).unwrap();
+
+        // Same model body; the unnamed default translator body changes.
+        let doc2 = "#5 #let translate(b) = { \"[{\\\"coeff_re\\\":1.0,\\\"coeff_im\\\":0.0,\\\"ops\\\":[]}]\" } #6 \\translator(#5,#6)\n\n\
+                    #1 a #2 \\model(#1,#2)";
+        bridge.refresh(doc2);
+        let model2 = {
+            let idx = build_index(doc2);
+            idx.kernel_statements
+                .iter()
+                .find(|s| s.kind == PropKind::Model)
+                .map(|s| s.span.start)
+                .expect("model")
+        };
+        let hash2 = *bridge.model_hashes.get(&model2).unwrap();
+        assert_ne!(
+            hash1, hash2,
+            "editing the unnamed default translator must change the hash"
         );
     }
 }

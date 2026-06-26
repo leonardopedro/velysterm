@@ -177,7 +177,7 @@ impl MathDoc {
         &mut self,
         mut ops: Vec<ReplaceOp>,
     ) -> Vec<ByteDelta> {
-        ops.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+        ops.sort_by_key(|b| std::cmp::Reverse(b.range.start));
         for w in ops.windows(2) {
             assert!(
                 w[1].range.end <= w[0].range.start,
