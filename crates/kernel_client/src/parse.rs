@@ -1,7 +1,7 @@
+use serde_json::json;
 use unfer_protocol::{
     HamiltonianSpec, ModelSpec, PriorSpec, SolverSpec,
 };
-use serde_json::json;
 
 pub fn parse_model(text: &str) -> Result<ModelSpec, String> {
     let trimmed = text.trim();
@@ -14,6 +14,15 @@ pub fn parse_model(text: &str) -> Result<ModelSpec, String> {
             prior: PriorSpec::Vacuum,
             solver: SolverSpec::default(),
         })
+    } else if trimmed.starts_with("bose_hubbard") {
+        Ok(ModelSpec {
+            hamiltonian: HamiltonianSpec::builtin(
+                "bose_hubbard",
+                json!({ "n_modes": 2, "t": 1.0, "u": 1.0, "periodic": false }),
+            ),
+            prior: PriorSpec::Vacuum,
+            solver: SolverSpec::default(),
+        })
     } else if let Some(latex) = trimmed.strip_prefix("latex\"") {
         let latex = latex.trim_end_matches('"');
         Ok(ModelSpec {
@@ -22,18 +31,23 @@ pub fn parse_model(text: &str) -> Result<ModelSpec, String> {
             solver: SolverSpec::default(),
         })
     } else {
-        Err("Unknown model syntax. Use 'harmonic_chain(...)' or 'latex\"...\"'".into())
+        Err("Unknown model syntax. Use 'harmonic_chain(...)', 'bose_hubbard(...)' or 'latex\"...\"'".into())
     }
 }
 
 pub fn parse_event(text: &str) -> Result<String, String> {
     let trimmed = text.trim();
-    if trimmed.contains("==") || trimmed.contains(">=") || trimmed.contains("<=") {
-        Ok(r#"{"BosonModeTotal":{"mode":0,"cmp":"Eq","value":1}}"#.into())
+    if trimmed.contains("==")
+        || trimmed.contains(">=")
+        || trimmed.contains("<=")
+    {
+        Ok(r#"{"BosonModeTotal":{"mode":0,"cmp":"Eq","value":1}}"#
+            .into())
     } else if trimmed == "vacuum" {
         Ok(r#"{"Vacuum":null}"#.into())
     } else {
-        Ok(r#"{"BosonModeTotal":{"mode":0,"cmp":"Eq","value":1}}"#.into())
+        Ok(r#"{"BosonModeTotal":{"mode":0,"cmp":"Eq","value":1}}"#
+            .into())
     }
 }
 
@@ -51,9 +65,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_bose_hubbard() {
+        let spec =
+            parse_model("bose_hubbard(t: 1.0, u: 2.0)").unwrap();
+        match spec.hamiltonian {
+            HamiltonianSpec::Builtin { name, .. } => {
+                assert_eq!(name, "bose_hubbard")
+            }
+            other => panic!("expected a builtin, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_latex() {
         let spec = parse_model(r#"latex"a_dag a""#).unwrap();
-        assert!(matches!(spec.hamiltonian, HamiltonianSpec::Latex { .. }));
+        assert!(matches!(
+            spec.hamiltonian,
+            HamiltonianSpec::Latex { .. }
+        ));
     }
 
     #[test]
