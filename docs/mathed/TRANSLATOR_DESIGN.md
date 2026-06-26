@@ -568,6 +568,25 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
     bad predicate shapes before the worker round-trip. Tests:
     `event_typed_validation_catches_bad_predicate`,
     `event_combinator_predicate_validates`.
+  - **`\prior` / `\solver` segments (P4 #15):** the document can now set a
+    non-vacuum prior and tune the solver. `PropKind::Solver` added;
+    `dispatch::{parse_prior,parse_solver}` parse the **segment body** with
+    an editor-friendly mini-grammar (`vacuum`, `bosons(0:2, 1:1)`,
+    `fermions(0, 2)` for priors; `krylov_dim: 12, restarts: 2` for solvers)
+    falling back to direct JSON. `statement_to_model_spec` gained
+    `prior`/`solver` params (default vacuum / `SolverSpec::default()` when
+    absent — backward-compatible). The bridge binds each `\prior`/`\solver`
+    to its model (explicit `model: "name"` or nearest-preceding), folds the
+    prior/solver body into the model hash (edits re-dispatch), and surfaces
+    a `prior-solver-parse` error at the segment offset on a bad body.
+    **Deviation from the plan's `\prior(#1,#2, vacuum)` sketch:** the spec
+    lives in the segment **body** (`#1 vacuum #2 \prior(#1,#2)`), not an
+    extra arg — consistent with how `\model`/`\prob` read their body, and
+    it renders the prior visibly in the document. Tests:
+    `parse_prior_grammar_forms`, `parse_solver_overrides_default`,
+    `model_spec_applies_prior_and_solver`,
+    `prior_reaches_kernel_and_changes_probability` (end-to-end P=1.0),
+    `bad_prior_body_surfaces_parse_error`.
 - **Read first:** `crates/mathed_mini/src/{translate,dispatch,kernel_bridge,render}.rs`,
   `crates/mathed_core/src/{semantics,transform}.rs`,
   `crates/kernel_client/src/worker.rs`. `parse.rs` is the v1 shortcut,

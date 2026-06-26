@@ -39,6 +39,7 @@ pub enum AccessRole {
     Statement,
     Model,
     Prior,
+    Solver,
     Event,
     Probability,
     /// A user-defined translator panel (P3 #10).
@@ -62,6 +63,7 @@ impl AccessRole {
             AccessRole::Statement => "statement",
             AccessRole::Model => "model",
             AccessRole::Prior => "prior",
+            AccessRole::Solver => "solver",
             AccessRole::Event => "event",
             AccessRole::Probability => "probability",
             AccessRole::Translator => "translator",
@@ -140,6 +142,9 @@ pub fn describe_segment(
         }
         PropKind::Prior => {
             (AccessRole::Prior, format!("prior: {content}"))
+        }
+        PropKind::Solver => {
+            (AccessRole::Solver, format!("solver: {content}"))
         }
         PropKind::Event => {
             (AccessRole::Event, format!("event: {content}"))

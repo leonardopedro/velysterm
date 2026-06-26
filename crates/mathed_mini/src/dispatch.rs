@@ -31,6 +31,9 @@ pub enum DispatchError {
     Translate(TranslateError),
     /// The translator's JSON did not match the expected schema.
     Json(String),
+    /// A `\prior`/`\solver` body failed the mini-grammar parse (and was not
+    /// valid JSON for that spec either).
+    Parse(String),
     /// The statement's [`PropKind`] is not handled by the called function.
     WrongKind(PropKind),
 }
@@ -44,6 +47,9 @@ impl std::fmt::Display for DispatchError {
             Self::Translate(e) => write!(f, "{e}"),
             Self::Json(e) => {
                 write!(f, "translator output is not valid JSON: {e}")
+            }
+            Self::Parse(e) => {
+                write!(f, "could not parse prior/solver: {e}")
             }
             Self::WrongKind(k) => {
                 write!(f, "unexpected statement kind: {k:?}")
@@ -74,13 +80,17 @@ pub fn resolve_translator_src<'a>(
 
 /// Translate a `\model` statement into a [`ModelSpec`].
 ///
-/// The translator owns the operator mapping (notation → `TermSpec[]`); the
-/// prior defaults to vacuum and the solver to its default, both of which are
-/// separate concerns set by `\prior`/`\solver` segments elsewhere.
+/// The translator owns the operator mapping (notation → `TermSpec[]`). The
+/// `prior`/`solver` are separate concerns supplied by `\prior`/`\solver`
+/// segments (parsed by [`parse_prior`]/[`parse_solver`] and bound to this
+/// model by the bridge); when absent they fall back to a vacuum prior and the
+/// default solver, preserving the original behaviour.
 pub fn statement_to_model_spec(
     engine: &mut Translator,
     translators: &HashMap<String, TranslatorDef>,
     stmt: &KernelStatement,
+    prior: Option<PriorSpec>,
+    solver: Option<SolverSpec>,
 ) -> Result<ModelSpec, DispatchError> {
     if stmt.kind != PropKind::Model {
         return Err(DispatchError::WrongKind(stmt.kind));
@@ -97,8 +107,119 @@ pub fn statement_to_model_spec(
         .map_err(|e| DispatchError::Json(e.to_string()))?;
     Ok(ModelSpec {
         hamiltonian: HamiltonianSpec::terms(terms),
-        prior: PriorSpec::Vacuum,
-        solver: SolverSpec::default(),
+        prior: prior.unwrap_or(PriorSpec::Vacuum),
+        solver: solver.unwrap_or_default(),
+    })
+}
+
+/// Parse a `\prior` segment body into a [`PriorSpec`].
+///
+/// Accepts a small editor-friendly grammar, falling back to direct JSON:
+/// - `vacuum` → [`PriorSpec::Vacuum`]
+/// - `bosons(0:2, 1:1)` → [`PriorSpec::Bosons`] (`mode:count` pairs)
+/// - `fermions(0, 2)` → [`PriorSpec::Fermions`] (occupied modes)
+/// - otherwise the body is parsed as a JSON `PriorSpec` (full control).
+pub fn parse_prior(body: &str) -> Result<PriorSpec, DispatchError> {
+    let t = body.trim();
+    if t.eq_ignore_ascii_case("vacuum") {
+        return Ok(PriorSpec::Vacuum);
+    }
+    if let Some(inner) = paren_body(t, "bosons") {
+        let mut modes = Vec::new();
+        for item in split_nonempty(inner) {
+            let (m, n) = item.split_once(':').ok_or_else(|| {
+                DispatchError::Parse(format!(
+                    "boson mode expects `mode:count`, got {item:?}"
+                ))
+            })?;
+            modes.push((parse_u32(m)?, parse_u32(n)?));
+        }
+        return Ok(PriorSpec::Bosons { modes });
+    }
+    if let Some(inner) = paren_body(t, "fermions") {
+        let mut modes = Vec::new();
+        for item in split_nonempty(inner) {
+            modes.push(parse_u32(item)?);
+        }
+        return Ok(PriorSpec::Fermions { modes });
+    }
+    serde_json::from_str(t).map_err(|e| {
+        DispatchError::Parse(format!(
+            "not a known prior form (vacuum/bosons/fermions) nor valid \
+             JSON PriorSpec: {e}"
+        ))
+    })
+}
+
+/// Parse a `\solver` segment body into a [`SolverSpec`].
+///
+/// A JSON object (`{...}`) is parsed as a full [`SolverSpec`]. Otherwise the
+/// body is comma-separated `key: value` overrides applied to
+/// [`SolverSpec::default`]: `krylov_dim`, `prune_eps`, `max_components`,
+/// `restarts` (e.g. `krylov_dim: 12, restarts: 2`).
+pub fn parse_solver(body: &str) -> Result<SolverSpec, DispatchError> {
+    let t = body.trim();
+    if t.starts_with('{') {
+        return serde_json::from_str(t).map_err(|e| {
+            DispatchError::Parse(format!(
+                "invalid JSON SolverSpec: {e}"
+            ))
+        });
+    }
+    let mut spec = SolverSpec::default();
+    for pair in split_nonempty(t) {
+        let (k, v) = pair.split_once(':').ok_or_else(|| {
+            DispatchError::Parse(format!(
+                "solver expects `key: value`, got {pair:?}"
+            ))
+        })?;
+        let (k, v) = (k.trim(), v.trim());
+        match k {
+            "krylov_dim" => spec.krylov_dim = parse_usize(v)?,
+            "prune_eps" => spec.prune_eps = parse_f64(v)?,
+            "max_components" => {
+                spec.max_components = Some(parse_usize(v)?)
+            }
+            "restarts" => spec.restarts = parse_usize(v)?,
+            other => {
+                return Err(DispatchError::Parse(format!(
+                    "unknown solver key {other:?} (expected \
+                     krylov_dim/prune_eps/max_components/restarts)"
+                )));
+            }
+        }
+    }
+    Ok(spec)
+}
+
+/// `name(inner)` → `Some(inner)` (trimmed), else `None`.
+fn paren_body<'a>(t: &'a str, name: &str) -> Option<&'a str> {
+    t.strip_prefix(name)
+        .and_then(|s| s.trim_start().strip_prefix('('))
+        .and_then(|s| s.strip_suffix(')'))
+        .map(str::trim)
+}
+
+/// Split on commas, trimming and dropping empty items.
+fn split_nonempty(s: &str) -> impl Iterator<Item = &str> {
+    s.split(',').map(str::trim).filter(|p| !p.is_empty())
+}
+
+fn parse_u32(s: &str) -> Result<u32, DispatchError> {
+    s.trim().parse().map_err(|_| {
+        DispatchError::Parse(format!("expected an integer, got {s:?}"))
+    })
+}
+
+fn parse_usize(s: &str) -> Result<usize, DispatchError> {
+    s.trim().parse().map_err(|_| {
+        DispatchError::Parse(format!("expected an integer, got {s:?}"))
+    })
+}
+
+fn parse_f64(s: &str) -> Result<f64, DispatchError> {
+    s.trim().parse().map_err(|_| {
+        DispatchError::Parse(format!("expected a number, got {s:?}"))
     })
 }
 
@@ -167,6 +288,8 @@ mod tests {
             &mut engine,
             &idx.translators,
             stmt,
+            None,
+            None,
         )
         .expect("dispatch");
         match spec.hamiltonian {
@@ -190,6 +313,8 @@ mod tests {
             &mut engine,
             &idx.translators,
             stmt,
+            None,
+            None,
         )
         .expect("builtin dispatch");
         match spec.hamiltonian {
@@ -199,6 +324,9 @@ mod tests {
             }
             other => panic!("expected Terms, got {other:?}"),
         }
+        // Absent \prior/\solver → vacuum prior + default solver.
+        assert_eq!(spec.prior, PriorSpec::Vacuum);
+        assert_eq!(spec.solver, SolverSpec::default());
     }
 
     #[test]
@@ -291,5 +419,92 @@ mod tests {
             err,
             DispatchError::WrongKind(PropKind::Model)
         ));
+    }
+
+    #[test]
+    fn parse_prior_grammar_forms() {
+        assert_eq!(parse_prior("vacuum").unwrap(), PriorSpec::Vacuum);
+        assert_eq!(parse_prior("  VACUUM ").unwrap(), PriorSpec::Vacuum);
+        assert_eq!(
+            parse_prior("bosons(0:2, 1:1)").unwrap(),
+            PriorSpec::Bosons {
+                modes: vec![(0, 2), (1, 1)]
+            }
+        );
+        assert_eq!(
+            parse_prior("fermions(0, 3)").unwrap(),
+            PriorSpec::Fermions { modes: vec![0, 3] }
+        );
+    }
+
+    #[test]
+    fn parse_prior_json_fallback() {
+        // Direct JSON (internally tagged `kind`) for full control.
+        let p =
+            parse_prior(r#"{"kind":"bosons","modes":[[2,5]]}"#).unwrap();
+        assert_eq!(
+            p,
+            PriorSpec::Bosons {
+                modes: vec![(2, 5)]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_prior_rejects_garbage() {
+        let err = parse_prior("bosons(0:notanint)").unwrap_err();
+        assert!(matches!(err, DispatchError::Parse(_)), "{err:?}");
+        let err2 = parse_prior("nonsense").unwrap_err();
+        assert!(matches!(err2, DispatchError::Parse(_)), "{err2:?}");
+    }
+
+    #[test]
+    fn parse_solver_overrides_default() {
+        let s = parse_solver("krylov_dim: 12, restarts: 3").unwrap();
+        assert_eq!(s.krylov_dim, 12);
+        assert_eq!(s.restarts, 3);
+        // Untouched fields keep their defaults.
+        assert_eq!(s.prune_eps, SolverSpec::default().prune_eps);
+        assert_eq!(
+            s.max_components,
+            SolverSpec::default().max_components
+        );
+    }
+
+    #[test]
+    fn parse_solver_json_and_errors() {
+        let s = parse_solver(
+            r#"{"krylov_dim":4,"prune_eps":1e-10,"max_components":null,"restarts":2,"device":{"kind":"cpu"}}"#,
+        )
+        .unwrap();
+        assert_eq!(s.krylov_dim, 4);
+        assert_eq!(s.restarts, 2);
+        let err = parse_solver("bogus_key: 3").unwrap_err();
+        assert!(matches!(err, DispatchError::Parse(_)), "{err:?}");
+        let err2 = parse_solver("krylov_dim 8").unwrap_err();
+        assert!(matches!(err2, DispatchError::Parse(_)), "{err2:?}");
+    }
+
+    #[test]
+    fn model_spec_applies_prior_and_solver() {
+        let doc = "#1 whatever #2 \\model(#1,#2)";
+        let idx = index_for(doc);
+        let stmt = &idx.kernel_statements[0];
+        let mut engine = Translator::new();
+        let prior = parse_prior("bosons(0:1)").unwrap();
+        let solver = parse_solver("krylov_dim: 16").unwrap();
+        let spec = statement_to_model_spec(
+            &mut engine,
+            &idx.translators,
+            stmt,
+            Some(prior),
+            Some(solver),
+        )
+        .expect("dispatch with prior/solver");
+        assert_eq!(
+            spec.prior,
+            PriorSpec::Bosons { modes: vec![(0, 1)] }
+        );
+        assert_eq!(spec.solver.krylov_dim, 16);
     }
 }

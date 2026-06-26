@@ -27,10 +27,11 @@ use mathed_core::semantics::{KernelStatement, SemanticIndex};
 use mathed_core::transform::{TransformOptions, to_render_text};
 
 use crate::dispatch::{
-    DispatchError, resolve_translator_src, statement_to_event_json,
-    statement_to_model_spec,
+    DispatchError, parse_prior, parse_solver, resolve_translator_src,
+    statement_to_event_json, statement_to_model_spec,
 };
 use crate::translate::{Translator, typst_str_lit};
+use unfer_protocol::{PriorSpec, SolverSpec};
 
 /// A computed result for a `\prob` / `\event` statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,25 +146,97 @@ impl KernelBridge {
             .collect();
         models.sort_by_key(|s| s.span.start);
 
-        // Dispatch each model whose body or translator changed. The translator
-        // source is resolved exactly as the dispatcher resolves it (named →
-        // unnamed `""` default → builtin), so editing the *resolved* translator
-        // — including an unnamed block-local default — changes the hash and
-        // triggers a redispatch.
+        // Resolve `\prior` / `\solver` segments to their bound model (explicit
+        // `model: "name"` or nearest-preceding) and parse them. Keyed by model
+        // offset; last binding wins. A parse error is surfaced at the
+        // prior/solver's own offset, leaving the model on its previous spec.
+        let mut priors: HashMap<usize, (PriorSpec, String)> =
+            HashMap::new();
+        let mut solvers: HashMap<usize, (SolverSpec, String)> =
+            HashMap::new();
+        for stmt in idx.kernel_statements.iter().filter(|s| {
+            matches!(s.kind, PropKind::Prior | PropKind::Solver)
+        }) {
+            let Some(model) =
+                resolve_model(&models, stmt, &mut self.results)
+            else {
+                continue;
+            };
+            match stmt.kind {
+                PropKind::Prior => match parse_prior(&stmt.body_text) {
+                    Ok(p) => {
+                        priors.insert(
+                            model.span.start,
+                            (p, stmt.body_text.clone()),
+                        );
+                    }
+                    Err(e) => {
+                        self.results.insert(
+                            stmt.span.start,
+                            dispatch_error_result(&e),
+                        );
+                    }
+                },
+                PropKind::Solver => {
+                    match parse_solver(&stmt.body_text) {
+                        Ok(s) => {
+                            solvers.insert(
+                                model.span.start,
+                                (s, stmt.body_text.clone()),
+                            );
+                        }
+                        Err(e) => {
+                            self.results.insert(
+                                stmt.span.start,
+                                dispatch_error_result(&e),
+                            );
+                        }
+                    }
+                }
+                _ => unreachable!("filtered to Prior|Solver"),
+            }
+        }
+
+        // Dispatch each model whose body, translator, prior, or solver
+        // changed. The translator source is resolved exactly as the dispatcher
+        // resolves it (named → unnamed `""` default → builtin), so editing the
+        // *resolved* translator — including an unnamed block-local default —
+        // changes the hash and triggers a redispatch. The bound prior/solver
+        // bodies are folded into the same hash so editing a `\prior`/`\solver`
+        // re-dispatches its model.
         for m in &models {
             let trans_src = resolve_translator_src(
                 &idx.translators,
                 m.translator.as_deref(),
                 crate::translate::BUILTIN_TRANSLATOR,
             );
-            let h = hash_many(&[&m.body_text, trans_src]);
+            let prior_src = priors
+                .get(&m.span.start)
+                .map(|(_, s)| s.as_str())
+                .unwrap_or("");
+            let solver_src = solvers
+                .get(&m.span.start)
+                .map(|(_, s)| s.as_str())
+                .unwrap_or("");
+            let h = hash_many(&[
+                &m.body_text,
+                trans_src,
+                prior_src,
+                solver_src,
+            ]);
             if self.model_hashes.get(&m.span.start) == Some(&h) {
                 continue;
             }
+            let prior =
+                priors.get(&m.span.start).map(|(p, _)| p.clone());
+            let solver =
+                solvers.get(&m.span.start).map(|(s, _)| s.clone());
             match statement_to_model_spec(
                 &mut self.engine,
                 &idx.translators,
                 m,
+                prior,
+                solver,
             ) {
                 Ok(spec) => {
                     self.client.submit(KernelRequest::DefineModel {
@@ -328,6 +401,7 @@ fn dispatch_error_result(e: &DispatchError) -> KernelResult {
     let code_name = match e {
         DispatchError::Translate(_) => "translator",
         DispatchError::Json(_) => "translator-json",
+        DispatchError::Parse(_) => "prior-solver-parse",
         DispatchError::WrongKind(_) => "translator-kind",
     };
     KernelResult::Error {
@@ -442,6 +516,55 @@ mod tests {
                 assert_eq!(code_name, "translator-json");
             }
             other => panic!("expected translator-json error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prior_reaches_kernel_and_changes_probability() {
+        // A \prior segment sets a one-boson prior in mode 0, bound to the
+        // model. The event asks P(boson mode-0 total == 1): certain on that
+        // prior, so P == 1.0 — proving the \prior body parses, binds, and is
+        // applied to the real kernel session (not the hardcoded vacuum).
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
+                   #7 bosons(0:1) #8 \\prior(#7,#8, model: \"m1\")\n\n\
+                   #5 #let translate(b) = { \"{\\\"kind\\\":\\\"boson_mode_total\\\",\\\"mode\\\":0,\\\"cmp\\\":\\\"eq\\\",\\\"value\\\":1}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+                   #3 n0 #4 \\prob(#3,#4, model: \"m1\", translator: \"ev\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let key = prob_offset(doc);
+        let result =
+            wait_for(&mut bridge, key, Duration::from_secs(15));
+        match result {
+            Some(KernelResult::Value(p)) => {
+                assert!(
+                    (p - 1.0).abs() < 1e-9,
+                    "P(boson mode0 == 1) on a one-boson prior should be 1.0, got {p}"
+                );
+            }
+            other => panic!("expected a Value result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_prior_body_surfaces_parse_error() {
+        // The \prior body is neither a known form nor valid JSON: a
+        // prior-solver-parse error is recorded at the prior's offset, and
+        // the model still dispatches (vacuum fallback) without panicking.
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
+                   #7 not_a_prior #8 \\prior(#7,#8, model: \"m1\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let idx = build_index(doc);
+        let prior = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Prior)
+            .expect("a prior statement");
+        match bridge.results().get(&prior.span.start) {
+            Some(KernelResult::Error { code_name, .. }) => {
+                assert_eq!(code_name, "prior-solver-parse");
+            }
+            other => panic!("expected prior-solver-parse error, got {other:?}"),
         }
     }
 

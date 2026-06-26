@@ -82,6 +82,7 @@ pub enum PropKind {
     /// predicate, etc.); an optional literal extra-arg names the result.
     Model,
     Prior,
+    Solver,
     Event,
     Prob,
     /// A user-defined translator: Typst code (in the segment body) that
@@ -109,6 +110,7 @@ impl PropKind {
             }
             "model" => Self::Model,
             "prior" => Self::Prior,
+            "solver" => Self::Solver,
             "event" => Self::Event,
             "prob" => Self::Prob,
             "translator" => Self::Translator,
@@ -129,6 +131,7 @@ impl PropKind {
             self,
             Self::Model
                 | Self::Prior
+                | Self::Solver
                 | Self::Event
                 | Self::Prob
                 | Self::Translator

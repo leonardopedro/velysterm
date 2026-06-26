@@ -61,8 +61,8 @@ pub struct Occurrence {
 /// - `translator` — optional translator name (from a `translator: "name"`
 ///   named extra-arg); `None` means the dispatcher falls back to the
 ///   builtin default translator (P3 #10).
-/// - `model_name` — optional model binding for `\prob`/`\event`
-///   statements (from a `model: "name"` named extra-arg, P3 #10
+/// - `model_name` — optional model binding for `\prob`/`\event`/`\prior`/
+///   `\solver` statements (from a `model: "name"` named extra-arg, P3 #10
 ///   follow-up). When present, the bridge binds the statement to the
 ///   `\model` with that `name` instead of its nearest preceding model.
 /// - `span` — doc byte range of the body text (exclusive of markers).
@@ -223,7 +223,10 @@ impl SemanticIndex {
             let translator =
                 extract_named_string(&seg.extra_args, "translator");
             let model_name = match seg.kind {
-                PropKind::Prob | PropKind::Event => {
+                PropKind::Prob
+                | PropKind::Event
+                | PropKind::Prior
+                | PropKind::Solver => {
                     extract_named_string(&seg.extra_args, "model")
                 }
                 _ => None,
@@ -571,5 +574,27 @@ mod tests {
             .find(|s| s.kind == PropKind::Event)
             .expect("an event statement");
         assert_eq!(ev.model_name.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn prior_and_solver_collected_with_model_binding() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\
+                   #3 bosons(0:1) #4 \\prior(#3,#4, model: \"m1\")\n\
+                   #5 krylov_dim: 12 #6 \\solver(#5,#6, model: \"m1\")";
+        let idx = build_index_for(doc);
+        let prior = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Prior)
+            .expect("a prior statement");
+        assert_eq!(prior.body_text, "bosons(0:1)");
+        assert_eq!(prior.model_name.as_deref(), Some("m1"));
+        let solver = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Solver)
+            .expect("a solver statement");
+        assert_eq!(solver.body_text, "krylov_dim: 12");
+        assert_eq!(solver.model_name.as_deref(), Some("m1"));
     }
 }
