@@ -142,8 +142,35 @@ pub fn layout_doc_with(
     width_pt: f64,
     opts: &TransformOptions,
 ) -> Result<DocLayout, RenderError> {
+    layout_doc_inner(doc_text, width_pt, opts, "")
+}
+
+/// Like [`layout_doc_with`] but appends `footer_markup` (raw Typst, e.g. a
+/// kernel results panel) below the document. The footer is display-only; the
+/// glyph index still maps only the document body, so caret positioning is
+/// unaffected.
+pub fn layout_doc_with_footer(
+    doc_text: &str,
+    width_pt: f64,
+    opts: &TransformOptions,
+    footer_markup: &str,
+) -> Result<DocLayout, RenderError> {
+    layout_doc_inner(doc_text, width_pt, opts, footer_markup)
+}
+
+fn layout_doc_inner(
+    doc_text: &str,
+    width_pt: f64,
+    opts: &TransformOptions,
+    footer_markup: &str,
+) -> Result<DocLayout, RenderError> {
     let render = doc_to_render_with(doc_text, opts);
-    let world = MiniWorld::new(render.text);
+    let markup = if footer_markup.is_empty() {
+        render.text.clone()
+    } else {
+        format!("{}\n\n{footer_markup}", render.text)
+    };
+    let world = MiniWorld::new(markup);
     let frame = layout_world(&world, width_pt)?;
     // The minimal frontend prepends no prelude, so source bytes == body bytes.
     let glyphs = build_glyph_index(

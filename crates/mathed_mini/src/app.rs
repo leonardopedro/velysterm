@@ -11,19 +11,25 @@
 
 use std::num::NonZeroU32;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use mathed_core::MathDoc;
 use mathed_core::glyphs::CaretGeom;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::kernel_bridge::KernelBridge;
 use crate::render::{
-    DocLayout, active_translator_span, layout_doc_with,
+    DocLayout, active_translator_span, layout_doc_with_footer,
 };
 use mathed_core::transform::TransformOptions;
+
+/// How long to keep polling the kernel worker after an edit. Tiny models
+/// resolve in milliseconds; this bounds the busy-poll window.
+const KERNEL_POLL_WINDOW: Duration = Duration::from_secs(3);
 
 type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
@@ -49,6 +55,10 @@ struct App {
     /// was built, if any. A caret move that changes this expands/collapses a
     /// panel, so the layout must be rebuilt (other moves reuse the cache).
     layout_panel: Option<std::ops::Range<usize>>,
+    /// Probability kernel bridge (P3 #11): computes `\prob` results off-thread.
+    bridge: KernelBridge,
+    /// While set, keep polling the kernel worker for async results.
+    kernel_deadline: Option<Instant>,
 }
 
 impl App {
@@ -63,12 +73,22 @@ impl App {
             layout: None,
             layout_width: 0,
             layout_panel: None,
+            bridge: KernelBridge::new(),
+            kernel_deadline: None,
         }
     }
 
     /// Drop the cached layout so the next redraw recomputes it.
     fn invalidate(&mut self) {
         self.layout = None;
+    }
+
+    /// Re-run the kernel on the current document and open a polling window so
+    /// async `\prob` results get picked up. Called after every edit.
+    fn refresh_kernel(&mut self) {
+        self.bridge.refresh(self.doc.text());
+        self.kernel_deadline =
+            Some(Instant::now() + KERNEL_POLL_WINDOW);
     }
 
     fn request_redraw(&self) {
@@ -82,6 +102,7 @@ impl App {
         self.doc.insert(self.caret, s);
         self.caret += s.len();
         self.invalidate();
+        self.refresh_kernel();
     }
 
     /// Delete the character before the caret (Backspace).
@@ -93,6 +114,7 @@ impl App {
         self.doc.delete(prev..self.caret);
         self.caret = prev;
         self.invalidate();
+        self.refresh_kernel();
     }
 
     /// Delete the character after the caret (Delete).
@@ -104,6 +126,7 @@ impl App {
         let next = next_char_boundary(text, self.caret);
         self.doc.delete(self.caret..next);
         self.invalidate();
+        self.refresh_kernel();
     }
 
     /// Move the caret one character left (no relayout).
@@ -211,10 +234,13 @@ impl App {
                 caret: Some(self.caret),
                 ..Default::default()
             };
-            self.layout = layout_doc_with(
+            let footer =
+                self.bridge.result_panel_markup().unwrap_or_default();
+            self.layout = layout_doc_with_footer(
                 self.doc.text(),
                 size.width as f64,
                 &opts,
+                &footer,
             )
             .ok();
             self.layout_width = size.width;
@@ -350,6 +376,30 @@ impl ApplicationHandler for App {
             }
         }
         self.window = Some(window);
+        // Compute results for the initial document.
+        self.refresh_kernel();
+    }
+
+    /// Between events, drain async kernel results during the polling window.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(deadline) = self.kernel_deadline {
+            if self.bridge.poll() {
+                // New results: rebuild the layout (footer changed) and redraw.
+                self.invalidate();
+                self.request_redraw();
+            }
+            if Instant::now() >= deadline {
+                self.kernel_deadline = None;
+            }
+        }
+        // Busy-poll only while results may still be in flight; otherwise idle.
+        event_loop.set_control_flow(
+            if self.kernel_deadline.is_some() {
+                ControlFlow::Poll
+            } else {
+                ControlFlow::Wait
+            },
+        );
     }
 
     fn window_event(

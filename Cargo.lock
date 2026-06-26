@@ -5539,6 +5539,7 @@ version = "0.1.0"
 dependencies = [
  "imaging",
  "imaging_vello_cpu",
+ "kernel_client",
  "mathed_core",
  "serde_json",
  "softbuffer",

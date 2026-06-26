@@ -133,7 +133,7 @@ impl Translator {
 /// Escape `s` into a Typst double-quoted string literal (including the
 /// surrounding quotes), so a math source string can be injected verbatim into
 /// generated Typst source.
-fn typst_str_lit(s: &str) -> String {
+pub(crate) fn typst_str_lit(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
