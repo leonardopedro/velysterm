@@ -20,7 +20,10 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::render::{DocLayout, layout_doc};
+use crate::render::{
+    DocLayout, active_translator_span, layout_doc_with,
+};
+use mathed_core::transform::TransformOptions;
 
 type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
@@ -42,6 +45,10 @@ struct App {
     layout: Option<DocLayout>,
     /// Width (px) the cached layout was laid out at.
     layout_width: u32,
+    /// Translator panel (P3 #10) the caret was inside when the cached layout
+    /// was built, if any. A caret move that changes this expands/collapses a
+    /// panel, so the layout must be rebuilt (other moves reuse the cache).
+    layout_panel: Option<std::ops::Range<usize>>,
 }
 
 impl App {
@@ -55,6 +62,7 @@ impl App {
             caret,
             layout: None,
             layout_width: 0,
+            layout_panel: None,
         }
     }
 
@@ -190,12 +198,27 @@ impl App {
             return;
         };
 
-        // Recompute the cached layout only when invalidated or the width
-        // changed (foot-style: edits/resizes pay; caret moves do not).
-        if self.layout.is_none() || self.layout_width != size.width {
-            self.layout =
-                layout_doc(self.doc.text(), size.width as f64).ok();
+        // Recompute the cached layout when invalidated, the width changed, or
+        // the caret crossed a translator-panel boundary (foot-style: edits,
+        // resizes and panel toggles pay; ordinary caret moves do not).
+        let panel =
+            active_translator_span(self.doc.text(), self.caret);
+        if self.layout.is_none()
+            || self.layout_width != size.width
+            || self.layout_panel != panel
+        {
+            let opts = TransformOptions {
+                caret: Some(self.caret),
+                ..Default::default()
+            };
+            self.layout = layout_doc_with(
+                self.doc.text(),
+                size.width as f64,
+                &opts,
+            )
+            .ok();
             self.layout_width = size.width;
+            self.layout_panel = panel;
         }
 
         let Some(surface) = self.surface.as_mut() else {

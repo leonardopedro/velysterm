@@ -92,11 +92,11 @@ impl SemanticIndex {
                     }
                 }
                 if name.is_empty()
-                    && let Some(ref span) = seg.span {
-                        name =
-                            doc_text[span.clone()].trim().to_string();
-                        // name_range remains None as per spec
-                    }
+                    && let Some(ref span) = seg.span
+                {
+                    name = doc_text[span.clone()].trim().to_string();
+                    // name_range remains None as per spec
+                }
 
                 if let Some(s) = seg.span.clone() {
                     defs.push(Definition {
@@ -160,9 +160,9 @@ impl SemanticIndex {
             // 2. Otherwise, look up the name in the map (last def wins).
             if resolved.is_none()
                 && let Some(&def_idx) = name_to_def_idx.get(&occ.name)
-                {
-                    resolved = Some(def_idx);
-                }
+            {
+                resolved = Some(def_idx);
+            }
             occ.resolved = resolved;
         }
 

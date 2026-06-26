@@ -20,9 +20,9 @@ pub use dispatch::{
     DispatchError, statement_to_event_json, statement_to_model_spec,
 };
 pub use render::{
-    DEFAULT_WIDTH_PT, DocLayout, RenderError, doc_to_markup,
-    doc_to_render, layout_doc, render_doc, render_markup,
-    render_world,
+    DEFAULT_WIDTH_PT, DocLayout, RenderError, active_translator_span,
+    doc_to_markup, doc_to_render, doc_to_render_with, layout_doc,
+    layout_doc_with, render_doc, render_markup, render_world,
 };
 pub use translate::{BUILTIN_TRANSLATOR, TranslateError, Translator};
 pub use world::MiniWorld;

@@ -17,7 +17,7 @@
 
 use std::ops::Range;
 
-use crate::markers::{MarkerScan, Segment};
+use crate::markers::{Arg, MarkerScan, PropKind, Segment};
 
 /// A run of bytes copied verbatim from doc text into render text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +88,10 @@ pub struct TransformOptions {
     pub reveal: Vec<Range<usize>>,
     /// Reveal everything (the Ctrl+Shift "show hidden" chord).
     pub show_hidden: bool,
+    /// Caret position, used only to expand the translator panel (P3 #10)
+    /// it falls inside — independent of `reveal`, so a frontend can expand
+    /// the panel at the caret without un-hiding markers everywhere.
+    pub caret: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,11 +212,44 @@ pub fn to_render_text_range(
     for seg in segments {
         if seg.kind.is_visual()
             && let Some(span) = &seg.span
-                && span.start < range.end && range.start < span.end {
-                    bounds.push(span.start.max(range.start));
-                    bounds.push(span.end.min(range.end));
-                }
+            && span.start < range.end
+            && range.start < span.end
+        {
+            bounds.push(span.start.max(range.start));
+            bounds.push(span.end.min(range.end));
+        }
     }
+
+    // Translator segments (P3 #10): their body is Typst *code*, not document
+    // content. Replace it with a collapsible panel — a one-line summary when
+    // the caret is outside, or a raw (literal, unexecuted) code block when the
+    // caret is inside. Regions are whole-span: the interior is emitted once at
+    // the span start and skipped thereafter.
+    let translator_regions: Vec<TranslatorRegion> = segments
+        .iter()
+        .filter(|seg| seg.kind == PropKind::Translator)
+        .filter_map(|seg| {
+            let span = seg.span.clone()?;
+            if span.start >= range.end || span.end <= range.start {
+                return None;
+            }
+            let expanded = opts.show_hidden
+                || opts.caret.is_some_and(|c| {
+                    span.start <= c && c <= span.end
+                })
+                || opts.reveal.iter().any(|r| {
+                    r.start <= span.end && span.start <= r.end
+                });
+            bounds.push(span.start);
+            bounds.push(span.end);
+            Some(TranslatorRegion {
+                span,
+                expanded,
+                name: translator_name(seg),
+            })
+        })
+        .collect();
+
     bounds.extend(toggles.iter().copied());
     bounds.sort_unstable();
     bounds.dedup();
@@ -253,10 +290,28 @@ pub fn to_render_text_range(
     let shown_token_at = |pos: usize| {
         shown.iter().any(|r| r.start <= pos && pos < r.end)
     };
+    let mut translator_emitted =
+        vec![false; translator_regions.len()];
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
         if start == end || hidden_at(start) {
+            continue;
+        }
+        if let Some(i) = translator_regions.iter().position(|reg| {
+            reg.span.start <= start && start < reg.span.end
+        }) {
+            // The body is code, not content: emit the panel once (at the
+            // first visible byte of the region), then skip the rest.
+            if !translator_emitted[i] {
+                emit_translator(
+                    &translator_regions[i],
+                    doc_text,
+                    &mut out,
+                    &mut map,
+                );
+                translator_emitted[i] = true;
+            }
             continue;
         }
         let chunk = &doc_text[start..end];
@@ -328,6 +383,60 @@ fn math_toggles(
     toggles
 }
 
+/// A `\translator` segment's body region and how to render it.
+struct TranslatorRegion {
+    span: Range<usize>,
+    /// Caret/selection is inside (or show-hidden is on): render the code.
+    expanded: bool,
+    /// Name from the `name:` extra-arg, for the collapsed summary.
+    name: Option<String>,
+}
+
+/// Extract the `name:` literal from a translator segment's extra args.
+fn translator_name(seg: &Segment) -> Option<String> {
+    seg.extra_args.iter().find_map(|arg| {
+        let Arg::Literal { text, .. } = arg else {
+            return None;
+        };
+        let v = text.trim().strip_prefix("name:")?.trim();
+        Some(v.trim_matches('"').to_string())
+    })
+}
+
+/// Render a translator panel into the output stream.
+///
+/// Collapsed: a one-line summary (`▸ translator: name`). Expanded: the body
+/// inside a Typst raw block, so it is shown literally (monospace) and **not**
+/// executed as document markup. The summary/fences are inserted text (no
+/// `OffsetMap` entries); the expanded body is copied verbatim so the caret
+/// maps into the code.
+fn emit_translator(
+    reg: &TranslatorRegion,
+    doc_text: &str,
+    out: &mut String,
+    map: &mut OffsetMap,
+) {
+    if reg.expanded {
+        let raw = &doc_text[reg.span.clone()];
+        let body = raw.trim();
+        // Doc offset of the first non-whitespace byte, so the copied body
+        // maps back to the right place.
+        let body_start =
+            reg.span.start + (raw.len() - raw.trim_start().len());
+        out.push_str("```\n");
+        push_copy(body, body_start, out, map);
+        out.push_str("\n```");
+    } else {
+        match &reg.name {
+            Some(n) => {
+                out.push_str("▸ translator: ");
+                out.push_str(n);
+            }
+            None => out.push_str("▸ translator"),
+        }
+    }
+}
+
 fn push_copy(
     chunk: &str,
     doc_start: usize,
@@ -340,12 +449,12 @@ fn push_copy(
     // Merge with the previous span when contiguous in both spaces.
     if let Some(last) = map.spans.last_mut()
         && last.doc_start + last.len == doc_start
-            && last.render_start + last.len == out.len()
-        {
-            last.len += chunk.len();
-            out.push_str(chunk);
-            return;
-        }
+        && last.render_start + last.len == out.len()
+    {
+        last.len += chunk.len();
+        out.push_str(chunk);
+        return;
+    }
     map.spans.push(CopySpan {
         doc_start,
         render_start: out.len(),
@@ -413,6 +522,7 @@ mod tests {
             &TransformOptions {
                 reveal: vec![1..1],
                 show_hidden: false,
+                caret: None,
             },
         );
         // First marker revealed (escaped), second still hidden.
@@ -427,6 +537,7 @@ mod tests {
             &TransformOptions {
                 reveal: vec![],
                 show_hidden: true,
+                caret: None,
             },
         );
         assert_eq!(out.text, "\\#1 x \\\\b(\\#1,\\#1)");
@@ -526,6 +637,47 @@ mod tests {
         let out =
             render_range(text, 6..23, &TransformOptions::default());
         assert_eq!(out.text, "#strong[b ]");
+    }
+
+    #[test]
+    fn translator_collapsed_when_caret_outside() {
+        // Body code is replaced by a one-line summary; the `#let` is NOT
+        // emitted as document markup (so Typst won't execute it).
+        let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
+        let out = render(text, &TransformOptions::default());
+        assert_eq!(out.text, "▸ translator: ho");
+        assert!(!out.text.contains("#let"));
+    }
+
+    #[test]
+    fn translator_expanded_when_caret_inside() {
+        let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
+        // Caret at byte 10 — inside the body code. Driven by the dedicated
+        // `caret` field, so markers stay hidden (only the panel expands).
+        let out = render(
+            text,
+            &TransformOptions {
+                reveal: vec![],
+                show_hidden: false,
+                caret: Some(10),
+            },
+        );
+        // Raw block fences present and the code shown literally.
+        assert!(out.text.contains("```"), "got: {}", out.text);
+        assert!(
+            out.text.contains("#let translate"),
+            "got: {}",
+            out.text
+        );
+        // Markers are NOT revealed (caret field is panel-only).
+        assert!(!out.text.contains("\\#3"), "got: {}", out.text);
+    }
+
+    #[test]
+    fn translator_unnamed_summary() {
+        let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4)";
+        let out = render(text, &TransformOptions::default());
+        assert_eq!(out.text, "▸ translator");
     }
 
     #[test]

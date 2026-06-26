@@ -40,14 +40,37 @@ pub fn doc_to_markup(doc_text: &str) -> String {
 /// caller retains the doc↔render [`OffsetMap`](mathed_core::transform::OffsetMap)
 /// needed to map glyph positions back to document byte offsets.
 pub fn doc_to_render(doc_text: &str) -> RenderOutput {
+    doc_to_render_with(doc_text, &TransformOptions::default())
+}
+
+/// Like [`doc_to_render`] but with explicit [`TransformOptions`] — e.g. a
+/// caret position so the translator panel (P3 #10) it falls inside expands.
+pub fn doc_to_render_with(
+    doc_text: &str,
+    opts: &TransformOptions,
+) -> RenderOutput {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
-    to_render_text(
-        doc_text,
-        &scan,
-        &segments,
-        &TransformOptions::default(),
-    )
+    to_render_text(doc_text, &scan, &segments, opts)
+}
+
+/// The doc byte range of the translator panel (P3 #10) that `pos` sits in, if
+/// any. A frontend uses this to relayout only when the caret crosses a panel
+/// boundary (entering/exiting expands/collapses the panel). The boundary is
+/// inclusive, matching the transform's expansion rule.
+pub fn active_translator_span(
+    doc_text: &str,
+    pos: usize,
+) -> Option<std::ops::Range<usize>> {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    segments.iter().find_map(|seg| {
+        if seg.kind != mathed_core::markers::PropKind::Translator {
+            return None;
+        }
+        let span = seg.span.clone()?;
+        (span.start <= pos && pos <= span.end).then_some(span)
+    })
 }
 
 /// A laid-out document: the rasterized page plus the glyph index that maps
@@ -109,7 +132,17 @@ pub fn layout_doc(
     doc_text: &str,
     width_pt: f64,
 ) -> Result<DocLayout, RenderError> {
-    let render = doc_to_render(doc_text);
+    layout_doc_with(doc_text, width_pt, &TransformOptions::default())
+}
+
+/// Like [`layout_doc`] but with explicit [`TransformOptions`] (e.g. a caret so
+/// the translator panel it sits in expands to show the code).
+pub fn layout_doc_with(
+    doc_text: &str,
+    width_pt: f64,
+    opts: &TransformOptions,
+) -> Result<DocLayout, RenderError> {
+    let render = doc_to_render_with(doc_text, opts);
     let world = MiniWorld::new(render.text);
     let frame = layout_world(&world, width_pt)?;
     // The minimal frontend prepends no prelude, so source bytes == body bytes.
@@ -166,6 +199,17 @@ mod tests {
         let img = render_doc("Mass-energy: $E = m c^2$", 400.0)
             .expect("doc render should succeed");
         assert!(img.width > 0 && img.height > 0);
+    }
+
+    #[test]
+    fn active_translator_span_tracks_caret() {
+        let doc = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
+        // A caret inside the body code is in the panel.
+        let span = active_translator_span(doc, 12)
+            .expect("caret inside body is in a panel");
+        assert!(span.start <= 12 && 12 <= span.end);
+        // A caret past the whole statement is in no panel.
+        assert!(active_translator_span(doc, doc.len()).is_none());
     }
 
     #[test]
