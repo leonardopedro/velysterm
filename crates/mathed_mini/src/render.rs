@@ -268,6 +268,26 @@ mod tests {
     }
 
     #[test]
+    fn footer_markup_lays_out() {
+        // A results-panel footer (raw block) renders without a Typst error and
+        // grows the page beyond the bare document.
+        let opts = TransformOptions::default();
+        let bare = layout_doc_with("hello", 400.0, &opts)
+            .expect("bare layout");
+        let with_footer = layout_doc_with_footer(
+            "hello",
+            400.0,
+            &opts,
+            "#raw(block: true, \"prob = 1.0000\")",
+        )
+        .expect("footer layout");
+        assert!(
+            with_footer.height > bare.height,
+            "footer adds height"
+        );
+    }
+
+    #[test]
     fn band_for_byte_returns_topmost_for_single_line() {
         let layout = layout_doc("one line", 400.0)
             .expect("layout should succeed");

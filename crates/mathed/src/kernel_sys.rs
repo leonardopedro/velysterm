@@ -185,6 +185,8 @@ pub fn dispatch_kernel_requests(
                 {
                     bridge.client.submit(
                         KernelRequest::Probability {
+                            // v1 Bevy bridge: model and prob share a block.
+                            model_id: block_id,
                             block_id,
                             event_json,
                         },
