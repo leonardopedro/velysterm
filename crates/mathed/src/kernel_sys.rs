@@ -15,14 +15,14 @@ use std::hash::{Hash, Hasher};
 
 use bevy::prelude::*;
 
-use kernel_client::{KernelClient, KernelRequest};
 use kernel_client::parse;
 use kernel_client::worker::BlockResponse;
-use mathed_core::semantics::KernelStatement;
+use kernel_client::{KernelClient, KernelRequest};
 use mathed_core::PropKind;
+use mathed_core::semantics::KernelStatement;
 
-use crate::blocks_view::Blocks;
 use crate::SemanticIndexWrapper;
+use crate::blocks_view::Blocks;
 
 /// Result returned by the kernel for a given block.
 #[derive(Debug, Clone, PartialEq)]
@@ -65,9 +65,16 @@ pub struct PendingRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingOp {
-    DefineModel { body_text: String },
-    SetPrior { body_text: String },
-    Evaluate { body_text: String, name: Option<String> },
+    DefineModel {
+        body_text: String,
+    },
+    SetPrior {
+        body_text: String,
+    },
+    Evaluate {
+        body_text: String,
+        name: Option<String>,
+    },
 }
 
 fn hash_body(text: &str) -> u64 {
@@ -165,23 +172,23 @@ pub fn dispatch_kernel_requests(
         match req.op {
             PendingOp::DefineModel { body_text } => {
                 if let Ok(spec) = parse::parse_model(&body_text) {
-                    bridge.client.submit(KernelRequest::DefineModel {
-                        block_id,
-                        spec,
-                    });
+                    bridge.client.submit(
+                        KernelRequest::DefineModel { block_id, spec },
+                    );
                 }
             }
             PendingOp::SetPrior { .. } => {
                 // v1: prior is set via ModelSpec at creation; stub.
             }
             PendingOp::Evaluate { body_text, .. } => {
-                if let Ok(event_json) = parse::parse_event(&body_text) {
-                    bridge
-                        .client
-                        .submit(KernelRequest::Probability {
+                if let Ok(event_json) = parse::parse_event(&body_text)
+                {
+                    bridge.client.submit(
+                        KernelRequest::Probability {
                             block_id,
                             event_json,
-                        });
+                        },
+                    );
                 }
             }
         }
@@ -193,14 +200,16 @@ pub fn apply_kernel_results(mut bridge: ResMut<KernelBridge>) {
     while let Some(resp) = bridge.client.try_recv() {
         match resp {
             BlockResponse::Value(block_id, val) => {
-                bridge
-                    .results
-                    .insert(block_id as usize, KernelResult::Value(val));
+                bridge.results.insert(
+                    block_id as usize,
+                    KernelResult::Value(val),
+                );
             }
             BlockResponse::Success(block_id) => {
-                bridge
-                    .results
-                    .insert(block_id as usize, KernelResult::Value(1.0));
+                bridge.results.insert(
+                    block_id as usize,
+                    KernelResult::Value(1.0),
+                );
             }
             BlockResponse::Error(block_id, diag) => {
                 bridge.results.insert(
@@ -248,6 +257,7 @@ mod tests {
             block,
             name: name.map(String::from),
             body_text: body_text.to_string(),
+            translator: None,
             span: Range { start: 0, end: 0 },
         }
     }
@@ -266,10 +276,7 @@ mod tests {
             statements_needing_dispatch(&stmts, &dirty, &hashes);
         assert_eq!(reqs.len(), 1);
         assert_eq!(reqs[0].block_idx, 0);
-        assert!(matches!(
-            reqs[0].op,
-            PendingOp::DefineModel { .. }
-        ));
+        assert!(matches!(reqs[0].op, PendingOp::DefineModel { .. }));
     }
 
     #[test]
@@ -306,12 +313,8 @@ mod tests {
 
     #[test]
     fn dispatches_prob_with_name() {
-        let stmts = vec![ks(
-            PropKind::Prob,
-            2,
-            "n(0) == 1",
-            Some("heads"),
-        )];
+        let stmts =
+            vec![ks(PropKind::Prob, 2, "n(0) == 1", Some("heads"))];
         let dirty = HashSet::from([2]);
         let hashes = HashMap::new();
         let reqs =
@@ -341,12 +344,8 @@ mod tests {
 
     #[test]
     fn changed_body_triggers_redispatch() {
-        let stmts = vec![ks(
-            PropKind::Model,
-            0,
-            "yang_mills(g: 0.3)",
-            None,
-        )];
+        let stmts =
+            vec![ks(PropKind::Model, 0, "yang_mills(g: 0.3)", None)];
         let dirty = HashSet::from([0]);
         let mut hashes = HashMap::new();
         // Old hash from different body → should redispatch.
@@ -364,8 +363,7 @@ mod tests {
         assert_eq!(ks.len(), 2);
         let dirty = HashSet::from([0, 1]);
         let hashes = HashMap::new();
-        let reqs =
-            statements_needing_dispatch(&ks, &dirty, &hashes);
+        let reqs = statements_needing_dispatch(&ks, &dirty, &hashes);
         assert_eq!(reqs.len(), 2);
     }
 }

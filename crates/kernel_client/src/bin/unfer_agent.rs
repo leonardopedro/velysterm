@@ -108,7 +108,7 @@ impl AgentState {
                         return AgentResponse::err(
                             &req.id,
                             bad_json_diag(&e.to_string()),
-                        )
+                        );
                     }
                 };
                 match Session::new(&spec) {
@@ -121,23 +121,20 @@ impl AgentState {
                             serde_json::json!({ "model_id": id }),
                         )
                     }
-                    Err(e) => AgentResponse::err(
-                        &req.id,
-                        e.to_diagnostic(),
-                    ),
+                    Err(e) => {
+                        AgentResponse::err(&req.id, e.to_diagnostic())
+                    }
                 }
             }
             "set_prior" => {
-                let (model_id, prior) =
-                    match parse_model_and_param::<PriorSpec>(
-                        &req.params,
-                        "prior",
-                    ) {
-                        Ok(v) => v,
-                        Err(d) => {
-                            return AgentResponse::err(&req.id, d)
-                        }
-                    };
+                let (model_id, prior) = match parse_model_and_param::<
+                    PriorSpec,
+                >(
+                    &req.params, "prior"
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
                 match self.sessions.get_mut(&model_id) {
                     Some(session) => {
                         match session.set_prior(&prior) {
@@ -158,29 +155,24 @@ impl AgentState {
                 }
             }
             "evolve" => {
-                let (model_id, t) =
-                    match parse_model_and_param::<f64>(
-                        &req.params,
-                        "t",
-                    ) {
-                        Ok(v) => v,
-                        Err(d) => {
-                            return AgentResponse::err(&req.id, d)
-                        }
-                    };
+                let (model_id, t) = match parse_model_and_param::<f64>(
+                    &req.params,
+                    "t",
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
                 match self.sessions.get_mut(&model_id) {
-                    Some(session) => {
-                        match session.evolve(t) {
-                            Ok(report) => AgentResponse::ok(
-                                &req.id,
-                                serde_json::to_value(report).unwrap(),
-                            ),
-                            Err(e) => AgentResponse::err(
-                                &req.id,
-                                e.to_diagnostic(),
-                            ),
-                        }
-                    }
+                    Some(session) => match session.evolve(t) {
+                        Ok(report) => AgentResponse::ok(
+                            &req.id,
+                            serde_json::to_value(report).unwrap(),
+                        ),
+                        Err(e) => AgentResponse::err(
+                            &req.id,
+                            e.to_diagnostic(),
+                        ),
+                    },
                     None => AgentResponse::err(
                         &req.id,
                         bad_handle_diag(model_id),
@@ -188,16 +180,14 @@ impl AgentState {
                 }
             }
             "probability" => {
-                let (model_id, event) =
-                    match parse_model_and_param::<EventPredicate>(
-                        &req.params,
-                        "event",
-                    ) {
-                        Ok(v) => v,
-                        Err(d) => {
-                            return AgentResponse::err(&req.id, d)
-                        }
-                    };
+                let (model_id, event) = match parse_model_and_param::<
+                    EventPredicate,
+                >(
+                    &req.params, "event"
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
                 match self.sessions.get(&model_id) {
                     Some(session) => {
                         match session.probability(&event) {
@@ -218,16 +208,14 @@ impl AgentState {
                 }
             }
             "condition" => {
-                let (model_id, event) =
-                    match parse_model_and_param::<EventPredicate>(
-                        &req.params,
-                        "event",
-                    ) {
-                        Ok(v) => v,
-                        Err(d) => {
-                            return AgentResponse::err(&req.id, d)
-                        }
-                    };
+                let (model_id, event) = match parse_model_and_param::<
+                    EventPredicate,
+                >(
+                    &req.params, "event"
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
                 match self.sessions.get_mut(&model_id) {
                     Some(session) => {
                         match session.condition(&event) {
@@ -248,16 +236,14 @@ impl AgentState {
                 }
             }
             "snapshot" => {
-                let (model_id, top_k) =
-                    match parse_model_and_param::<usize>(
-                        &req.params,
-                        "top_k",
-                    ) {
-                        Ok(v) => v,
-                        Err(d) => {
-                            return AgentResponse::err(&req.id, d)
-                        }
-                    };
+                let (model_id, top_k) = match parse_model_and_param::<
+                    usize,
+                >(
+                    &req.params, "top_k"
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
                 match self.sessions.get(&model_id) {
                     Some(session) => {
                         let summary = session.snapshot(top_k);
@@ -272,10 +258,9 @@ impl AgentState {
                     ),
                 }
             }
-            _ => AgentResponse::err(
-                &req.id,
-                unknown_op_diag(&req.op),
-            ),
+            _ => {
+                AgentResponse::err(&req.id, unknown_op_diag(&req.op))
+            }
         }
     }
 }
@@ -298,17 +283,13 @@ fn parse_model_and_param<T: serde::de::DeserializeOwned>(
         .ok_or_else(|| {
             bad_json_diag("missing or non-integer 'model_id' field")
         })?;
-    let param = params
-        .get(param_name)
-        .ok_or_else(|| {
-            bad_json_diag(&format!(
-                "missing '{}' field",
-                param_name
-            ))
+    let param = params.get(param_name).ok_or_else(|| {
+        bad_json_diag(&format!("missing '{}' field", param_name))
+    })?;
+    let value: T =
+        serde_json::from_value(param.clone()).map_err(|e| {
+            bad_json_diag(&format!("invalid '{}': {}", param_name, e))
         })?;
-    let value: T = serde_json::from_value(param.clone()).map_err(
-        |e| bad_json_diag(&format!("invalid '{}': {}", param_name, e)),
-    )?;
     Ok((model_id, value))
 }
 
@@ -360,7 +341,8 @@ mod tests {
     #[test]
     fn version_op() {
         let mut state = AgentState::new();
-        let req = AgentRequest::new("1", "version", serde_json::json!({}));
+        let req =
+            AgentRequest::new("1", "version", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(resp.ok);
         assert_eq!(resp.id, "1");
@@ -369,7 +351,11 @@ mod tests {
     #[test]
     fn list_codes_op() {
         let mut state = AgentState::new();
-        let req = AgentRequest::new("2", "list_codes", serde_json::json!({}));
+        let req = AgentRequest::new(
+            "2",
+            "list_codes",
+            serde_json::json!({}),
+        );
         let resp = state.handle(&req);
         assert!(resp.ok);
     }
@@ -377,7 +363,11 @@ mod tests {
     #[test]
     fn unknown_op_returns_hint() {
         let mut state = AgentState::new();
-        let req = AgentRequest::new("3", "frobnicate", serde_json::json!({}));
+        let req = AgentRequest::new(
+            "3",
+            "frobnicate",
+            serde_json::json!({}),
+        );
         let resp = state.handle(&req);
         assert!(!resp.ok);
         let diag = resp.error.unwrap();

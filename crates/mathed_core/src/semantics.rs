@@ -10,6 +10,26 @@ pub struct SemanticIndex {
     /// Kernel statements (`\model`, `\prior`, `\event`, `\prob`)
     /// collected for the probability kernel bridge (Stage 15).
     pub kernel_statements: Vec<KernelStatement>,
+    /// User-defined translators (`\translator`, P3 #10) keyed by name.
+    /// An unnamed translator is stored under `""` (block-local default).
+    /// Last-wins on name collision (a later `\translator` shadows an
+    /// earlier one with the same name).
+    pub translators: HashMap<String, TranslatorDef>,
+}
+
+/// A `\translator(#3,#4, name: "harmonic")` segment (P3 #10).
+///
+/// The body is Typst source that defines a `#let translate(body) = {...}`
+/// binding returning a `TermSpec[]` JSON string (or `EventPredicate`
+/// JSON for event/prob segments). The dispatcher evaluates it via
+/// typst-eval and calls `translate` with the math source string.
+#[derive(Debug, Clone)]
+pub struct TranslatorDef {
+    pub name: String,
+    /// Verbatim Typst source between the two markers.
+    pub body_text: String,
+    pub span: Range<usize>,
+    pub block: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +58,9 @@ pub struct Occurrence {
 ///   `\prob(#1,#2,heads)` → `Some("heads")`.
 /// - `body_text` — trimmed doc text between the two marker refs; this
 ///   is the payload (model spec, event predicate, etc.).
+/// - `translator` — optional translator name (from a `translator: "name"`
+///   named extra-arg); `None` means the dispatcher falls back to the
+///   builtin default translator (P3 #10).
 /// - `span` — doc byte range of the body text (exclusive of markers).
 #[derive(Debug, Clone)]
 pub struct KernelStatement {
@@ -45,6 +68,7 @@ pub struct KernelStatement {
     pub block: usize,
     pub name: Option<String>,
     pub body_text: String,
+    pub translator: Option<String>,
     pub span: Range<usize>,
 }
 
@@ -67,13 +91,12 @@ impl SemanticIndex {
                         break;
                     }
                 }
-                if name.is_empty() {
-                    if let Some(ref span) = seg.span {
+                if name.is_empty()
+                    && let Some(ref span) = seg.span {
                         name =
                             doc_text[span.clone()].trim().to_string();
                         // name_range remains None as per spec
                     }
-                }
 
                 if let Some(s) = seg.span.clone() {
                     defs.push(Definition {
@@ -135,47 +158,79 @@ impl SemanticIndex {
                 }
             }
             // 2. Otherwise, look up the name in the map (last def wins).
-            if resolved.is_none() {
-                if let Some(&def_idx) = name_to_def_idx.get(&occ.name)
+            if resolved.is_none()
+                && let Some(&def_idx) = name_to_def_idx.get(&occ.name)
                 {
                     resolved = Some(def_idx);
                 }
-            }
             occ.resolved = resolved;
         }
 
-        // --- Collect kernel statements (Model/Prior/Event/Prob). ---
-        let kernel_statements = segments
-            .iter()
-            .filter(|seg| seg.kind.is_kernel())
-            .filter_map(|seg| {
-                let span = seg.span.clone()?;
-                let name = seg.extra_args.iter().find_map(|arg| {
-                    if let Arg::Literal { text, .. } = arg {
-                        Some(text.clone())
-                    } else {
-                        None
-                    }
-                });
-                let body_text =
-                    doc_text[span.clone()].trim().to_string();
-                let block = find_block_for_doc_pos(
-                    per_block_renders,
-                    span.start,
+        // --- Collect kernel statements (Model/Prior/Event/Prob) and
+        //     translators (P3 #10). ---
+        let mut kernel_statements = Vec::new();
+        let mut translators: HashMap<String, TranslatorDef> =
+            HashMap::new();
+        for seg in segments {
+            if !seg.kind.is_kernel() {
+                continue;
+            }
+            let span = match seg.span.clone() {
+                Some(s) => s,
+                None => continue,
+            };
+            let body_text = doc_text[span.clone()].trim().to_string();
+            let block =
+                find_block_for_doc_pos(per_block_renders, span.start);
+
+            if seg.kind == PropKind::Translator {
+                // `\translator(#3,#4, name: "harmonic")` — collect into
+                // the translators map. Unnamed → key "" (block-local
+                // default). Last-wins on collision.
+                let name =
+                    extract_named_string(&seg.extra_args, "name")
+                        .unwrap_or_default();
+                translators.insert(
+                    name.clone(),
+                    TranslatorDef {
+                        name,
+                        body_text,
+                        span,
+                        block,
+                    },
                 );
-                Some(KernelStatement {
-                    kind: seg.kind,
-                    block,
-                    name,
-                    body_text,
-                    span,
-                })
-            })
-            .collect();
+                continue;
+            }
+
+            // Model/Prior/Event/Prob: name = first *bare* literal (a
+            // literal without `:`, so named args like
+            // `translator: "ho"` are not mistaken for a name).
+            let name = seg.extra_args.iter().find_map(|arg| {
+                let Arg::Literal { text, .. } = arg else {
+                    return None;
+                };
+                let t = text.trim();
+                if t.contains(':') {
+                    return None;
+                }
+                Some(t.to_string())
+            });
+            let translator =
+                extract_named_string(&seg.extra_args, "translator");
+            kernel_statements.push(KernelStatement {
+                kind: seg.kind,
+                block,
+                name,
+                body_text,
+                translator,
+                span,
+            });
+        }
 
         self.defs = defs;
         self.occurrences = occurrences;
         self.kernel_statements = kernel_statements;
+        self.translators = translators;
     }
 
     pub fn plan_rename(
@@ -238,6 +293,32 @@ fn find_block_for_doc_pos(
         }
     }
     0
+}
+
+/// Extract a named string argument `key: "value"` from a statement's
+/// extra args. Handles `key: "value"`, `key:"value"`, and unquoted
+/// `key: value`. Returns the first match, or `None` if absent. Used for
+/// the `translator:` arg on `\model`/`\event`/`\prob` and the `name:`
+/// arg on `\translator` (P3 #10).
+fn extract_named_string(args: &[Arg], key: &str) -> Option<String> {
+    for arg in args {
+        let Arg::Literal { text, .. } = arg else {
+            continue;
+        };
+        let mut parts = text.trim().splitn(2, ':');
+        let (Some(k), Some(v)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if k.trim() != key {
+            continue;
+        }
+        let v = v.trim();
+        if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+            return Some(v[1..v.len() - 1].to_string());
+        }
+        return Some(v.to_string());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -343,7 +424,10 @@ mod tests {
         assert_eq!(m.kind, PropKind::Model);
         assert!(m.name.is_none());
         assert_eq!(m.body_text, "harmonic_chain(g: 0.5)");
-        assert_eq!(doc[m.span.clone()].trim(), "harmonic_chain(g: 0.5)");
+        assert_eq!(
+            doc[m.span.clone()].trim(),
+            "harmonic_chain(g: 0.5)"
+        );
 
         // Event statement
         let e = &idx.kernel_statements[1];
@@ -366,5 +450,71 @@ mod tests {
         let p = &idx.kernel_statements[0];
         assert_eq!(p.kind, PropKind::Prior);
         assert_eq!(p.body_text, "vacuum");
+    }
+
+    // ── P3 #10: translator segments ──
+
+    #[test]
+    fn translator_segment_collected() {
+        let doc = "#3 #let translate(body) = { \"[]\" } #4 \
+                   \\translator(#3,#4, name: \"harmonic\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.translators.len(), 1, "one named translator");
+        let t = idx
+            .translators
+            .get("harmonic")
+            .expect("named translator");
+        assert_eq!(t.name, "harmonic");
+        assert!(t.body_text.contains("#let translate"));
+    }
+
+    #[test]
+    fn model_statement_carries_translator() {
+        let doc = "#1 a^\\dagger a #2 \\model(#1,#2, translator: \"harmonic\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.kernel_statements.len(), 1);
+        let m = &idx.kernel_statements[0];
+        assert_eq!(m.kind, PropKind::Model);
+        assert_eq!(
+            m.translator.as_deref(),
+            Some("harmonic"),
+            "translator named arg extracted"
+        );
+    }
+
+    #[test]
+    fn unnamed_translator_stored_under_empty_key() {
+        let doc = "#3 #let translate(body) = { \"[]\" } #4 \\translator(#3,#4)";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.translators.len(), 1);
+        assert!(
+            idx.translators.contains_key(""),
+            "unnamed translator stored under empty-string key"
+        );
+    }
+
+    #[test]
+    fn model_without_translator_defaults_to_none() {
+        let doc = "#1 a^\\dagger a #2 \\model(#1,#2)";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.kernel_statements.len(), 1);
+        let m = &idx.kernel_statements[0];
+        assert!(
+            m.translator.is_none(),
+            "no translator arg → None (dispatcher uses builtin)"
+        );
+    }
+
+    #[test]
+    fn prob_name_not_confused_with_translator_arg() {
+        // `\prob(#1,#2,heads, translator: "ho")` — the bare literal
+        // `heads` is the name; the named arg `translator:` is separate.
+        let doc =
+            "#1 n(0) == 1 #2 \\prob(#1,#2,heads, translator: \"ho\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.kernel_statements.len(), 1);
+        let p = &idx.kernel_statements[0];
+        assert_eq!(p.name.as_deref(), Some("heads"));
+        assert_eq!(p.translator.as_deref(), Some("ho"));
     }
 }

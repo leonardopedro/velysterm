@@ -27,11 +27,12 @@ pub mod transform;
 pub mod wordnav;
 
 pub use accessibility::{
-    build_access_nodes, describe_segment, AccessNode, AccessRole,
+    AccessNode, AccessRole, build_access_nodes, describe_segment,
 };
 pub use doc::{ByteDelta, DocError, MathDoc, ReplaceOp};
 pub use glyphs::{
-    build_glyph_index, CaretGeom, GlyphEntry, GlyphIndex, LineBand, RectF, V2,
+    CaretGeom, GlyphEntry, GlyphIndex, LineBand, RectF, V2,
+    build_glyph_index,
 };
 pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, Segment,
@@ -39,6 +40,7 @@ pub use markers::{
 };
 pub use semantics::{
     Definition, KernelStatement, Occurrence, SemanticIndex,
+    TranslatorDef,
 };
 pub use transform::{
     CopySpan, OffsetMap, RenderOutput, TransformOptions,

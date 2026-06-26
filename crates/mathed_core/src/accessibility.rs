@@ -41,6 +41,8 @@ pub enum AccessRole {
     Prior,
     Event,
     Probability,
+    /// A user-defined translator panel (P3 #10).
+    Translator,
 }
 
 impl AccessRole {
@@ -62,6 +64,7 @@ impl AccessRole {
             AccessRole::Prior => "prior",
             AccessRole::Event => "event",
             AccessRole::Probability => "probability",
+            AccessRole::Translator => "translator",
         }
     }
 }
@@ -94,12 +97,19 @@ fn extra_literal(seg: &Segment) -> Option<String> {
 ///
 /// `seg.prop` is consulted for the `Statement` family so theorems, lemmas and
 /// axioms keep their distinct wording even though they share a [`PropKind`].
-pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
+pub fn describe_segment(
+    seg: &Segment,
+    content: &str,
+) -> (AccessRole, String) {
     let content = content.trim();
     let name = extra_literal(seg);
     match seg.kind {
-        PropKind::Bold => (AccessRole::Emphasis, format!("bold {content}")),
-        PropKind::Italic => (AccessRole::Emphasis, format!("italic {content}")),
+        PropKind::Bold => {
+            (AccessRole::Emphasis, format!("bold {content}"))
+        }
+        PropKind::Italic => {
+            (AccessRole::Emphasis, format!("italic {content}"))
+        }
         PropKind::Underline => {
             (AccessRole::Emphasis, format!("underlined {content}"))
         }
@@ -125,15 +135,24 @@ pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
             };
             (role, format!("{kw}: {content}"))
         }
-        PropKind::Model => (AccessRole::Model, format!("model: {content}")),
-        PropKind::Prior => (AccessRole::Prior, format!("prior: {content}")),
-        PropKind::Event => (AccessRole::Event, format!("event: {content}")),
+        PropKind::Model => {
+            (AccessRole::Model, format!("model: {content}"))
+        }
+        PropKind::Prior => {
+            (AccessRole::Prior, format!("prior: {content}"))
+        }
+        PropKind::Event => {
+            (AccessRole::Event, format!("event: {content}"))
+        }
         PropKind::Prob => {
             let lead = match &name {
                 Some(n) => format!("probability {n}"),
                 None => "probability".to_string(),
             };
             (AccessRole::Probability, format!("{lead} of {content}"))
+        }
+        PropKind::Translator => {
+            (AccessRole::Translator, format!("translator: {content}"))
         }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
@@ -153,9 +172,14 @@ pub fn build_access_nodes(
     let mut nodes = Vec::new();
 
     for seg in segments {
-        let Some(span) = seg.span.clone() else { continue };
-        let content =
-            doc_text.get(span.clone()).unwrap_or("").trim().to_string();
+        let Some(span) = seg.span.clone() else {
+            continue;
+        };
+        let content = doc_text
+            .get(span.clone())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let (role, label) = describe_segment(seg, &content);
         nodes.push(AccessNode {
             role,
@@ -186,7 +210,7 @@ pub fn build_access_nodes(
 mod tests {
     use super::*;
     use crate::markers::{resolve_segments, scan};
-    use crate::transform::{to_render_text, TransformOptions};
+    use crate::transform::{TransformOptions, to_render_text};
 
     fn nodes_for(doc: &str) -> Vec<AccessNode> {
         let scan = scan(doc);
@@ -219,7 +243,10 @@ mod tests {
         let s = seg(
             "def",
             PropKind::Definition,
-            vec![Arg::Literal { text: "norm".into(), range: 0..4 }],
+            vec![Arg::Literal {
+                text: "norm".into(),
+                range: 0..4,
+            }],
         );
         let (role, label) = describe_segment(&s, "‖x‖");
         assert_eq!(role, AccessRole::Definition);
@@ -245,7 +272,10 @@ mod tests {
         let named = seg(
             "prob",
             PropKind::Prob,
-            vec![Arg::Literal { text: "heads".into(), range: 0..5 }],
+            vec![Arg::Literal {
+                text: "heads".into(),
+                range: 0..5,
+            }],
         );
         let (role, label) = describe_segment(&named, "n(0) == 1");
         assert_eq!(role, AccessRole::Probability);
@@ -277,8 +307,10 @@ mod tests {
         // Model + Prob segments are described.
         assert!(nodes.iter().any(|n| n.role == AccessRole::Model
             && n.label == "model: harmonic_chain(g: 0.5)"));
-        assert!(nodes.iter().any(|n| n.role == AccessRole::Probability
-            && n.label == "probability heads of n(0) == 1"));
+        assert!(
+            nodes.iter().any(|n| n.role == AccessRole::Probability
+                && n.label == "probability heads of n(0) == 1")
+        );
         // Range ordered.
         let starts: Vec<usize> = nodes
             .iter()
@@ -293,7 +325,9 @@ mod tests {
     fn unresolved_reference_is_flagged() {
         let doc = "#1 $norm$ #2 \\def(#1,#2, norm)\n\n$foo$";
         let nodes = nodes_for(doc);
-        assert!(nodes.iter().any(|n| n.role == AccessRole::Reference
-            && n.label == "unresolved reference foo"));
+        assert!(
+            nodes.iter().any(|n| n.role == AccessRole::Reference
+                && n.label == "unresolved reference foo")
+        );
     }
 }

@@ -206,14 +206,12 @@ pub fn to_render_text_range(
         bounds.push(r.end);
     }
     for seg in segments {
-        if seg.kind.is_visual() {
-            if let Some(span) = &seg.span {
-                if span.start < range.end && range.start < span.end {
+        if seg.kind.is_visual()
+            && let Some(span) = &seg.span
+                && span.start < range.end && range.start < span.end {
                     bounds.push(span.start.max(range.start));
                     bounds.push(span.end.min(range.end));
                 }
-            }
-        }
     }
     bounds.extend(toggles.iter().copied());
     bounds.sort_unstable();
@@ -340,15 +338,14 @@ fn push_copy(
         return;
     }
     // Merge with the previous span when contiguous in both spaces.
-    if let Some(last) = map.spans.last_mut() {
-        if last.doc_start + last.len == doc_start
+    if let Some(last) = map.spans.last_mut()
+        && last.doc_start + last.len == doc_start
             && last.render_start + last.len == out.len()
         {
             last.len += chunk.len();
             out.push_str(chunk);
             return;
         }
-    }
     map.spans.push(CopySpan {
         doc_start,
         render_start: out.len(),

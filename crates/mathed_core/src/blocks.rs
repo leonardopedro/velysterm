@@ -161,9 +161,9 @@ pub fn split_blocks(text: &str) -> Vec<Range<usize>> {
         if c == '\n' {
             let is_blank = {
                 let mut blank = true;
-                let mut temp_chars =
+                let temp_chars =
                     text[i + 1..].char_indices().peekable();
-                while let Some((_, ch)) = temp_chars.next() {
+                for (_, ch) in temp_chars {
                     if ch == '\n' {
                         break;
                     }

@@ -1,11 +1,11 @@
-pub mod worker;
 pub mod parse;
+pub mod worker;
 
-use crossbeam_channel::{Sender, Receiver, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::thread;
 
-use crate::worker::{KernelWorker, BlockResponse};
-use unfer_protocol::{ModelSpec};
+use crate::worker::{BlockResponse, KernelWorker};
+use unfer_protocol::ModelSpec;
 
 pub type BlockId = u64;
 

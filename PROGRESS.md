@@ -165,3 +165,30 @@ All three workspaces had `cargo update` run successfully:
 - mathed_mini: 6 tests
 - kernel_client: 7 tests
 - mathed (Bevy): 36 tests
+
+## 2026-06-26 — P3 #10 translator pipeline (design phase)
+
+**Pivot:** the original "Typst-math → Hamiltonian compiler through
+mathhook" plan (P3 #10 in `unfer/docs/IMPLEMENTATION_PLAN.md`) has been
+replaced with a **user-defined translator** architecture. Editor users
+do not write typst-math directly; they type rendered math (display-only)
+and define a translator — a Typst function authored as code in a
+collapsible panel — that maps the math source string to a `TermSpec[]`
+JSON payload for the kernel.
+
+**Design decisions (locked):**
+- Translator output: raw `TermSpec[]` JSON (bypasses CAS/`compile_latex`,
+  wrapped into `HamiltonianSpec::Terms` by the dispatcher).
+- Translator visibility: collapsible panel (expanded when caret inside,
+  collapsed to one-line summary otherwise).
+- Translator input: raw math source string (verbatim between markers).
+
+**Design doc:** `velysterm/docs/mathed/TRANSLATOR_DESIGN.md` — full
+architecture, data flow, 6-step implementation plan, technical risks,
+and resume state for a new agent. P3 #10 in
+`unfer/docs/IMPLEMENTATION_PLAN.md` updated to point to it.
+
+**Status:** design complete, no code written yet. Step 1 (mathed_core
+layer: `PropKind::Translator`, `TranslatorDef`,
+`KernelStatement.translator`) is safe to start. Step 2 (typst-eval API
+investigation) blocks Step 3.

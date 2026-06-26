@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use crate::{BlockId, KernelRequest};
 use crossbeam_channel::{Receiver, Sender};
 use prob_kernel::Session;
-use unfer_protocol::{Diagnostic, Code, Severity};
-use crate::{KernelRequest, BlockId};
+use std::collections::HashMap;
+use unfer_protocol::{Code, Diagnostic, Severity};
 
 #[derive(Debug)]
 pub enum BlockResponse {
@@ -42,17 +42,16 @@ impl KernelWorker {
                     match Session::new(&spec) {
                         Ok(session) => {
                             self.sessions.insert(block_id, session);
-                            let _ = self
-                                .tx
-                                .send(BlockResponse::Success(block_id));
+                            let _ = self.tx.send(
+                                BlockResponse::Success(block_id),
+                            );
                         }
                         Err(e) => {
-                            let _ = self.tx.send(
-                                BlockResponse::Error(
+                            let _ =
+                                self.tx.send(BlockResponse::Error(
                                     block_id,
                                     e.to_diagnostic(),
-                                ),
-                            );
+                                ));
                         }
                     }
                 }
@@ -62,11 +61,9 @@ impl KernelWorker {
                     {
                         match session.evolve(t) {
                             Ok(_) => {
-                                let _ = self
-                                    .tx
-                                    .send(BlockResponse::Success(
-                                        block_id,
-                                    ));
+                                let _ = self.tx.send(
+                                    BlockResponse::Success(block_id),
+                                );
                             }
                             Err(e) => {
                                 let _ = self.tx.send(
@@ -78,9 +75,8 @@ impl KernelWorker {
                             }
                         }
                     } else {
-                        let _ = self
-                            .tx
-                            .send(Self::bad_handle(block_id));
+                        let _ =
+                            self.tx.send(Self::bad_handle(block_id));
                     }
                 }
                 KernelRequest::Probability {
@@ -99,8 +95,7 @@ impl KernelWorker {
                                     Ok(p) => {
                                         let _ = self.tx.send(
                                             BlockResponse::Value(
-                                                block_id,
-                                                p,
+                                                block_id, p,
                                             ),
                                         );
                                     }
@@ -120,7 +115,8 @@ impl KernelWorker {
                                         block_id,
                                         Diagnostic::new(
                                             Code(1003),
-                                            "Invalid event JSON".to_string(),
+                                            "Invalid event JSON"
+                                                .to_string(),
                                             Severity::Error,
                                         ),
                                     ),
@@ -128,9 +124,8 @@ impl KernelWorker {
                             }
                         }
                     } else {
-                        let _ = self
-                            .tx
-                            .send(Self::bad_handle(block_id));
+                        let _ =
+                            self.tx.send(Self::bad_handle(block_id));
                     }
                 }
                 KernelRequest::Condition {
@@ -149,8 +144,7 @@ impl KernelWorker {
                                     Ok(p) => {
                                         let _ = self.tx.send(
                                             BlockResponse::Value(
-                                                block_id,
-                                                p,
+                                                block_id, p,
                                             ),
                                         );
                                     }
@@ -170,7 +164,8 @@ impl KernelWorker {
                                         block_id,
                                         Diagnostic::new(
                                             Code(1003),
-                                            "Invalid event JSON".to_string(),
+                                            "Invalid event JSON"
+                                                .to_string(),
                                             Severity::Error,
                                         ),
                                     ),
@@ -178,9 +173,8 @@ impl KernelWorker {
                             }
                         }
                     } else {
-                        let _ = self
-                            .tx
-                            .send(Self::bad_handle(block_id));
+                        let _ =
+                            self.tx.send(Self::bad_handle(block_id));
                     }
                 }
             }

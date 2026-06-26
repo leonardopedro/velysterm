@@ -131,12 +131,14 @@ pub fn build_glyph_index(
         let mut current_band: Option<usize> = None;
         for rec in &sorted_by_y {
             if let Some(bi) = current_band
-                && (rec.baseline_y - bands_raw[bi].baseline).abs() < 0.5
+                && (rec.baseline_y - bands_raw[bi].baseline).abs()
+                    < 0.5
             {
                 bands_raw[bi].top =
                     bands_raw[bi].top.min(rec.baseline_y - rec.asc);
-                bands_raw[bi].bottom =
-                    bands_raw[bi].bottom.max(rec.baseline_y - rec.desc);
+                bands_raw[bi].bottom = bands_raw[bi]
+                    .bottom
+                    .max(rec.baseline_y - rec.desc);
                 band_idx.push(bi as u32);
                 continue;
             }
@@ -188,7 +190,8 @@ pub fn build_glyph_index(
     }
     entries.sort_by(|a, b| {
         a.doc_byte.cmp(&b.doc_byte).then(
-            a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal),
+            a.x.partial_cmp(&b.x)
+                .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
 
@@ -212,13 +215,15 @@ fn walk_records(
                 let desc = m.descender.at(text.size).to_pt() as f32;
                 let mut x = 0.0;
                 for glyph in &text.glyphs {
-                    let advance = glyph.x_advance.at(text.size).to_pt() as f32;
+                    let advance =
+                        glyph.x_advance.at(text.size).to_pt() as f32;
                     let (span, cluster) = glyph.span;
                     if span.id() == Some(source.id())
                         && let Some(node) = source.find(span)
                     {
                         out.push(RawRecord {
-                            source_byte: node.range().start + cluster as usize,
+                            source_byte: node.range().start
+                                + cluster as usize,
                             x: item_pos.x + x,
                             baseline_y: item_pos.y,
                             advance,
@@ -239,13 +244,17 @@ fn walk_records(
 
 impl GlyphIndex {
     /// Caret geometry for a doc byte offset.
-    pub fn caret_for_byte(&self, doc_byte: usize) -> Option<CaretGeom> {
+    pub fn caret_for_byte(
+        &self,
+        doc_byte: usize,
+    ) -> Option<CaretGeom> {
         if self.entries.is_empty() {
             return None;
         }
-        let idx = self.entries.partition_point(|e| e.doc_byte < doc_byte);
-        let exact =
-            idx < self.entries.len() && self.entries[idx].doc_byte == doc_byte;
+        let idx =
+            self.entries.partition_point(|e| e.doc_byte < doc_byte);
+        let exact = idx < self.entries.len()
+            && self.entries[idx].doc_byte == doc_byte;
         let (entry, band_idx) = if exact {
             // Exact match: caret at left edge.
             (&self.entries[idx], self.entries[idx].band)
@@ -258,7 +267,11 @@ impl GlyphIndex {
             (e, e.band)
         };
         let band = &self.bands[band_idx as usize];
-        let x = if exact { entry.x } else { entry.x + entry.advance };
+        let x = if exact {
+            entry.x
+        } else {
+            entry.x + entry.advance
+        };
         Some(CaretGeom {
             x,
             top: band.top,
@@ -276,7 +289,8 @@ impl GlyphIndex {
         if self.entries.is_empty() {
             return None;
         }
-        let idx = self.entries.partition_point(|e| e.doc_byte < doc_byte);
+        let idx =
+            self.entries.partition_point(|e| e.doc_byte < doc_byte);
         let band_idx = if idx < self.entries.len()
             && self.entries[idx].doc_byte == doc_byte
         {
@@ -313,7 +327,8 @@ impl GlyphIndex {
                 .min_by(|(_, a), (_, b)| {
                     let da = ((a.top + a.bottom) / 2.0 - p.y).abs();
                     let db = ((b.top + b.bottom) / 2.0 - p.y).abs();
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    da.partial_cmp(&db)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(i, _)| i)?;
             let entries: Vec<&GlyphEntry> = self
@@ -342,7 +357,8 @@ impl GlyphIndex {
                 fallback = Some((e.doc_byte, true));
             }
         }
-        fallback.or_else(|| entries.first().map(|e| (e.doc_byte, false)))
+        fallback
+            .or_else(|| entries.first().map(|e| (e.doc_byte, false)))
     }
 
     /// Rectangles covering a doc byte range, one per band.
@@ -361,13 +377,20 @@ impl GlyphIndex {
             if band_entries.is_empty() {
                 continue;
             }
-            let min_x =
-                band_entries.iter().map(|e| e.x).fold(f32::MAX, f32::min);
+            let min_x = band_entries
+                .iter()
+                .map(|e| e.x)
+                .fold(f32::MAX, f32::min);
             let max_x = band_entries
                 .iter()
                 .map(|e| e.x + e.advance)
                 .fold(f32::MIN, f32::max);
-            rects.push(RectF::new(min_x, band.top, max_x, band.bottom));
+            rects.push(RectF::new(
+                min_x,
+                band.top,
+                max_x,
+                band.bottom,
+            ));
         }
         rects
     }

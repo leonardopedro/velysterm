@@ -84,6 +84,12 @@ pub enum PropKind {
     Prior,
     Event,
     Prob,
+    /// A user-defined translator: Typst code (in the segment body) that
+    /// maps a math source string to a `TermSpec[]` JSON payload for the
+    /// kernel. Named via the `name:` extra-arg; looked up by `\model`'s
+    /// `translator:` extra-arg. Collected into
+    /// `SemanticIndex.translators` for the dispatcher (P3 #10).
+    Translator,
     /// Unknown property: kept, semantically inert in v1.
     Other,
 }
@@ -105,6 +111,7 @@ impl PropKind {
             "prior" => Self::Prior,
             "event" => Self::Event,
             "prob" => Self::Prob,
+            "translator" => Self::Translator,
             _ => Self::Other,
         }
     }
@@ -114,11 +121,17 @@ impl PropKind {
     }
 
     /// Kernel statements populate `SemanticIndex.kernel_statements`
-    /// and drive the probability kernel bridge.
+    /// and drive the probability kernel bridge. `Translator` populates
+    /// `SemanticIndex.translators` instead (a separate collection), but
+    /// is kernel-affiliated so it is surfaced to the dispatcher.
     pub fn is_kernel(self) -> bool {
         matches!(
             self,
-            Self::Model | Self::Prior | Self::Event | Self::Prob
+            Self::Model
+                | Self::Prior
+                | Self::Event
+                | Self::Prob
+                | Self::Translator
         )
     }
 }

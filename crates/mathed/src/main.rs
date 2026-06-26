@@ -12,8 +12,8 @@
 
 mod blocks_view;
 mod glyphs;
-mod keymap;
 mod kernel_sys;
+mod keymap;
 mod overlay;
 mod popup;
 mod scheduler;
@@ -1270,7 +1270,8 @@ fn draw_overlay(
         if ks.kind != mathed_core::PropKind::Prob {
             continue;
         }
-        let Some(result) = kernel_bridge.results.get(&ks.block) else {
+        let Some(result) = kernel_bridge.results.get(&ks.block)
+        else {
             continue;
         };
         for block in blocks.index.blocks.iter() {
