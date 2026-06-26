@@ -1,9 +1,10 @@
 # P3 #10 — User-Defined Translator Pipeline
 
-> **Status:** Steps 1–4 IMPLEMENTED (2026-06-26). Core pipeline —
-> semantic layer → typst-eval → dispatcher — is complete and tested.
-> Remaining: Step 5 (collapsible panel rendering) and full kernel wiring
-> (P3 #11, dispatch output → `kernel_client` worker). Last updated
+> **Status:** Steps 1–5 IMPLEMENTED (2026-06-26). Pipeline (semantic
+> layer → typst-eval → dispatcher) and collapsible-panel rendering are
+> complete and tested. Remaining: full kernel wiring (P3 #11, dispatch
+> output → `kernel_client` worker so a `\prob` overlay shows a real
+> number) and Step 6 polish (deleting `parse.rs`). Last updated
 > 2026-06-26.
 > **Supersedes** the "Typst-math → Hamiltonian compiler" item in
 > `unfer/docs/IMPLEMENTATION_PLAN.md` (P3 #10, line 345).
@@ -509,15 +510,22 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
     (`statement_to_model_spec`/`statement_to_event_json`,
     `resolve_translator_src`, `DispatchError`); added `unfer_protocol` +
     `serde_json` deps to `mathed_mini`. Commit `12864ce`. 4 tests.
-- **Next action:** **Step 5** (collapsible panel rendering in
-  `transform.rs` + `mathed_mini/src/app.rs`) and full kernel wiring
-  (P3 #11: feed `dispatch` output into the `kernel_client` worker so a
-  `\prob` overlay shows a real number). Note `crates/mathed` (Bevy) does
-  not currently compile (pre-existing velyst example breakage,
-  unrelated); `mathed_mini` is the working integration target.
-- **Read first:** `crates/mathed_mini/src/{translate,dispatch,world}.rs`
-  (the engine), `crates/mathed_core/src/semantics.rs` (SemanticIndex),
-  `crates/mathed_mini/src/app.rs` (where the panel + overlay land),
+  - **Step 5** — collapsible panel rendering. `transform.rs`
+    replaces a translator body with a `▸ translator: name` summary
+    (collapsed) or a Typst raw block (expanded), driven by the new
+    `TransformOptions.caret` (panel-only, independent of marker
+    `reveal`). `render.rs` adds `doc_to_render_with`/`layout_doc_with` +
+    `active_translator_span`; `app.rs` relayouts only when the caret
+    crosses a panel boundary. Commit `399f0c8`. 4 tests.
+- **Next action:** full kernel wiring (P3 #11): feed `dispatch` output
+  into the `kernel_client` worker so a `\prob` overlay shows a real
+  number in `mathed_mini`. Then Step 6 polish (delete `parse.rs` once the
+  worker is wired). Note `crates/mathed` (Bevy) does not currently
+  compile (pre-existing velyst *example* breakage, unrelated);
+  `mathed_mini` is the working integration target.
+- **Read first:** `crates/mathed_mini/src/{translate,dispatch,render,world}.rs`
+  (the engine), `crates/mathed_core/src/{semantics,transform}.rs`,
+  `crates/mathed_mini/src/app.rs` (panel wiring),
   `crates/kernel_client/src/{worker,parse}.rs` (worker to feed; parse.rs
   is the still-present v1 shortcut, not yet deleted per §6 constraint).
 - **Key constraint:** translator body is Typst *code* (not rendered

@@ -219,3 +219,16 @@ and full kernel wiring (P3 #11).
 `MiniWorld` + typst-eval), not `kernel_client`, keeping the agent binary
 typst-free. `parse.rs` is intentionally **not** deleted yet (design §6
 constraint: keep until the worker is wired).
+
+- **Step 5** (`399f0c8`) — collapsible translator panel. `transform.rs`
+  replaces a `\translator` body with a `▸ translator: name` summary when
+  collapsed or a Typst raw block (literal, unexecuted) when expanded,
+  driven by a new panel-only `TransformOptions.caret`. `render.rs` adds
+  `doc_to_render_with`/`layout_doc_with` + `active_translator_span`;
+  `mathed_mini`'s `app.rs` relayouts only when the caret crosses a panel
+  boundary (foot-style cache preserved). mathed_core 67, mathed_mini 20
+  tests.
+
+**Remaining:** full kernel wiring (P3 #11) — feed `dispatch` output into
+the `kernel_client` worker so a `\prob` overlay shows a real number; then
+delete `parse.rs`.
