@@ -243,6 +243,15 @@ constraint: keep until the worker is wired).
   computes P = 1.0 through the worker + `prob_kernel`. mathed_mini: 24
   tests.
 
+- **Inline overlay** (`0a66e9c`) — each `\prob`'s computed value now shows
+  **inline** beside the prob (a coloured green value / red error code),
+  not in a footer. `TransformOptions.annotations` (offset → raw Typst
+  markup) splices it into the render right after the segment body (the
+  transform stays kernel-agnostic); `KernelBridge::result_annotations`
+  builds the markup; `app.rs` passes it via `layout_doc_with`. The footer
+  API (`result_panel_markup`/`layout_doc_with_footer`) is retained.
+  mathed_core 68, mathed_mini 25 tests.
+
 **Remaining:** retire the v1 `parse.rs` (still used by the non-compiling
-Bevy `mathed` bridge); optional inline overlay (number beside the `\prob`
-span instead of a footer panel).
+Bevy `mathed` bridge — porting that bridge to the translator pipeline is
+the prerequisite).

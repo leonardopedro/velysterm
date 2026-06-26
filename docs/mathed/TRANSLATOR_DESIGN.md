@@ -5,10 +5,11 @@
 > layer → typst-eval translator → dispatcher → `kernel_client` worker →
 > `prob_kernel::Session`, with the computed `\prob` value shown in a
 > results panel below the document. A `\prob` over a vacuum model computes
-> P(vacuum) = 1.0 through the real worker thread (test). Remaining: Step 6
-> polish (retire `parse.rs` — currently still used by the non-compiling
-> Bevy `mathed` frontend) and an inline (not footer) overlay. Last updated
-> 2026-06-26.
+> P(vacuum) = 1.0 through the real worker thread (test), shown **inline**
+> next to the `\prob` (a coloured value spliced into the render via
+> `TransformOptions.annotations`). Remaining: Step 6 polish — retire
+> `parse.rs` (still used by the non-compiling Bevy `mathed` frontend).
+> Last updated 2026-06-26.
 > **Supersedes** the "Typst-math → Hamiltonian compiler" item in
 > `unfer/docs/IMPLEMENTATION_PLAN.md` (P3 #10, line 345).
 >
@@ -528,10 +529,15 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
     bounded window, and renders a `#raw` results panel below the document
     via `layout_doc_with_footer`. Commits `f56b477`, `6d537cd`,
     `2a7d51a`. End-to-end test computes P(vacuum) = 1.0.
+  - **Inline overlay** — `TransformOptions.annotations` (offset → raw
+    Typst markup) splices a coloured value/error in right after a `\prob`
+    body; `KernelBridge::result_annotations` builds the markup; the mini
+    `app.rs` feeds it through `layout_doc_with`. Replaces the footer
+    panel (`result_panel_markup`/`layout_doc_with_footer` kept as
+    alternative API). Commit `0a66e9c`.
 - **Next action:** Step 6 polish — retire `parse.rs` (still imported by
   the non-compiling Bevy `mathed` bridge; porting that bridge to the
-  translator pipeline is the prerequisite). Optional: an *inline* overlay
-  (number next to the `\prob` span) instead of the footer panel.
+  translator pipeline is the prerequisite).
 - **Read first:** `crates/mathed_mini/src/{translate,dispatch,kernel_bridge,render}.rs`,
   `crates/mathed_core/src/{semantics,transform}.rs`,
   `crates/kernel_client/src/worker.rs`. `parse.rs` is the v1 shortcut,
