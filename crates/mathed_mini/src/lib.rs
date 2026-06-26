@@ -12,10 +12,13 @@
 #[cfg(feature = "gui")]
 pub mod app;
 pub mod render;
+pub mod translate;
 pub mod world;
 
 pub use render::{
-    doc_to_markup, doc_to_render, layout_doc, render_doc, render_markup,
-    render_world, DocLayout, RenderError, DEFAULT_WIDTH_PT,
+    DEFAULT_WIDTH_PT, DocLayout, RenderError, doc_to_markup,
+    doc_to_render, layout_doc, render_doc, render_markup,
+    render_world,
 };
+pub use translate::{BUILTIN_TRANSLATOR, TranslateError, Translator};
 pub use world::MiniWorld;

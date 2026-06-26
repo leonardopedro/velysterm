@@ -12,15 +12,15 @@
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
-use mathed_core::glyphs::CaretGeom;
 use mathed_core::MathDoc;
+use mathed_core::glyphs::CaretGeom;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::render::{layout_doc, DocLayout};
+use crate::render::{DocLayout, layout_doc};
 
 type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
@@ -101,7 +101,8 @@ impl App {
     /// Move the caret one character left (no relayout).
     fn move_left(&mut self) {
         if self.caret > 0 {
-            self.caret = prev_char_boundary(self.doc.text(), self.caret);
+            self.caret =
+                prev_char_boundary(self.doc.text(), self.caret);
             self.request_redraw();
         }
     }
@@ -118,7 +119,8 @@ impl App {
     /// Move to the start of the current line.
     fn move_home(&mut self) {
         let text = self.doc.text();
-        self.caret = text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+        self.caret =
+            text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
         self.request_redraw();
     }
 
@@ -145,10 +147,9 @@ impl App {
                 .glyphs
                 .caret_for_byte(self.caret)
                 .map_or(0.0, |g| g.x);
-            if let Some((b, _)) = layout
-                .glyphs
-                .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
-            {
+            if let Some((b, _)) = layout.glyphs.byte_for_point(
+                mathed_core::glyphs::V2::new(x, mid_y),
+            ) {
                 self.caret = b;
             }
         }
@@ -167,10 +168,9 @@ impl App {
                 .glyphs
                 .caret_for_byte(self.caret)
                 .map_or(0.0, |g| g.x);
-            if let Some((b, _)) = layout
-                .glyphs
-                .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
-            {
+            if let Some((b, _)) = layout.glyphs.byte_for_point(
+                mathed_core::glyphs::V2::new(x, mid_y),
+            ) {
                 self.caret = b;
             }
         }
@@ -179,33 +179,44 @@ impl App {
 
     /// Lay out the current document (if the cache is stale) and present it.
     fn redraw(&mut self) {
-        let Some(window) = self.window.clone() else { return };
+        let Some(window) = self.window.clone() else {
+            return;
+        };
         let size = window.inner_size();
-        let (Some(w), Some(h)) =
-            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
+        let (Some(w), Some(h)) = (
+            NonZeroU32::new(size.width),
+            NonZeroU32::new(size.height),
+        ) else {
             return;
         };
 
         // Recompute the cached layout only when invalidated or the width
         // changed (foot-style: edits/resizes pay; caret moves do not).
         if self.layout.is_none() || self.layout_width != size.width {
-            self.layout = layout_doc(self.doc.text(), size.width as f64).ok();
+            self.layout =
+                layout_doc(self.doc.text(), size.width as f64).ok();
             self.layout_width = size.width;
         }
 
-        let Some(surface) = self.surface.as_mut() else { return };
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
         if surface.resize(w, h).is_err() {
             return;
         }
-        let (win_w, win_h) = (size.width as usize, size.height as usize);
+        let (win_w, win_h) =
+            (size.width as usize, size.height as usize);
 
-        let Ok(mut buffer) = surface.buffer_mut() else { return };
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
         buffer.fill(0x00FF_FFFF); // white page
 
         if let Some(layout) = &self.layout {
             blit_over_white(&mut buffer, win_w, win_h, &layout.image);
-            if let Some(geom) = layout.glyphs.caret_for_byte(self.caret) {
+            if let Some(geom) =
+                layout.glyphs.caret_for_byte(self.caret)
+            {
                 draw_caret(&mut buffer, win_w, win_h, geom);
             }
         }
@@ -289,8 +300,8 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs =
-            Window::default_attributes().with_title("mathed (minimal)");
+        let attrs = Window::default_attributes()
+            .with_title("mathed (minimal)");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -337,41 +348,39 @@ impl ApplicationHandler for App {
                         ..
                     },
                 ..
-            } => {
-                match logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Named(NamedKey::Backspace) => {
-                        self.backspace();
+            } => match logical_key {
+                Key::Named(NamedKey::Escape) => event_loop.exit(),
+                Key::Named(NamedKey::Backspace) => {
+                    self.backspace();
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::Delete) => {
+                    self.delete_forward();
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.insert("\n");
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::Space) => {
+                    self.insert(" ");
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::ArrowLeft) => self.move_left(),
+                Key::Named(NamedKey::ArrowRight) => self.move_right(),
+                Key::Named(NamedKey::ArrowUp) => self.move_up(),
+                Key::Named(NamedKey::ArrowDown) => self.move_down(),
+                Key::Named(NamedKey::Home) => self.move_home(),
+                Key::Named(NamedKey::End) => self.move_end(),
+                _ => {
+                    if let Some(t) = &text
+                        && !t.is_empty()
+                    {
+                        self.insert(t);
                         self.request_redraw();
-                    }
-                    Key::Named(NamedKey::Delete) => {
-                        self.delete_forward();
-                        self.request_redraw();
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        self.insert("\n");
-                        self.request_redraw();
-                    }
-                    Key::Named(NamedKey::Space) => {
-                        self.insert(" ");
-                        self.request_redraw();
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => self.move_left(),
-                    Key::Named(NamedKey::ArrowRight) => self.move_right(),
-                    Key::Named(NamedKey::ArrowUp) => self.move_up(),
-                    Key::Named(NamedKey::ArrowDown) => self.move_down(),
-                    Key::Named(NamedKey::Home) => self.move_home(),
-                    Key::Named(NamedKey::End) => self.move_end(),
-                    _ => {
-                        if let Some(t) = &text
-                            && !t.is_empty()
-                        {
-                            self.insert(t);
-                            self.request_redraw();
-                        }
                     }
                 }
-            }
+            },
             _ => {}
         }
     }

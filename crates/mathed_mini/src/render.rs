@@ -3,9 +3,11 @@
 
 use imaging::RgbaImage;
 use imaging_vello_cpu::VelloCpuRenderer;
-use mathed_core::glyphs::{build_glyph_index, GlyphIndex};
+use mathed_core::glyphs::{GlyphIndex, build_glyph_index};
 use mathed_core::markers::{resolve_segments, scan};
-use mathed_core::transform::{to_render_text, RenderOutput, TransformOptions};
+use mathed_core::transform::{
+    RenderOutput, TransformOptions, to_render_text,
+};
 use typst::layout::{Abs, Axes, Frame, Region, Size};
 
 use crate::world::MiniWorld;
@@ -40,7 +42,12 @@ pub fn doc_to_markup(doc_text: &str) -> String {
 pub fn doc_to_render(doc_text: &str) -> RenderOutput {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
-    to_render_text(doc_text, &scan, &segments, &TransformOptions::default())
+    to_render_text(
+        doc_text,
+        &scan,
+        &segments,
+        &TransformOptions::default(),
+    )
 }
 
 /// A laid-out document: the rasterized page plus the glyph index that maps
@@ -59,7 +66,10 @@ pub struct DocLayout {
 }
 
 /// Lay out the world's current document into a Typst [`Frame`] at `width_pt`.
-fn layout_world(world: &MiniWorld, width_pt: f64) -> Result<Frame, RenderError> {
+fn layout_world(
+    world: &MiniWorld,
+    width_pt: f64,
+) -> Result<Frame, RenderError> {
     let content = world.eval_main().ok_or(RenderError::Eval)?;
     let region = Region::new(
         Size::new(Abs::pt(width_pt), Abs::pt(MAX_HEIGHT_PT)),
@@ -103,8 +113,12 @@ pub fn layout_doc(
     let world = MiniWorld::new(render.text);
     let frame = layout_world(&world, width_pt)?;
     // The minimal frontend prepends no prelude, so source bytes == body bytes.
-    let glyphs =
-        build_glyph_index(&frame, world.main_source(), &render.map, 0);
+    let glyphs = build_glyph_index(
+        &frame,
+        world.main_source(),
+        &render.map,
+        0,
+    );
     let image = rasterize(&frame)?;
     let (width, height) = (image.width, image.height);
     Ok(DocLayout {
@@ -137,8 +151,8 @@ mod tests {
 
     #[test]
     fn renders_math_to_nonempty_image() {
-        let img =
-            render_markup("$x^2 + y^2$", 300.0).expect("render should succeed");
+        let img = render_markup("$x^2 + y^2$", 300.0)
+            .expect("render should succeed");
         assert!(img.width > 0 && img.height > 0, "image has size");
         // At least some pixels must be drawn (non-transparent glyph coverage).
         assert!(
@@ -200,8 +214,8 @@ mod tests {
         // width (Typst treats `\n` as whitespace, so we rely on wrapping).
         let text = "the quick brown fox jumps over the lazy dog \
                     and then keeps running through the wide green field";
-        let layout = layout_doc(text, 200.0)
-            .expect("layout should succeed");
+        let layout =
+            layout_doc(text, 200.0).expect("layout should succeed");
         let bands = layout.glyphs.bands.len();
         assert!(bands >= 2, "expected at least 2 bands, got {bands}");
         // Byte 0 is on the top band; a byte well into the text should be on
@@ -234,14 +248,15 @@ mod tests {
             .glyphs
             .caret_for_byte(6)
             .expect("caret geometry for byte 6");
-        let band = &layout.glyphs.bands
-            [layout.glyphs.band_for_byte(6).expect("band for byte 6")];
+        let band = &layout.glyphs.bands[layout
+            .glyphs
+            .band_for_byte(6)
+            .expect("band for byte 6")];
         let mid_y = (band.top + band.bottom) * 0.5;
         let (b, _after) = layout
             .glyphs
             .byte_for_point(mathed_core::glyphs::V2::new(
-                caret.x,
-                mid_y,
+                caret.x, mid_y,
             ))
             .expect("hit-test should resolve");
         // The hit-test at the caret x should land on or near byte 6.

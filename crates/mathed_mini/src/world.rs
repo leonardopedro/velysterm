@@ -9,7 +9,9 @@
 use typst::comemo::{Constraint, Track};
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::engine::{Engine, Route, Sink, Traced};
-use typst::foundations::{Bytes, Content, Datetime, StyleChain};
+use typst::foundations::{
+    Bytes, Content, Datetime, StyleChain, Value,
+};
 use typst::introspection::{Introspector, Locator};
 use typst::layout::{Frame, Region};
 use typst::syntax::{FileId, Source};
@@ -83,8 +85,45 @@ impl MiniWorld {
         }
     }
 
+    /// Evaluate the main source as a Typst module and read a top-level
+    /// `#let` binding from its scope.
+    ///
+    /// Returns `Ok(Some(value))` when the module evaluates and the binding
+    /// exists, `Ok(None)` when evaluation succeeds but the binding is
+    /// absent, and `Err(message)` when evaluation itself fails (a
+    /// concatenation of the Typst diagnostics). Used by the translator
+    /// pipeline (P3 #10) to read the JSON string a translator produced,
+    /// without constructing a full layout `Vm`.
+    pub fn eval_binding(
+        &self,
+        name: &str,
+    ) -> Result<Option<Value>, String> {
+        let world: &dyn World = self;
+        let mut sink = Sink::new();
+        let module = typst_eval::eval(
+            &typst::ROUTINES,
+            world.track(),
+            Traced::default().track(),
+            sink.track_mut(),
+            Route::default().track(),
+            &self.main,
+        )
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.message.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
+        Ok(module.scope().get(name).map(|b| b.read().clone()))
+    }
+
     /// Lay out `content` within `region`, or `None` on error.
-    pub fn layout(&self, content: &Content, region: Region) -> Option<Frame> {
+    pub fn layout(
+        &self,
+        content: &Content,
+        region: Region,
+    ) -> Option<Frame> {
         let world: &dyn World = self;
         let styles = StyleChain::new(&world.library().styles);
         let introspector = Introspector::default();
