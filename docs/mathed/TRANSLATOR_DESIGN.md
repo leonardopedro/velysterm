@@ -1,10 +1,13 @@
 # P3 #10 — User-Defined Translator Pipeline
 
-> **Status:** Steps 1–5 IMPLEMENTED (2026-06-26). Pipeline (semantic
-> layer → typst-eval → dispatcher) and collapsible-panel rendering are
-> complete and tested. Remaining: full kernel wiring (P3 #11, dispatch
-> output → `kernel_client` worker so a `\prob` overlay shows a real
-> number) and Step 6 polish (deleting `parse.rs`). Last updated
+> **Status:** Steps 1–5 + kernel wiring (P3 #11) IMPLEMENTED (2026-06-26).
+> The full chain runs end-to-end in `mathed_mini`: document → semantic
+> layer → typst-eval translator → dispatcher → `kernel_client` worker →
+> `prob_kernel::Session`, with the computed `\prob` value shown in a
+> results panel below the document. A `\prob` over a vacuum model computes
+> P(vacuum) = 1.0 through the real worker thread (test). Remaining: Step 6
+> polish (retire `parse.rs` — currently still used by the non-compiling
+> Bevy `mathed` frontend) and an inline (not footer) overlay. Last updated
 > 2026-06-26.
 > **Supersedes** the "Typst-math → Hamiltonian compiler" item in
 > `unfer/docs/IMPLEMENTATION_PLAN.md` (P3 #10, line 345).
@@ -517,17 +520,25 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
     `reveal`). `render.rs` adds `doc_to_render_with`/`layout_doc_with` +
     `active_translator_span`; `app.rs` relayouts only when the caret
     crosses a panel boundary. Commit `399f0c8`. 4 tests.
-- **Next action:** full kernel wiring (P3 #11): feed `dispatch` output
-  into the `kernel_client` worker so a `\prob` overlay shows a real
-  number in `mathed_mini`. Then Step 6 polish (delete `parse.rs` once the
-  worker is wired). Note `crates/mathed` (Bevy) does not currently
-  compile (pre-existing velyst *example* breakage, unrelated);
-  `mathed_mini` is the working integration target.
-- **Read first:** `crates/mathed_mini/src/{translate,dispatch,render,world}.rs`
-  (the engine), `crates/mathed_core/src/{semantics,transform}.rs`,
-  `crates/mathed_mini/src/app.rs` (panel wiring),
-  `crates/kernel_client/src/{worker,parse}.rs` (worker to feed; parse.rs
-  is the still-present v1 shortcut, not yet deleted per §6 constraint).
+  - **Kernel wiring (P3 #11)** — `kernel_bridge.rs`: builds the index,
+    dispatches `\model`/`\prob`, drives the `kernel_client` worker, keys
+    results by statement offset, associates each prob with its nearest
+    preceding model. Protocol gained `model_id` vs `block_id` separation
+    (commit `f56b477`). `app.rs` refreshes on edit, busy-polls during a
+    bounded window, and renders a `#raw` results panel below the document
+    via `layout_doc_with_footer`. Commits `f56b477`, `6d537cd`,
+    `2a7d51a`. End-to-end test computes P(vacuum) = 1.0.
+- **Next action:** Step 6 polish — retire `parse.rs` (still imported by
+  the non-compiling Bevy `mathed` bridge; porting that bridge to the
+  translator pipeline is the prerequisite). Optional: an *inline* overlay
+  (number next to the `\prob` span) instead of the footer panel.
+- **Read first:** `crates/mathed_mini/src/{translate,dispatch,kernel_bridge,render}.rs`,
+  `crates/mathed_core/src/{semantics,transform}.rs`,
+  `crates/kernel_client/src/worker.rs`. `parse.rs` is the v1 shortcut,
+  superseded by the translator pipeline for `mathed_mini` but still used
+  by the Bevy frontend; it also emits an outdated externally-tagged
+  `EventPredicate` JSON shape (the kernel now expects internally-tagged
+  `{"kind":...}`).
 - **Key constraint:** translator body is Typst *code* (not rendered
   math). Math content between `\model` markers is rendered math
   (display only). The translator receives the math as a raw string.

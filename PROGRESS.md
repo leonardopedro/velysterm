@@ -229,6 +229,20 @@ constraint: keep until the worker is wired).
   boundary (foot-style cache preserved). mathed_core 67, mathed_mini 20
   tests.
 
-**Remaining:** full kernel wiring (P3 #11) — feed `dispatch` output into
-the `kernel_client` worker so a `\prob` overlay shows a real number; then
-delete `parse.rs`.
+- **Kernel wiring (P3 #11)** (`f56b477`, `6d537cd`, `2a7d51a`) — the
+  probability kernel now runs from the editor. `kernel_bridge.rs` builds
+  the index, dispatches each `\model`/`\prob` through the translator, and
+  drives the `kernel_client` worker thread; results are keyed by
+  statement offset and each prob is associated with its nearest preceding
+  model. The `KernelRequest::Probability`/`Condition` protocol gained a
+  `model_id` (session) separate from `block_id` (result key). `app.rs`
+  refreshes on edit, busy-polls during a bounded window
+  (`ControlFlow::Poll`), and shows a `#raw` results panel below the
+  document (`render::layout_doc_with_footer`); the seed doc demos a live
+  `\prob`. End-to-end test: a vacuum model + Vacuum-predicate prob
+  computes P = 1.0 through the worker + `prob_kernel`. mathed_mini: 24
+  tests.
+
+**Remaining:** retire the v1 `parse.rs` (still used by the non-compiling
+Bevy `mathed` bridge); optional inline overlay (number beside the `\prob`
+span instead of a footer panel).
