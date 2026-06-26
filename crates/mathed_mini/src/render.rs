@@ -288,6 +288,35 @@ mod tests {
     }
 
     #[test]
+    fn inline_annotation_lays_out() {
+        // A coloured inline annotation (as the kernel bridge produces) is
+        // valid Typst and renders after the prob body without error.
+        use mathed_core::PropKind;
+        use mathed_core::markers::{resolve_segments, scan};
+        use std::collections::HashMap;
+        let doc = "#1 vacuum #2 \\prob(#1,#2)";
+        let segs = resolve_segments(&scan(doc));
+        let key = segs
+            .iter()
+            .find(|s| s.kind == PropKind::Prob)
+            .and_then(|s| s.span.clone())
+            .expect("prob span")
+            .start;
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            key,
+            " #text(rgb(\"#138000\"))[\\= 1.0000]".into(),
+        );
+        let opts = TransformOptions {
+            annotations,
+            ..Default::default()
+        };
+        let layout = layout_doc_with(doc, 400.0, &opts)
+            .expect("annotated doc lays out");
+        assert!(layout.width > 0 && layout.height > 0);
+    }
+
+    #[test]
     fn band_for_byte_returns_topmost_for_single_line() {
         let layout = layout_doc("one line", 400.0)
             .expect("layout should succeed");

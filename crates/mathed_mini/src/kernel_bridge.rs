@@ -77,6 +77,28 @@ impl KernelBridge {
         &self.results
     }
 
+    /// Inline annotations keyed by each prob's body offset: small coloured
+    /// Typst markup (green value / red error code) the transform splices in
+    /// right after the `\prob`'s rendered body. Feed this to
+    /// [`TransformOptions::annotations`](mathed_core::transform::TransformOptions).
+    pub fn result_annotations(&self) -> HashMap<usize, String> {
+        self.results
+            .iter()
+            .map(|(&k, r)| {
+                let markup = match r {
+                    // Escape `=` so Typst does not read it as a heading.
+                    KernelResult::Value(p) => format!(
+                        " #text(rgb(\"#138000\"))[\\= {p:.4}]"
+                    ),
+                    KernelResult::Error { code_name, .. } => format!(
+                        " #text(rgb(\"#c00000\"))[ {code_name}]"
+                    ),
+                };
+                (k, markup)
+            })
+            .collect()
+    }
+
     /// Typst markup for a results panel (a `#raw` block listing each prob's
     /// value or error), or `None` when there are no results yet. A frontend
     /// appends this below the document to show the computed probabilities.
@@ -330,6 +352,11 @@ mod tests {
             .expect("panel markup once a result exists");
         assert!(panel.contains("1.0000"), "panel: {panel}");
         assert!(panel.contains("#raw"), "panel: {panel}");
+        // The inline annotation carries the value too, keyed by prob offset.
+        let ann = bridge.result_annotations();
+        let markup = ann.get(&key).expect("annotation for the prob");
+        assert!(markup.contains("1.0000"), "annotation: {markup}");
+        assert!(markup.contains("#text"), "annotation: {markup}");
     }
 
     #[test]

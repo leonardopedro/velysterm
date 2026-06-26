@@ -23,7 +23,7 @@ use winit::window::{Window, WindowId};
 
 use crate::kernel_bridge::KernelBridge;
 use crate::render::{
-    DocLayout, active_translator_span, layout_doc_with_footer,
+    DocLayout, active_translator_span, layout_doc_with,
 };
 use mathed_core::transform::TransformOptions;
 
@@ -232,15 +232,13 @@ impl App {
         {
             let opts = TransformOptions {
                 caret: Some(self.caret),
+                annotations: self.bridge.result_annotations(),
                 ..Default::default()
             };
-            let footer =
-                self.bridge.result_panel_markup().unwrap_or_default();
-            self.layout = layout_doc_with_footer(
+            self.layout = layout_doc_with(
                 self.doc.text(),
                 size.width as f64,
                 &opts,
-                &footer,
             )
             .ok();
             self.layout_width = size.width;

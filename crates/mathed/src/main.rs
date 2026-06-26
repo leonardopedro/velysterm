@@ -1038,7 +1038,7 @@ fn sync_blocks(
         let opts = TransformOptions {
             reveal: block_reveal,
             show_hidden,
-            caret: None,
+            ..Default::default()
         };
 
         let out = to_render_text_range(

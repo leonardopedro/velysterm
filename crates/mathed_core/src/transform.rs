@@ -15,6 +15,7 @@
 //!   convert between doc and render coordinates in both directions
 //!   (caret placement, click hit-testing).
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::markers::{Arg, MarkerScan, PropKind, Segment};
@@ -92,6 +93,12 @@ pub struct TransformOptions {
     /// it falls inside — independent of `reveal`, so a frontend can expand
     /// the panel at the caret without un-hiding markers everywhere.
     pub caret: Option<usize>,
+    /// Inline annotations keyed by a segment's body **start** offset; the
+    /// associated string (raw Typst markup) is spliced into the render text
+    /// immediately after that segment's body. Used to show a `\prob`'s
+    /// computed value next to it (P3 #11). The transform stays kernel-
+    /// agnostic — it just splices whatever markup the caller supplies.
+    pub annotations: HashMap<usize, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +257,28 @@ pub fn to_render_text_range(
         })
         .collect();
 
+    // Inline annotations (P3 #11): markup spliced in just after a segment's
+    // body, keyed by the body start offset. Insertion point is `span.end`.
+    let annotation_points: Vec<(usize, &str)> = if opts
+        .annotations
+        .is_empty()
+    {
+        Vec::new()
+    } else {
+        segments
+            .iter()
+            .filter_map(|seg| {
+                let span = seg.span.as_ref()?;
+                if span.start < range.start || span.end > range.end {
+                    return None;
+                }
+                let markup = opts.annotations.get(&span.start)?;
+                bounds.push(span.end);
+                Some((span.end, markup.as_str()))
+            })
+            .collect()
+    };
+
     bounds.extend(toggles.iter().copied());
     bounds.sort_unstable();
     bounds.dedup();
@@ -295,6 +324,13 @@ pub fn to_render_text_range(
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
+        // Splice any inline annotation whose insertion point is `start`
+        // (after a segment body), as caller-supplied render-only markup.
+        for (pos, markup) in &annotation_points {
+            if *pos == start {
+                out.push_str(markup);
+            }
+        }
         if start == end || hidden_at(start) {
             continue;
         }
@@ -334,6 +370,13 @@ pub fn to_render_text_range(
             for _ in 0..v.closer_count() {
                 out.push(']');
             }
+        }
+    }
+    // An annotation whose insertion point is the very end of the range has no
+    // window starting there; splice it now.
+    for (pos, markup) in &annotation_points {
+        if *pos == range.end {
+            out.push_str(markup);
         }
     }
     map.render_len = out.len();
@@ -521,8 +564,7 @@ mod tests {
             text,
             &TransformOptions {
                 reveal: vec![1..1],
-                show_hidden: false,
-                caret: None,
+                ..Default::default()
             },
         );
         // First marker revealed (escaped), second still hidden.
@@ -535,9 +577,8 @@ mod tests {
         let out = render(
             text,
             &TransformOptions {
-                reveal: vec![],
                 show_hidden: true,
-                caret: None,
+                ..Default::default()
             },
         );
         assert_eq!(out.text, "\\#1 x \\\\b(\\#1,\\#1)");
@@ -657,9 +698,8 @@ mod tests {
         let out = render(
             text,
             &TransformOptions {
-                reveal: vec![],
-                show_hidden: false,
                 caret: Some(10),
+                ..Default::default()
             },
         );
         // Raw block fences present and the code shown literally.
@@ -671,6 +711,34 @@ mod tests {
         );
         // Markers are NOT revealed (caret field is panel-only).
         assert!(!out.text.contains("\\#3"), "got: {}", out.text);
+    }
+
+    #[test]
+    fn annotation_spliced_after_segment_body() {
+        let text = "#1 vacuum #2 \\prob(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let prob = segs
+            .iter()
+            .find(|seg| seg.kind == PropKind::Prob)
+            .expect("prob segment");
+        let key = prob.span.clone().expect("prob span").start;
+        let mut annotations = HashMap::new();
+        annotations.insert(key, " = 0.4231".to_string());
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        );
+        // The annotation appears in the render, after the body text.
+        let vac = out.text.find("vacuum").expect("body rendered");
+        let ann =
+            out.text.find("= 0.4231").expect("annotation spliced");
+        assert!(ann > vac, "annotation after body in {:?}", out.text);
     }
 
     #[test]
