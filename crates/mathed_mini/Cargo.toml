@@ -10,6 +10,11 @@ repository.workspace = true
 mathed_core = { path = "../mathed_core" }
 typst_imaging = { workspace = true }
 
+# Kernel contract types: the translator pipeline parses translator output
+# into TermSpec/ModelSpec (P3 #10). Serde types only — no Bevy, no solver.
+unfer_protocol = { path = "../../../unfer/unfer_protocol" }
+serde_json = "1.0"
+
 typst = { workspace = true }
 typst-library = { workspace = true }
 typst-eval = { workspace = true }

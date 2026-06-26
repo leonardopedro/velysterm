@@ -11,10 +11,14 @@
 
 #[cfg(feature = "gui")]
 pub mod app;
+pub mod dispatch;
 pub mod render;
 pub mod translate;
 pub mod world;
 
+pub use dispatch::{
+    DispatchError, statement_to_event_json, statement_to_model_spec,
+};
 pub use render::{
     DEFAULT_WIDTH_PT, DocLayout, RenderError, doc_to_markup,
     doc_to_render, layout_doc, render_doc, render_markup,

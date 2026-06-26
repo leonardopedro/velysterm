@@ -5540,12 +5540,14 @@ dependencies = [
  "imaging",
  "imaging_vello_cpu",
  "mathed_core",
+ "serde_json",
  "softbuffer",
  "typst",
  "typst-assets",
  "typst-eval",
  "typst-library",
  "typst_imaging",
+ "unfer_protocol",
  "winit",
 ]
 
