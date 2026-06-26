@@ -7,9 +7,10 @@
 > results panel below the document. A `\prob` over a vacuum model computes
 > P(vacuum) = 1.0 through the real worker thread (test), shown **inline**
 > next to the `\prob` (a coloured value spliced into the render via
-> `TransformOptions.annotations`). Remaining: Step 6 polish — retire
-> `parse.rs` (still used by the non-compiling Bevy `mathed` frontend).
-> Last updated 2026-06-26.
+> `TransformOptions.annotations`). **COMPLETE** — the Bevy `mathed`
+> frontend was ported to the same `mathed_mini::KernelBridge` and the v1
+> `parse.rs` shortcut was deleted, so both frontends share one kernel
+> path. Last updated 2026-06-26.
 > **Supersedes** the "Typst-math → Hamiltonian compiler" item in
 > `unfer/docs/IMPLEMENTATION_PLAN.md` (P3 #10, line 345).
 >
@@ -535,9 +536,17 @@ parses as `Vec<TermSpec>` and wraps in `HamiltonianSpec::Terms`.
     `app.rs` feeds it through `layout_doc_with`. Replaces the footer
     panel (`result_panel_markup`/`layout_doc_with_footer` kept as
     alternative API). Commit `0a66e9c`.
-- **Next action:** Step 6 polish — retire `parse.rs` (still imported by
-  the non-compiling Bevy `mathed` bridge; porting that bridge to the
-  translator pipeline is the prerequisite).
+  - **Step 6** — the Bevy `mathed` frontend's `kernel_sys.rs` is now a
+    thin wrapper over the shared `mathed_mini::KernelBridge` (depends on
+    `mathed_mini` with `default-features = false`); its overlay reads
+    results by `ks.span.start`. `kernel_client/src/parse.rs`
+    (`parse_model`/`parse_event`) deleted. Both frontends share one
+    kernel path. Commit `675b064`. (`cargo build -p mathed` was already
+    fine — the velyst breakage is confined to velyst's *examples*.)
+- **Next action:** none outstanding for this design. Possible follow-ups:
+  multi-model documents (currently a prob binds to its nearest preceding
+  model), translator caching (Risk C), and richer event-predicate
+  translators.
 - **Read first:** `crates/mathed_mini/src/{translate,dispatch,kernel_bridge,render}.rs`,
   `crates/mathed_core/src/{semantics,transform}.rs`,
   `crates/kernel_client/src/worker.rs`. `parse.rs` is the v1 shortcut,

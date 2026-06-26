@@ -252,6 +252,16 @@ constraint: keep until the worker is wired).
   API (`result_panel_markup`/`layout_doc_with_footer`) is retained.
   mathed_core 68, mathed_mini 25 tests.
 
-**Remaining:** retire the v1 `parse.rs` (still used by the non-compiling
-Bevy `mathed` bridge — porting that bridge to the translator pipeline is
-the prerequisite).
+- **Step 6 / both frontends unified** (`675b064`) — the Bevy `mathed`
+  `kernel_sys.rs` is now a thin wrapper over the shared
+  `mathed_mini::KernelBridge` (dep `default-features = false`); its
+  overlay reads results by `ks.span.start`. The v1
+  `kernel_client/src/parse.rs` (`parse_model`/`parse_event`) is deleted —
+  it was used only by the Bevy bridge and emitted an outdated
+  externally-tagged `EventPredicate` JSON. `cargo build -p mathed`
+  compiles (the velyst breakage is confined to velyst's *examples*).
+
+The translator pipeline + kernel integration (P3 #10/#11) is **complete**:
+both editors share one path document → translator → dispatcher → worker →
+`prob_kernel` → inline `\prob` value. Possible follow-ups: multi-model
+documents, translator caching, richer event translators.
