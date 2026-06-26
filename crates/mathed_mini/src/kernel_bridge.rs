@@ -30,16 +30,22 @@ use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src,
     statement_to_event_json, statement_to_model_spec,
 };
-use crate::translate::{Translator, typst_str_lit};
-use unfer_protocol::{PriorSpec, SolverSpec};
+use crate::translate::{TranslateError, Translator, typst_str_lit};
+use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
 
 /// A computed result for a `\prob` / `\event` statement.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KernelResult {
     /// A probability in [0, 1].
     Value(f64),
-    /// An error: a short code/name and a human-readable message.
-    Error { code_name: String, message: String },
+    /// An error: a short code/name, a human-readable message, and zero or more
+    /// machine-readable [`RepairHint`]s (the Zero-language agent surface — a
+    /// concrete fix the user/agent can apply, not just a string).
+    Error {
+        code_name: String,
+        message: String,
+        hints: Vec<RepairHint>,
+    },
 }
 
 /// Drives the probability kernel from document text.
@@ -120,7 +126,7 @@ impl KernelBridge {
                 .unwrap_or_else(|| "prob".to_string());
             let line = match &self.results[&k] {
                 KernelResult::Value(p) => format!("{label} = {p:.4}"),
-                KernelResult::Error { code_name, message } => {
+                KernelResult::Error { code_name, message, .. } => {
                     format!("{label}: {code_name} — {message}")
                 }
             };
@@ -330,6 +336,7 @@ impl KernelBridge {
                         KernelResult::Error {
                             code_name: diag.name,
                             message: diag.message,
+                            hints: diag.hints,
                         },
                     );
                     changed = true;
@@ -373,11 +380,27 @@ fn resolve_model<'a>(
         }) {
             return Some(m);
         }
+        let valid: Vec<&str> = models
+            .iter()
+            .filter(|m| m.kind == PropKind::Model)
+            .filter_map(|m| m.name.as_deref())
+            .collect();
+        let suggestion = if valid.is_empty() {
+            "no named \\model is in scope; add one or drop the model: arg"
+                .to_string()
+        } else {
+            format!("use one of the models in scope: {}", valid.join(", "))
+        };
         results.insert(
             stmt.span.start,
             KernelResult::Error {
                 code_name: "model-not-found".into(),
                 message: format!("no \\model named {name:?}"),
+                hints: vec![RepairHint::new(
+                    HintKind::ReplaceValue,
+                    "model",
+                    suggestion,
+                )],
             },
         );
         return None;
@@ -407,7 +430,60 @@ fn dispatch_error_result(e: &DispatchError) -> KernelResult {
     KernelResult::Error {
         code_name: code_name.to_string(),
         message: e.to_string(),
+        hints: dispatch_error_hints(e),
     }
+}
+
+/// Map a [`DispatchError`] to concrete [`RepairHint`]s — the machine-readable
+/// half of the Zero-language agent surface. Every error the user/agent can
+/// trigger from the editor carries at least one actionable suggestion (the
+/// internal [`WrongKind`](DispatchError::WrongKind) misuse, which a frontend
+/// never produces, is the sole exception).
+fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
+    let hint = |target: &str, suggestion: String| {
+        vec![RepairHint::new(HintKind::ReplaceValue, target, suggestion)]
+    };
+    match e {
+        DispatchError::Translate(TranslateError::Eval(msg)) => hint(
+            "translator",
+            format!(
+                "fix the Typst error in the translator: {}",
+                first_line(msg)
+            ),
+        ),
+        DispatchError::Translate(TranslateError::NotString) => hint(
+            "translator",
+            "return a JSON string from `translate(body)`, e.g. \
+             `json.encode((..))`"
+                .to_string(),
+        ),
+        DispatchError::Translate(TranslateError::MissingResult) => hint(
+            "translator",
+            "define a `translate(body)` function that returns a JSON string"
+                .to_string(),
+        ),
+        DispatchError::Translate(TranslateError::Empty) => hint(
+            "translator",
+            "return a non-empty JSON string from `translate(body)`"
+                .to_string(),
+        ),
+        DispatchError::Json(msg) => hint(
+            "translator",
+            format!("fix the translator's JSON output: {}", first_line(msg)),
+        ),
+        DispatchError::Parse(msg) => hint(
+            "prior/solver",
+            format!("fix the prior/solver body: {}", first_line(msg)),
+        ),
+        // Internal misuse — a frontend never dispatches the wrong kind.
+        DispatchError::WrongKind(_) => Vec::new(),
+    }
+}
+
+/// First non-empty line of a (possibly multi-line) diagnostic, trimmed — keeps
+/// a `RepairHint` suggestion to one readable line.
+fn first_line(msg: &str) -> &str {
+    msg.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(msg)
 }
 
 fn hash_many(strs: &[&str]) -> u64 {
@@ -579,11 +655,62 @@ mod tests {
         // The error is recorded synchronously by resolve_model (no worker
         // round-trip needed).
         match bridge.results().get(&key) {
-            Some(KernelResult::Error { code_name, .. }) => {
+            Some(KernelResult::Error { code_name, hints, .. }) => {
                 assert_eq!(code_name, "model-not-found");
+                // The repair hint names the model actually in scope so an
+                // agent can correct the `model:` arg without guessing.
+                let h = hints.first().expect("a repair hint");
+                assert_eq!(h.kind, HintKind::ReplaceValue);
+                assert!(
+                    h.suggestion.contains("m1"),
+                    "hint should list the in-scope model name, got {:?}",
+                    h.suggestion
+                );
             }
             other => panic!("expected model-not-found error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dispatch_errors_carry_repair_hints() {
+        // Every user-triggerable DispatchError maps to at least one concrete
+        // RepairHint (the Zero-language agent surface). Only the internal
+        // WrongKind misuse — which a frontend never dispatches — is hint-less.
+        let eval = DispatchError::Translate(TranslateError::Eval(
+            "error: unknown variable\n  at line 2".into(),
+        ));
+        let h = dispatch_error_hints(&eval);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].kind, HintKind::ReplaceValue);
+        // first_line keeps the suggestion to one line.
+        assert!(!h[0].suggestion.contains('\n'));
+        assert!(h[0].suggestion.contains("unknown variable"));
+
+        assert!(!dispatch_error_hints(&DispatchError::Translate(
+            TranslateError::NotString
+        ))
+        .is_empty());
+        assert!(!dispatch_error_hints(&DispatchError::Translate(
+            TranslateError::MissingResult
+        ))
+        .is_empty());
+        assert!(!dispatch_error_hints(&DispatchError::Translate(
+            TranslateError::Empty
+        ))
+        .is_empty());
+        assert!(!dispatch_error_hints(&DispatchError::Json(
+            "missing field `kind`".into()
+        ))
+        .is_empty());
+        assert!(!dispatch_error_hints(&DispatchError::Parse(
+            "expected an integer".into()
+        ))
+        .is_empty());
+        // Internal misuse carries no hint.
+        assert!(dispatch_error_hints(&DispatchError::WrongKind(
+            PropKind::Model
+        ))
+        .is_empty());
     }
 
     #[test]

@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn atomic_range_straddling() {
         let text = "hello world";
-        let atomic = vec![2..8];
+        let atomic: Vec<_> = std::iter::once(2..8).collect();
         // pos=5 is inside atomic 2..8.
         assert_eq!(word_boundary_left(text, 5, &atomic), 2);
         assert_eq!(word_boundary_right(text, 5, &atomic), 8);

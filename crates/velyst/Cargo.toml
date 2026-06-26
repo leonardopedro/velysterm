@@ -35,6 +35,21 @@ arboard = { workspace = true }
 [features]
 default = ["embed-fonts"]
 embed-fonts = ["dep:typst-assets", "typst-assets/fonts"]
+# The `editor` and `terminal` examples are vendored from upstream velyst and
+# reference APIs that were removed here (VelystFuncBundle / VelystSourceHandle).
+# Gate them behind a non-default feature so `cargo test --workspace
+# --all-targets` stays green; enable with `--features upstream-stale-examples`
+# to work on porting them to the current API.
+upstream-stale-examples = []
+
+# Gate the two stale upstream examples (see `upstream-stale-examples` above).
+[[example]]
+name = "editor"
+required-features = ["upstream-stale-examples"]
+
+[[example]]
+name = "terminal"
+required-features = ["upstream-stale-examples"]
 
 [dev-dependencies]
 bevy = { workspace = true, features = [

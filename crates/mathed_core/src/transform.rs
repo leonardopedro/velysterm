@@ -563,7 +563,7 @@ mod tests {
         let out = render(
             text,
             &TransformOptions {
-                reveal: vec![1..1],
+                reveal: std::iter::once(1..1).collect(),
                 ..Default::default()
             },
         );
