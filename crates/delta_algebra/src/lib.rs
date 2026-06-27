@@ -91,7 +91,8 @@ impl DeltaAlgebraEngine {
                 layout: Some(&pipeline_layout),
                 module: &shader,
                 entry_point: Some("apply_recursion"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                compilation_options:
+                    wgpu::PipelineCompilationOptions::default(),
                 cache: None,
             },
         );

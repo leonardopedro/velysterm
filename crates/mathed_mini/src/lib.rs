@@ -10,6 +10,8 @@
 //! softbuffer window and keyboard editing are layered on in later increments.
 
 #[cfg(feature = "gui")]
+pub mod a11y;
+#[cfg(feature = "gui")]
 pub mod app;
 pub mod dispatch;
 pub mod kernel_bridge;

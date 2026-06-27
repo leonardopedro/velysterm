@@ -15,12 +15,22 @@ use std::time::{Duration, Instant};
 
 use mathed_core::MathDoc;
 use mathed_core::glyphs::CaretGeom;
+use mathed_core::markers::{resolve_segments, scan};
+use mathed_core::semantics::SemanticIndex;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton, WindowEvent,
+};
+use winit::event_loop::{
+    ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy,
+};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+/// Caret blink interval (matches terminal convention ~530ms).
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+use crate::a11y::build_tree_update;
 use crate::kernel_bridge::KernelBridge;
 use crate::render::{
     DocLayout, active_translator_span, layout_doc_with,
@@ -33,10 +43,23 @@ const KERNEL_POLL_WINDOW: Duration = Duration::from_secs(3);
 
 type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
+/// Custom event type for the winit event loop — wraps AccessKit events so
+/// the adapter can deliver `InitialTreeRequested` / `ActionRequested` /
+/// `AccessibilityDeactivated` through the standard event loop.
+struct UserEvent(accesskit_winit::Event);
+
+impl From<accesskit_winit::Event> for UserEvent {
+    fn from(e: accesskit_winit::Event) -> Self {
+        UserEvent(e)
+    }
+}
+
 /// Run the editor window loop, seeded with `initial` document text.
 pub fn run(initial: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new()?;
-    let mut app = App::new(initial);
+    let event_loop =
+        EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new(initial, proxy);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -59,10 +82,20 @@ struct App {
     bridge: KernelBridge,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
+    /// Caret blink visibility — toggles at [`BLINK_INTERVAL`].
+    caret_visible: bool,
+    /// When the next caret blink toggle should occur.
+    next_blink: Instant,
+    /// Last reported cursor position (physical px relative to window origin).
+    cursor_pos: Option<(f64, f64)>,
+    /// AccessKit adapter (P4 #22). `None` until the window is created.
+    adapter: Option<accesskit_winit::Adapter>,
+    /// Event loop proxy for dispatching AccessKit events.
+    proxy: EventLoopProxy<UserEvent>,
 }
 
 impl App {
-    fn new(initial: &str) -> Self {
+    fn new(initial: &str, proxy: EventLoopProxy<UserEvent>) -> Self {
         let doc = MathDoc::with_text(initial);
         let caret = doc.len();
         Self {
@@ -75,7 +108,43 @@ impl App {
             layout_panel: None,
             bridge: KernelBridge::new(),
             kernel_deadline: None,
+            caret_visible: true,
+            next_blink: Instant::now() + BLINK_INTERVAL,
+            cursor_pos: None,
+            adapter: None,
+            proxy,
         }
+    }
+
+    /// Reset the caret blink (make it visible and restart the timer). Called
+    /// on every keyboard/mouse input that moves or inserts.
+    fn reset_blink(&mut self) {
+        self.caret_visible = true;
+        self.next_blink = Instant::now() + BLINK_INTERVAL;
+    }
+
+    /// Build an accessibility tree from the current document's semantic
+    /// segments and push it to the AccessKit adapter (P4 #22).
+    fn push_a11y_update(&mut self) {
+        let Some(adapter) = self.adapter.as_mut() else {
+            return;
+        };
+        let text = self.doc.text();
+        let scan = scan(text);
+        let segments = resolve_segments(&scan);
+        let mut idx = SemanticIndex::default();
+        let render = mathed_core::transform::to_render_text(
+            text,
+            &scan,
+            &segments,
+            &TransformOptions::default(),
+        );
+        idx.build_index(text, &segments, &[&render]);
+        let nodes = mathed_core::accessibility::build_access_nodes(
+            text, &segments, &idx,
+        );
+        let update = build_tree_update(&nodes);
+        adapter.update_if_active(|| update);
     }
 
     /// Drop the cached layout so the next redraw recomputes it.
@@ -103,6 +172,7 @@ impl App {
         self.caret += s.len();
         self.invalidate();
         self.refresh_kernel();
+        self.reset_blink();
     }
 
     /// Delete the character before the caret (Backspace).
@@ -115,6 +185,7 @@ impl App {
         self.caret = prev;
         self.invalidate();
         self.refresh_kernel();
+        self.reset_blink();
     }
 
     /// Delete the character after the caret (Delete).
@@ -127,6 +198,7 @@ impl App {
         self.doc.delete(self.caret..next);
         self.invalidate();
         self.refresh_kernel();
+        self.reset_blink();
     }
 
     /// Move the caret one character left (no relayout).
@@ -134,6 +206,7 @@ impl App {
         if self.caret > 0 {
             self.caret =
                 prev_char_boundary(self.doc.text(), self.caret);
+            self.reset_blink();
             self.request_redraw();
         }
     }
@@ -143,6 +216,7 @@ impl App {
         let text = self.doc.text();
         if self.caret < text.len() {
             self.caret = next_char_boundary(text, self.caret);
+            self.reset_blink();
             self.request_redraw();
         }
     }
@@ -152,6 +226,7 @@ impl App {
         let text = self.doc.text();
         self.caret =
             text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+        self.reset_blink();
         self.request_redraw();
     }
 
@@ -161,6 +236,7 @@ impl App {
         self.caret = text[self.caret..]
             .find('\n')
             .map_or(text.len(), |i| self.caret + i);
+        self.reset_blink();
         self.request_redraw();
     }
 
@@ -184,6 +260,7 @@ impl App {
                 self.caret = b;
             }
         }
+        self.reset_blink();
         self.request_redraw();
     }
 
@@ -205,6 +282,7 @@ impl App {
                 self.caret = b;
             }
         }
+        self.reset_blink();
         self.request_redraw();
     }
 
@@ -261,8 +339,9 @@ impl App {
 
         if let Some(layout) = &self.layout {
             blit_over_white(&mut buffer, win_w, win_h, &layout.image);
-            if let Some(geom) =
-                layout.glyphs.caret_for_byte(self.caret)
+            if self.caret_visible
+                && let Some(geom) =
+                    layout.glyphs.caret_for_byte(self.caret)
             {
                 draw_caret(&mut buffer, win_w, win_h, geom);
             }
@@ -342,13 +421,16 @@ fn blit_over_white(
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
+        // AccessKit requires the window to start invisible so the adapter
+        // can be created before the first paint (P4 #22).
         let attrs = Window::default_attributes()
-            .with_title("mathed (minimal)");
+            .with_title("mathed (minimal)")
+            .with_visible(false);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),
             Err(e) => {
@@ -373,12 +455,26 @@ impl ApplicationHandler for App {
                 return;
             }
         }
-        self.window = Some(window);
+
+        // Create the AccessKit adapter before the window is shown.
+        self.adapter =
+            Some(accesskit_winit::Adapter::with_event_loop_proxy(
+                event_loop,
+                &window,
+                self.proxy.clone(),
+            ));
+
+        self.window = Some(window.clone());
+        window.set_visible(true);
+
         // Compute results for the initial document.
         self.refresh_kernel();
+        // Push the initial accessibility tree.
+        self.push_a11y_update();
     }
 
-    /// Between events, drain async kernel results during the polling window.
+    /// Between events, drain async kernel results during the polling window
+    /// and blink the caret.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(deadline) = self.kernel_deadline {
             if self.bridge.poll() {
@@ -390,12 +486,21 @@ impl ApplicationHandler for App {
                 self.kernel_deadline = None;
             }
         }
-        // Busy-poll only while results may still be in flight; otherwise idle.
+
+        // Caret blink: toggle visibility at the blink interval.
+        let now = Instant::now();
+        if now >= self.next_blink {
+            self.caret_visible = !self.caret_visible;
+            self.next_blink = now + BLINK_INTERVAL;
+            self.request_redraw();
+        }
+
+        // Busy-poll during kernel work; otherwise wake for the next blink.
         event_loop.set_control_flow(
             if self.kernel_deadline.is_some() {
                 ControlFlow::Poll
             } else {
-                ControlFlow::Wait
+                ControlFlow::WaitUntil(self.next_blink)
             },
         );
     }
@@ -406,10 +511,38 @@ impl ApplicationHandler for App {
         _id: WindowId,
         event: WindowEvent,
     ) {
+        // Let AccessKit inspect the event before we handle it (P4 #22).
+        if let Some(adapter) = &mut self.adapter
+            && let Some(window) = &self.window
+        {
+            adapter.process_event(window, &event);
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => self.request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = Some((position.x, position.y));
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some((x, y)) = self.cursor_pos
+                    && let Some(layout) = &self.layout
+                    && let Some((byte, _)) = layout
+                        .glyphs
+                        .byte_for_point(mathed_core::glyphs::V2::new(
+                            x as f32, y as f32,
+                        ))
+                {
+                    self.caret = byte;
+                    self.reset_blink();
+                    self.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -424,18 +557,22 @@ impl ApplicationHandler for App {
                 Key::Named(NamedKey::Backspace) => {
                     self.backspace();
                     self.request_redraw();
+                    self.push_a11y_update();
                 }
                 Key::Named(NamedKey::Delete) => {
                     self.delete_forward();
                     self.request_redraw();
+                    self.push_a11y_update();
                 }
                 Key::Named(NamedKey::Enter) => {
                     self.insert("\n");
                     self.request_redraw();
+                    self.push_a11y_update();
                 }
                 Key::Named(NamedKey::Space) => {
                     self.insert(" ");
                     self.request_redraw();
+                    self.push_a11y_update();
                 }
                 Key::Named(NamedKey::ArrowLeft) => self.move_left(),
                 Key::Named(NamedKey::ArrowRight) => self.move_right(),
@@ -449,10 +586,30 @@ impl ApplicationHandler for App {
                     {
                         self.insert(t);
                         self.request_redraw();
+                        self.push_a11y_update();
                     }
                 }
             },
             _ => {}
+        }
+    }
+
+    /// Handle AccessKit events dispatched through the event loop proxy.
+    fn user_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        event: UserEvent,
+    ) {
+        match event.0.window_event {
+            accesskit_winit::WindowEvent::InitialTreeRequested => {
+                // The platform adapter wants the initial tree — push it now.
+                self.push_a11y_update();
+            }
+            accesskit_winit::WindowEvent::ActionRequested(_) => {
+                // Actions (focus, click) are not wired yet; future work can
+                // map them to caret placement / segment navigation.
+            }
+            accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
         }
     }
 }

@@ -34,10 +34,14 @@ imaging_vello_cpu = { git = "https://github.com/forest-rs/imaging", rev = "79f02
 # core stays headless-capable. winit 0.30 matches the one Bevy already pulls.
 winit = { version = "0.30", optional = true }
 softbuffer = { version = "0.4", optional = true }
+# AccessKit bridge over mathed_core::accessibility (P4 #22). Optional so the
+# headless render core stays dependency-free.
+accesskit = { version = "0.21", optional = true }
+accesskit_winit = { version = "0.29", optional = true }
 
 [features]
 default = ["gui"]
-gui = ["dep:winit", "dep:softbuffer"]
+gui = ["dep:winit", "dep:softbuffer", "dep:accesskit", "dep:accesskit_winit"]
 
 [[bin]]
 name = "mathed_mini"

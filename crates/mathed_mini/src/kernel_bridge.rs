@@ -126,7 +126,9 @@ impl KernelBridge {
                 .unwrap_or_else(|| "prob".to_string());
             let line = match &self.results[&k] {
                 KernelResult::Value(p) => format!("{label} = {p:.4}"),
-                KernelResult::Error { code_name, message, .. } => {
+                KernelResult::Error {
+                    code_name, message, ..
+                } => {
                     format!("{label}: {code_name} — {message}")
                 }
             };
@@ -169,7 +171,8 @@ impl KernelBridge {
                 continue;
             };
             match stmt.kind {
-                PropKind::Prior => match parse_prior(&stmt.body_text) {
+                PropKind::Prior => match parse_prior(&stmt.body_text)
+                {
                     Ok(p) => {
                         priors.insert(
                             model.span.start,
@@ -273,7 +276,7 @@ impl KernelBridge {
             else {
                 continue;
             };
-            
+
             let prob_trans_src = resolve_translator_src(
                 &idx.translators,
                 stmt.translator.as_deref(),
@@ -376,7 +379,8 @@ fn resolve_model<'a>(
 ) -> Option<&'a KernelStatement> {
     if let Some(name) = &stmt.model_name {
         if let Some(m) = models.iter().find(|m| {
-            m.kind == PropKind::Model && m.name.as_deref() == Some(name.as_str())
+            m.kind == PropKind::Model
+                && m.name.as_deref() == Some(name.as_str())
         }) {
             return Some(m);
         }
@@ -389,7 +393,10 @@ fn resolve_model<'a>(
             "no named \\model is in scope; add one or drop the model: arg"
                 .to_string()
         } else {
-            format!("use one of the models in scope: {}", valid.join(", "))
+            format!(
+                "use one of the models in scope: {}",
+                valid.join(", ")
+            )
         };
         results.insert(
             stmt.span.start,
@@ -441,7 +448,11 @@ fn dispatch_error_result(e: &DispatchError) -> KernelResult {
 /// never produces, is the sole exception).
 fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
     let hint = |target: &str, suggestion: String| {
-        vec![RepairHint::new(HintKind::ReplaceValue, target, suggestion)]
+        vec![RepairHint::new(
+            HintKind::ReplaceValue,
+            target,
+            suggestion,
+        )]
     };
     match e {
         DispatchError::Translate(TranslateError::Eval(msg)) => hint(
@@ -483,7 +494,10 @@ fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
 /// First non-empty line of a (possibly multi-line) diagnostic, trimmed — keeps
 /// a `RepairHint` suggestion to one readable line.
 fn first_line(msg: &str) -> &str {
-    msg.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(msg)
+    msg.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(msg)
 }
 
 fn hash_many(strs: &[&str]) -> u64 {
@@ -591,7 +605,9 @@ mod tests {
             Some(KernelResult::Error { code_name, .. }) => {
                 assert_eq!(code_name, "translator-json");
             }
-            other => panic!("expected translator-json error, got {other:?}"),
+            other => panic!(
+                "expected translator-json error, got {other:?}"
+            ),
         }
     }
 
@@ -640,7 +656,9 @@ mod tests {
             Some(KernelResult::Error { code_name, .. }) => {
                 assert_eq!(code_name, "prior-solver-parse");
             }
-            other => panic!("expected prior-solver-parse error, got {other:?}"),
+            other => panic!(
+                "expected prior-solver-parse error, got {other:?}"
+            ),
         }
     }
 
@@ -655,7 +673,9 @@ mod tests {
         // The error is recorded synchronously by resolve_model (no worker
         // round-trip needed).
         match bridge.results().get(&key) {
-            Some(KernelResult::Error { code_name, hints, .. }) => {
+            Some(KernelResult::Error {
+                code_name, hints, ..
+            }) => {
                 assert_eq!(code_name, "model-not-found");
                 // The repair hint names the model actually in scope so an
                 // agent can correct the `model:` arg without guessing.
@@ -667,7 +687,9 @@ mod tests {
                     h.suggestion
                 );
             }
-            other => panic!("expected model-not-found error, got {other:?}"),
+            other => panic!(
+                "expected model-not-found error, got {other:?}"
+            ),
         }
     }
 
@@ -686,31 +708,43 @@ mod tests {
         assert!(!h[0].suggestion.contains('\n'));
         assert!(h[0].suggestion.contains("unknown variable"));
 
-        assert!(!dispatch_error_hints(&DispatchError::Translate(
-            TranslateError::NotString
-        ))
-        .is_empty());
-        assert!(!dispatch_error_hints(&DispatchError::Translate(
-            TranslateError::MissingResult
-        ))
-        .is_empty());
-        assert!(!dispatch_error_hints(&DispatchError::Translate(
-            TranslateError::Empty
-        ))
-        .is_empty());
-        assert!(!dispatch_error_hints(&DispatchError::Json(
-            "missing field `kind`".into()
-        ))
-        .is_empty());
-        assert!(!dispatch_error_hints(&DispatchError::Parse(
-            "expected an integer".into()
-        ))
-        .is_empty());
+        assert!(
+            !dispatch_error_hints(&DispatchError::Translate(
+                TranslateError::NotString
+            ))
+            .is_empty()
+        );
+        assert!(
+            !dispatch_error_hints(&DispatchError::Translate(
+                TranslateError::MissingResult
+            ))
+            .is_empty()
+        );
+        assert!(
+            !dispatch_error_hints(&DispatchError::Translate(
+                TranslateError::Empty
+            ))
+            .is_empty()
+        );
+        assert!(
+            !dispatch_error_hints(&DispatchError::Json(
+                "missing field `kind`".into()
+            ))
+            .is_empty()
+        );
+        assert!(
+            !dispatch_error_hints(&DispatchError::Parse(
+                "expected an integer".into()
+            ))
+            .is_empty()
+        );
         // Internal misuse carries no hint.
-        assert!(dispatch_error_hints(&DispatchError::WrongKind(
-            PropKind::Model
-        ))
-        .is_empty());
+        assert!(
+            dispatch_error_hints(&DispatchError::WrongKind(
+                PropKind::Model
+            ))
+            .is_empty()
+        );
     }
 
     #[test]
@@ -752,13 +786,17 @@ mod tests {
         let ho_model = idx1
             .kernel_statements
             .iter()
-            .find(|s| s.kind == PropKind::Model && s.translator.as_deref() == Some("ho"))
+            .find(|s| {
+                s.kind == PropKind::Model
+                    && s.translator.as_deref() == Some("ho")
+            })
             .expect("model with ho translator");
         assert!(
             bridge.model_hashes.contains_key(&ho_model.span.start),
             "model hash recorded after first refresh"
         );
-        let hash1 = *bridge.model_hashes.get(&ho_model.span.start).unwrap();
+        let hash1 =
+            *bridge.model_hashes.get(&ho_model.span.start).unwrap();
 
         // Second pass: same model body, but translator changed to emit
         // a non-empty term. The model hash MUST change (translator-aware).
@@ -770,9 +808,13 @@ mod tests {
         let ho_model2 = idx2
             .kernel_statements
             .iter()
-            .find(|s| s.kind == PropKind::Model && s.translator.as_deref() == Some("ho"))
+            .find(|s| {
+                s.kind == PropKind::Model
+                    && s.translator.as_deref() == Some("ho")
+            })
             .expect("model with ho translator");
-        let hash2 = *bridge.model_hashes.get(&ho_model2.span.start).unwrap();
+        let hash2 =
+            *bridge.model_hashes.get(&ho_model2.span.start).unwrap();
         assert_ne!(
             hash1, hash2,
             "translator change must produce a different hash → redispatch"
@@ -816,6 +858,101 @@ mod tests {
         assert_ne!(
             hash1, hash2,
             "editing the unnamed default translator must change the hash"
+        );
+    }
+
+    /// P1 #5 overlay GUI smoke: the full visual pipeline — document → kernel
+    /// bridge → coloured annotation → Typst layout → rasterized RGBA8 image —
+    /// must produce green pixels for a successful prob and red pixels for an
+    /// error. This is the headless verification of the on-screen render that
+    /// S16 left unverified (the inline `result_annotations()` →
+    /// `TransformOptions.annotations` → `layout_doc_with` → `RgbaImage` path
+    /// that the mini frontend's `redraw` uses).
+    #[test]
+    fn overlay_renders_green_for_success_and_red_for_error() {
+        use crate::render::layout_doc_with;
+        use mathed_core::transform::TransformOptions;
+
+        fn count_colored_pixels(
+            img: &imaging::RgbaImage,
+        ) -> (u32, u32) {
+            let mut green = 0u32;
+            let mut red = 0u32;
+            for px in img.data.chunks_exact(4) {
+                let (r, g, b, a) = (
+                    px[0] as u32,
+                    px[1] as u32,
+                    px[2] as u32,
+                    px[3] as u32,
+                );
+                if a == 0 {
+                    continue;
+                }
+                if g > 50 && g > r * 2 && g > b * 2 {
+                    green += 1;
+                }
+                if r > 50 && r > g * 3 && r > b * 3 {
+                    red += 1;
+                }
+            }
+            (green, red)
+        }
+
+        // --- Success case: vacuum model + vacuum prob → P = 1.0 (green) ---
+        let doc_ok = "#1 a #2 \\model(#1,#2)\n\n\
+            #5 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+            #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc_ok);
+        let key_ok = prob_offset(doc_ok);
+        wait_for(&mut bridge, key_ok, Duration::from_secs(15));
+        let annotations = bridge.result_annotations();
+        assert!(
+            annotations.contains_key(&key_ok),
+            "annotation for the prob"
+        );
+        let layout = layout_doc_with(
+            doc_ok,
+            600.0,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        )
+        .expect("success-case layout");
+        let (green, red) = count_colored_pixels(&layout.image);
+        assert!(
+            green > 0,
+            "success overlay must render green pixels (got {green} green, {red} red)"
+        );
+
+        // --- Error case: bad translator JSON → red error code ---
+        let doc_err = "#1 a #2 \\model(#1,#2)\n\n\
+            #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\n\
+            #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
+        let mut bridge2 = KernelBridge::new();
+        bridge2.refresh(doc_err);
+        let key_err = prob_offset(doc_err);
+        // The error is synchronous (typed EventPredicate validation fails).
+        wait_for(&mut bridge2, key_err, Duration::from_secs(5));
+        let annotations_err = bridge2.result_annotations();
+        assert!(
+            annotations_err.contains_key(&key_err),
+            "annotation for the error prob"
+        );
+        let layout_err = layout_doc_with(
+            doc_err,
+            600.0,
+            &TransformOptions {
+                annotations: annotations_err,
+                ..Default::default()
+            },
+        )
+        .expect("error-case layout");
+        let (green2, red2) = count_colored_pixels(&layout_err.image);
+        assert!(
+            red2 > 0,
+            "error overlay must render red pixels (got {green2} green, {red2} red)"
         );
     }
 }

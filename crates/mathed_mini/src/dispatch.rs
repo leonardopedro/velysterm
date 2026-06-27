@@ -20,8 +20,8 @@ use crate::translate::{
 use mathed_core::{KernelStatement, PropKind, TranslatorDef};
 use std::collections::HashMap;
 use unfer_protocol::{
-    EventPredicate, HamiltonianSpec, ModelSpec, PriorSpec, SolverSpec,
-    TermSpec,
+    EventPredicate, HamiltonianSpec, ModelSpec, PriorSpec,
+    SolverSpec, TermSpec,
 };
 
 /// Why a statement could not be turned into a kernel payload.
@@ -207,13 +207,17 @@ fn split_nonempty(s: &str) -> impl Iterator<Item = &str> {
 
 fn parse_u32(s: &str) -> Result<u32, DispatchError> {
     s.trim().parse().map_err(|_| {
-        DispatchError::Parse(format!("expected an integer, got {s:?}"))
+        DispatchError::Parse(format!(
+            "expected an integer, got {s:?}"
+        ))
     })
 }
 
 fn parse_usize(s: &str) -> Result<usize, DispatchError> {
     s.trim().parse().map_err(|_| {
-        DispatchError::Parse(format!("expected an integer, got {s:?}"))
+        DispatchError::Parse(format!(
+            "expected an integer, got {s:?}"
+        ))
     })
 }
 
@@ -424,7 +428,10 @@ mod tests {
     #[test]
     fn parse_prior_grammar_forms() {
         assert_eq!(parse_prior("vacuum").unwrap(), PriorSpec::Vacuum);
-        assert_eq!(parse_prior("  VACUUM ").unwrap(), PriorSpec::Vacuum);
+        assert_eq!(
+            parse_prior("  VACUUM ").unwrap(),
+            PriorSpec::Vacuum
+        );
         assert_eq!(
             parse_prior("bosons(0:2, 1:1)").unwrap(),
             PriorSpec::Bosons {
@@ -440,8 +447,8 @@ mod tests {
     #[test]
     fn parse_prior_json_fallback() {
         // Direct JSON (internally tagged `kind`) for full control.
-        let p =
-            parse_prior(r#"{"kind":"bosons","modes":[[2,5]]}"#).unwrap();
+        let p = parse_prior(r#"{"kind":"bosons","modes":[[2,5]]}"#)
+            .unwrap();
         assert_eq!(
             p,
             PriorSpec::Bosons {
@@ -503,7 +510,9 @@ mod tests {
         .expect("dispatch with prior/solver");
         assert_eq!(
             spec.prior,
-            PriorSpec::Bosons { modes: vec![(0, 1)] }
+            PriorSpec::Bosons {
+                modes: vec![(0, 1)]
+            }
         );
         assert_eq!(spec.solver.krylov_dim, 16);
     }
