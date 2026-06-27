@@ -169,6 +169,10 @@ impl KernelBridge {
         let idx = build_index(doc_text);
         let mut changed = false;
 
+        // Clear stale translator errors from the previous scan (P5 #28).
+        // They're re-populated below if dispatch errors recur.
+        self.translator_errors.clear();
+
         // Models in document order.
         let mut models: Vec<&KernelStatement> = idx
             .kernel_statements
@@ -777,6 +781,46 @@ mod tests {
         assert!(
             !bridge.translator_errors().contains_key(&off),
             "error should be cleared after the translator is fixed"
+        );
+    }
+
+    #[test]
+    fn deleted_translator_clears_stale_error() {
+        // When a translator that previously errored is *deleted* from the
+        // document, its stale error entry must not persist (P5 #28: the
+        // refresh() clears translator_errors at the start of each scan, then
+        // re-populates only for translators that still exist and still fail).
+        let bad_doc = "#1 a #2 \\model(#1,#2)\n\n\
+                       #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+                       #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(bad_doc);
+        let scan = scan(bad_doc);
+        let segs = resolve_segments(&scan);
+        let idx = {
+            let render = mathed_core::transform::to_render_text(
+                bad_doc,
+                &scan,
+                &segs,
+                &mathed_core::transform::TransformOptions::default(),
+            );
+            let mut i = SemanticIndex::default();
+            i.build_index(bad_doc, &segs, &[&render]);
+            i
+        };
+        let off = idx.translators["ev"].span.start;
+        assert!(
+            bridge.translator_errors().contains_key(&off),
+            "error recorded before deletion"
+        );
+
+        // Delete the translator entirely (keep the model + prob).
+        let no_trans_doc = "#1 a #2 \\model(#1,#2)\n\n\
+                            #3 vac #4 \\prob(#3,#4)";
+        bridge.refresh(no_trans_doc);
+        assert!(
+            bridge.translator_errors().is_empty(),
+            "stale error for deleted translator must be cleared"
         );
     }
 
