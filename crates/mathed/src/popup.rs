@@ -6,6 +6,7 @@
 use bevy::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum PopupKind {
     Complete,
     Define,
@@ -109,7 +110,7 @@ pub fn sync_popup_ui(
     };
 
     let bg = Color::srgb(0.12, 0.12, 0.15);
-    let border = Color::srgb(0.3, 0.3, 0.35);
+    let _border = Color::srgb(0.3, 0.3, 0.35);
     let sel_bg = Color::srgb(0.25, 0.35, 0.55);
     let dim = Color::srgb(0.6, 0.6, 0.65);
 

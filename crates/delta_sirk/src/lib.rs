@@ -87,9 +87,9 @@ pub async fn run_symbolic_delta_sirk(
 
         // Orthogonalize (Gram-Schmidt)
         let mut v_ortho = v_next_unnorm;
-        for j in 0..basis.len() {
+        for v in basis.iter() {
             let (_overlap_re, _overlap_im) =
-                engine.inner_product(&basis[j], &v_ortho);
+                engine.inner_product(v, &v_ortho);
             // v_ortho -= <v_j | v_next> * v_j
             for _s in v_ortho.iter_mut() {
                 // We need to subtract the component of each state in the superposition

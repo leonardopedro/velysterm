@@ -84,19 +84,17 @@ pub fn build_glyph_index(
     {
         let mut current_band: Option<usize> = None;
         for rec in &sorted_by_y {
-            if let Some(bi) = current_band {
-                if (rec.baseline_y - bands_raw[bi].baseline).abs()
+            if let Some(bi) = current_band
+                && (rec.baseline_y - bands_raw[bi].baseline).abs()
                     < 0.5
-                {
-                    bands_raw[bi].top = bands_raw[bi]
-                        .top
-                        .min(rec.baseline_y - rec.asc);
-                    bands_raw[bi].bottom = bands_raw[bi]
-                        .bottom
-                        .max(rec.baseline_y - rec.desc);
-                    band_idx.push(bi as u32);
-                    continue;
-                }
+            {
+                bands_raw[bi].top =
+                    bands_raw[bi].top.min(rec.baseline_y - rec.asc);
+                bands_raw[bi].bottom = bands_raw[bi]
+                    .bottom
+                    .max(rec.baseline_y - rec.desc);
+                band_idx.push(bi as u32);
+                continue;
             }
             let bi = bands_raw.len();
             bands_raw.push(LineBand {

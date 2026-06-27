@@ -198,13 +198,13 @@ pub fn keymap(
     }
 
     // Printable text (not ctrl, not alt).
-    if !mods.alt {
-        if let Some(t) = text {
-            let filtered: String =
-                t.chars().filter(|c| !c.is_control()).collect();
-            if !filtered.is_empty() {
-                return Some(EditorCmd::InsertText(filtered));
-            }
+    if !mods.alt
+        && let Some(t) = text
+    {
+        let filtered: String =
+            t.chars().filter(|c| !c.is_control()).collect();
+        if !filtered.is_empty() {
+            return Some(EditorCmd::InsertText(filtered));
         }
     }
 

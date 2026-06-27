@@ -30,6 +30,7 @@ pub struct Scheduler {
 }
 
 /// A set of work items to process in one sync pass.
+#[allow(dead_code)]
 pub struct FireSet {
     pub blocks: Vec<BlockId>,
     pub reveal: bool,
@@ -61,10 +62,10 @@ impl Scheduler {
     ///   re-arm the deadline.
     pub fn take(&mut self, now: f64) -> Option<FireSet> {
         let content_ready = !self.dirty.is_empty()
-            && (self.deadline.map_or(false, |d| now >= d)
+            && (self.deadline.is_some_and(|d| now >= d)
                 || self
                     .first_damage
-                    .map_or(false, |t| now >= t + UPPER_S));
+                    .is_some_and(|t| now >= t + UPPER_S));
 
         let reveal_ready = self.reveal_dirty;
 

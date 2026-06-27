@@ -42,13 +42,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
     // Selection rects.
     let sel_color = rgba(0.35, 0.55, 0.95, 0.30);
     for &r in input.selection {
-        scene.fill(
-            peniko::Fill::NonZero,
-            ident,
-            &sel_color,
-            None,
-            &r,
-        );
+        scene.fill(peniko::Fill::NonZero, ident, sel_color, None, &r);
     }
 
     // Search matches.
@@ -57,7 +51,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         scene.fill(
             peniko::Fill::NonZero,
             ident,
-            &search_color,
+            search_color,
             None,
             &r,
         );
@@ -68,13 +62,13 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         scene.fill(
             peniko::Fill::NonZero,
             ident,
-            &search_color,
+            search_color,
             None,
             &r,
         );
         let stroke_color = rgba(0.95, 0.80, 0.20, 1.0);
         let stroke = vello::kurbo::Stroke::new(1.5);
-        scene.stroke(&stroke, ident, &stroke_color, None, &r);
+        scene.stroke(&stroke, ident, stroke_color, None, &r);
     }
 
     // Unresolved: dashed underline along bottom edge.
@@ -87,7 +81,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
             scene.fill(
                 peniko::Fill::NonZero,
                 ident,
-                &unresolved_color,
+                unresolved_color,
                 None,
                 &seg,
             );
@@ -102,7 +96,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         scene.fill(
             peniko::Fill::NonZero,
             ident,
-            &def_color,
+            def_color,
             None,
             &line,
         );
@@ -115,7 +109,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         scene.fill(
             peniko::Fill::NonZero,
             ident,
-            &prob_ok_color,
+            prob_ok_color,
             None,
             &line,
         );
@@ -131,7 +125,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
             scene.fill(
                 peniko::Fill::NonZero,
                 ident,
-                &prob_err_color,
+                prob_err_color,
                 None,
                 &seg,
             );
@@ -140,22 +134,22 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
     }
 
     // Caret.
-    if input.caret_visible {
-        if let Some(c) = input.caret {
-            let rect = kurbo::Rect::new(
-                c.x as f64,
-                c.top as f64,
-                c.x as f64 + 2.0,
-                (c.top + c.height) as f64,
-            );
-            scene.fill(
-                peniko::Fill::NonZero,
-                ident,
-                &peniko::Color::WHITE,
-                None,
-                &rect,
-            );
-        }
+    if input.caret_visible
+        && let Some(c) = input.caret
+    {
+        let rect = kurbo::Rect::new(
+            c.x as f64,
+            c.top as f64,
+            c.x as f64 + 2.0,
+            (c.top + c.height) as f64,
+        );
+        scene.fill(
+            peniko::Fill::NonZero,
+            ident,
+            peniko::Color::WHITE,
+            None,
+            &rect,
+        );
     }
 
     scene

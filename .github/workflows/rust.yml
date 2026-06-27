@@ -21,7 +21,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      - run: cargo check --workspace --all-features --all-targets
+      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks
+      # (P4 #16 — stale velyst examples referencing removed APIs).
+      - run: cargo check --workspace --all-targets
 
   check-no-defaults:
     runs-on: ubuntu-latest
@@ -40,7 +42,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
       - run: rustup component add clippy
-      - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   doc:
     runs-on: ubuntu-latest
@@ -49,7 +52,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      - run: cargo doc --workspace --all-features --no-deps --document-private-items --features="bevy/wayland"
+      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      - run: cargo doc --workspace --no-deps --document-private-items --features="bevy/wayland"
         env:
           RUSTDOCFLAGS: -D warnings
     
@@ -60,7 +64,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      - run: cargo test --workspace --all-features --all-targets
+      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      - run: cargo test --workspace --all-targets
 
   # Note: cargo test --all-targets disables doc tests, so we have to add this to test docs
   doctest:
@@ -70,4 +75,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      - run: cargo test --workspace --all-features --doc
+      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      - run: cargo test --workspace --doc

@@ -307,7 +307,7 @@ mod tests {
     fn test_mixed() {
         // Just a random number
         let val = 1234567890;
-        let s = u64_to_rfc1751(val);
+        let _s = u64_to_rfc1751(val);
         // Words should be sorted by length and then alphabetically.
     }
 }

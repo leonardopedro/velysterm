@@ -140,9 +140,7 @@ impl DeltaAlgebraEngine {
             return Vec::new();
         }
 
-        let input_size = (input.len()
-            * std::mem::size_of::<HermiteState>())
-            as u64;
+        let input_size = std::mem::size_of_val(input) as u64;
 
         let input_buf = self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -205,7 +203,7 @@ impl DeltaAlgebraEngine {
             );
             cpass.set_pipeline(&self.expand_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = (input.len() as u32 + 255) / 256;
+            let workgroups = (input.len() as u32).div_ceil(256);
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
 

@@ -1,15 +1,14 @@
 use bevy::prelude::*;
-use bevy_vello::prelude::*;
 use mathed_core::blocks::BlockId;
 use mathed_core::{OffsetMap, RenderOutput};
 use std::collections::HashMap;
-use velyst::prelude::*;
-use velyst::typst::syntax::{FileId, Source, VirtualPath};
+use velyst::typst::syntax::Source;
 
 pub const PRELUDE: &str = "#set text(font: \"DejaVu Sans\", size: 12pt)\n\
     #set page(width: 100%, height: auto)\n";
 
 #[derive(Component)]
+#[allow(dead_code)]
 pub struct BlockView {
     pub id: BlockId,
     pub source: Source,
@@ -27,6 +26,7 @@ pub struct Blocks {
 pub struct EditorRoot;
 
 impl Blocks {
+    #[allow(dead_code)]
     pub fn blocks(&self) -> &Vec<mathed_core::blocks::Block> {
         &self.index.blocks
     }

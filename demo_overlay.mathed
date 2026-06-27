@@ -1,0 +1,7 @@
+= mathed kernel demo
+
+#1 a #2 \model(#1,#2)
+
+#5 #let translate(body) = { "{\"kind\":\"vacuum\"}" } #6 \translator(#5,#6, name: "ev")
+
+#3 vacuum #4 \prob(#3,#4, translator: "ev")
