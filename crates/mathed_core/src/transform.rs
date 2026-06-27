@@ -99,6 +99,13 @@ pub struct TransformOptions {
     /// computed value next to it (P3 #11). The transform stays kernel-
     /// agnostic — it just splices whatever markup the caller supplies.
     pub annotations: HashMap<usize, String>,
+    /// Translator error messages keyed by the translator segment's body
+    /// **start** offset (P5 #28). When present, the expanded translator panel
+    /// shows the error message in red below the code — so a failed translator
+    /// is visible in the panel itself, not just as a red `code_name` on the
+    /// dependent `\prob`/`\model`. The transform stays kernel-agnostic: the
+    /// caller (KernelBridge) populates this from dispatch errors.
+    pub translator_errors: HashMap<usize, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,10 +256,13 @@ pub fn to_render_text_range(
                 });
             bounds.push(span.start);
             bounds.push(span.end);
+            let error =
+                opts.translator_errors.get(&span.start).cloned();
             Some(TranslatorRegion {
                 span,
                 expanded,
                 name: translator_name(seg),
+                error,
             })
         })
         .collect();
@@ -433,6 +443,9 @@ struct TranslatorRegion {
     expanded: bool,
     /// Name from the `name:` extra-arg, for the collapsed summary.
     name: Option<String>,
+    /// Inline error message (P5 #28): when present, the expanded panel shows
+    /// it in red below the code.
+    error: Option<String>,
 }
 
 /// Extract the `name:` literal from a translator segment's extra args.
@@ -466,13 +479,30 @@ fn emit_translator(
         // maps back to the right place.
         let body_start =
             reg.span.start + (raw.len() - raw.trim_start().len());
-        out.push_str("```\n");
+        // P5 #28: `typ` language tag enables Typst's built-in syntax
+        // highlighting (keywords, strings, comments) when the syntect
+        // plugin is available; falls back to plain monospace otherwise.
+        out.push_str("```typ\n");
         push_copy(body, body_start, out, map);
         out.push_str("\n```");
+        // P5 #28: inline translator error — show the message (not just the
+        // code name) in red below the code, so the error is visible in the
+        // panel itself, not just as a red annotation on dependent `\prob`s.
+        if let Some(err) = &reg.error {
+            // Escape `[`/`]` so Typst doesn't parse them as content delimiters.
+            let escaped = err.replace('[', "\\[").replace(']', "\\]");
+            out.push_str(&format!("\n#text(fill: red)[⚠ {escaped}]"));
+        }
     } else {
         match &reg.name {
             Some(n) => {
-                out.push_str("▸ translator: ");
+                // A collapsed translator with an error gets a red ⚠ marker.
+                if reg.error.is_some() {
+                    out.push_str("#text(fill: red)[⚠] ");
+                } else {
+                    out.push_str("▸ ");
+                }
+                out.push_str("translator: ");
                 out.push_str(n);
             }
             None => out.push_str("▸ translator"),

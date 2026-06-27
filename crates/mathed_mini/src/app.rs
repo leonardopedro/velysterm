@@ -491,6 +491,10 @@ impl App {
             let opts = TransformOptions {
                 caret: Some(self.caret),
                 annotations: self.bridge.result_annotations(),
+                translator_errors: self
+                    .bridge
+                    .translator_errors()
+                    .clone(),
                 ..Default::default()
             };
             self.layout = layout_doc_with(

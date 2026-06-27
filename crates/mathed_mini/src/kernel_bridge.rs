@@ -23,7 +23,9 @@ use kernel_client::worker::BlockResponse;
 use kernel_client::{KernelClient, KernelRequest};
 use mathed_core::PropKind;
 use mathed_core::markers::{resolve_segments, scan};
-use mathed_core::semantics::{KernelStatement, SemanticIndex};
+use mathed_core::semantics::{
+    KernelStatement, SemanticIndex, TranslatorDef,
+};
 use mathed_core::transform::{TransformOptions, to_render_text};
 
 use crate::dispatch::{
@@ -60,6 +62,11 @@ pub struct KernelBridge {
     model_hashes: HashMap<usize, u64>,
     /// prob offset → hash of the last-dispatched (prob body, model body) pair.
     prob_hashes: HashMap<usize, u64>,
+    /// translator offset → error message (P5 #28). Populated during refresh
+    /// when a dispatch error involves a translator (bad Typst code, wrong JSON
+    /// output, …). Consumed by [`translator_errors`](Self::translator_errors)
+    /// so the transform can show the error in the expanded panel.
+    translator_errors: HashMap<usize, String>,
 }
 
 impl Default for KernelBridge {
@@ -77,6 +84,7 @@ impl KernelBridge {
             prob_names: HashMap::new(),
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
+            translator_errors: HashMap::new(),
         }
     }
 
@@ -105,6 +113,14 @@ impl KernelBridge {
                 (k, markup)
             })
             .collect()
+    }
+
+    /// Translator error messages keyed by the translator segment's body start
+    /// offset (P5 #28). Feed this to
+    /// [`TransformOptions::translator_errors`](mathed_core::transform::TransformOptions)
+    /// so the expanded translator panel shows the error in red below the code.
+    pub fn translator_errors(&self) -> &HashMap<usize, String> {
+        &self.translator_errors
     }
 
     /// Typst markup for a results panel (a `#raw` block listing each prob's
@@ -249,6 +265,10 @@ impl KernelBridge {
                 priors.get(&m.span.start).map(|(p, _)| p.clone());
             let solver =
                 solvers.get(&m.span.start).map(|(s, _)| s.clone());
+            let trans_off = translator_offset(
+                &idx.translators,
+                m.translator.as_deref(),
+            );
             match statement_to_model_spec(
                 &mut self.engine,
                 &idx.translators,
@@ -257,13 +277,36 @@ impl KernelBridge {
                 solver,
             ) {
                 Ok(spec) => {
+                    if let Some(off) = trans_off {
+                        self.translator_errors.remove(&off);
+                    }
                     self.client.submit(KernelRequest::DefineModel {
                         block_id: m.span.start as u64,
                         spec,
                     });
                     self.model_hashes.insert(m.span.start, h);
                 }
+                Err(ref e)
+                    if matches!(
+                        e,
+                        DispatchError::Translate(_)
+                            | DispatchError::Json(_)
+                    ) =>
+                {
+                    if let Some(off) = trans_off {
+                        self.translator_errors
+                            .insert(off, e.to_string());
+                    }
+                    self.results.insert(
+                        m.span.start,
+                        dispatch_error_result(e),
+                    );
+                    changed = true;
+                }
                 Err(e) => {
+                    if let Some(off) = trans_off {
+                        self.translator_errors.remove(&off);
+                    }
                     self.results.insert(
                         m.span.start,
                         dispatch_error_result(&e),
@@ -307,12 +350,19 @@ impl KernelBridge {
             if self.prob_hashes.get(&stmt.span.start) == Some(&key) {
                 continue;
             }
+            let event_trans_off = translator_offset(
+                &idx.translators,
+                stmt.translator.as_deref(),
+            );
             match statement_to_event_json(
                 &mut self.engine,
                 &idx.translators,
                 stmt,
             ) {
                 Ok(event_json) => {
+                    if let Some(off) = event_trans_off {
+                        self.translator_errors.remove(&off);
+                    }
                     self.client.submit(KernelRequest::Probability {
                         model_id: model.span.start as u64,
                         block_id: stmt.span.start as u64,
@@ -320,7 +370,27 @@ impl KernelBridge {
                     });
                     self.prob_hashes.insert(stmt.span.start, key);
                 }
+                Err(ref e)
+                    if matches!(
+                        e,
+                        DispatchError::Translate(_)
+                            | DispatchError::Json(_)
+                    ) =>
+                {
+                    if let Some(off) = event_trans_off {
+                        self.translator_errors
+                            .insert(off, e.to_string());
+                    }
+                    self.results.insert(
+                        stmt.span.start,
+                        dispatch_error_result(e),
+                    );
+                    changed = true;
+                }
                 Err(e) => {
+                    if let Some(off) = event_trans_off {
+                        self.translator_errors.remove(&off);
+                    }
                     self.results.insert(
                         stmt.span.start,
                         dispatch_error_result(&e),
@@ -520,6 +590,21 @@ fn hash_many(strs: &[&str]) -> u64 {
     h.finish()
 }
 
+/// Body-start offset of the translator resolved for a statement (P5 #28).
+///
+/// Mirrors [`resolve_translator_src`]: tries the named translator first, then
+/// the unnamed default. Returns `None` when the builtin is the fallback (it
+/// has no expanded panel in the document to annotate).
+fn translator_offset(
+    translators: &HashMap<String, TranslatorDef>,
+    name: Option<&str>,
+) -> Option<usize> {
+    if let Some(def) = name.and_then(|n| translators.get(n)) {
+        return Some(def.span.start);
+    }
+    translators.get("").map(|def| def.span.start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +724,60 @@ mod tests {
                 "expected translator-json error, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn translator_error_populates_translator_errors_map() {
+        // P5 #28: when a translator emits bad JSON, the error message is
+        // stored in `translator_errors` keyed by the translator's body
+        // start offset, so the expanded panel can display it in red.
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\n\
+                   #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let idx = build_index(doc);
+        let trans_def = idx
+            .translators
+            .get("bad")
+            .expect("translator named 'bad' in index");
+        let off = trans_def.span.start;
+        assert!(
+            bridge.translator_errors().contains_key(&off),
+            "translator_errors should be keyed by the translator body offset"
+        );
+        let msg = &bridge.translator_errors()[&off];
+        assert!(
+            !msg.is_empty(),
+            "error message should be non-empty: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn translator_error_clears_on_fix() {
+        // P5 #28: once a translator is fixed (new hash → re-dispatch succeeds),
+        // its entry is removed from `translator_errors`.
+        let bad_doc = "#1 a #2 \\model(#1,#2)\n\n\
+                       #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+                       #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(bad_doc);
+        let idx = build_index(bad_doc);
+        let off = idx.translators["ev"].span.start;
+        assert!(
+            bridge.translator_errors().contains_key(&off),
+            "error recorded"
+        );
+
+        // Fix the translator (a valid EventPredicate JSON).
+        let good_doc = "#1 a #2 \\model(#1,#2)\n\n\
+                        #5 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+                        #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
+        bridge.refresh(good_doc);
+        assert!(
+            !bridge.translator_errors().contains_key(&off),
+            "error should be cleared after the translator is fixed"
+        );
     }
 
     #[test]
