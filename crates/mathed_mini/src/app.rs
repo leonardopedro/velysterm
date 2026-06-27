@@ -870,9 +870,27 @@ impl ApplicationHandler<UserEvent> for App {
                 // The platform adapter wants the initial tree — push it now.
                 self.push_a11y_update();
             }
-            accesskit_winit::WindowEvent::ActionRequested(_) => {
-                // Actions (focus, click) are not wired yet; future work can
-                // map them to caret placement / segment navigation.
+            accesskit_winit::WindowEvent::ActionRequested(req) => {
+                // Focus/Click on a segment node places the caret at that
+                // segment's byte offset (P5 #27). The node ID encodes the
+                // range.start; the root node carries no caret target.
+                use accesskit::Action;
+                match req.action {
+                    Action::Focus | Action::Click => {
+                        if let Some(offset) =
+                            crate::a11y::byte_offset_for_node(req.target)
+                        {
+                            // Clamp to the document; clear any selection.
+                            let max = self.doc.text().len();
+                            let offset = offset.min(max);
+                            self.caret = offset;
+                            self.sel_anchor = None;
+                            self.reset_blink();
+                            self.request_redraw();
+                        }
+                    }
+                    _ => {}
+                }
             }
             accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
         }

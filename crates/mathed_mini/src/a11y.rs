@@ -8,11 +8,23 @@
 //! (mapped to an `accesskit::Role`), a human-readable label, and optionally
 //! its source value and bounds.
 
-use accesskit::{Node, NodeId, Rect, Role, Tree, TreeUpdate};
+use accesskit::{Action, Node, NodeId, Rect, Role, Tree, TreeUpdate};
 use mathed_core::accessibility::{AccessNode, AccessRole};
 
 /// A stable root node ID (the document root, not tied to a byte offset).
 const ROOT_ID: u64 = u64::MAX;
+
+/// Extract the document byte offset encoded in a segment node's ID, or `None`
+/// for the root node (which carries no caret target). Segment node IDs are
+/// `NodeId(range.start as u64)` (see [`build_tree_update`]); an `ActionRequest`
+/// targeting such a node carries the byte offset directly. Used by the
+/// `ActionRequested` handler in `app.rs` to place the caret (P5 #27).
+pub fn byte_offset_for_node(id: NodeId) -> Option<usize> {
+    if id.0 == ROOT_ID {
+        return None;
+    }
+    Some(id.0 as usize)
+}
 
 /// Map a semantic `AccessRole` to an AccessKit `Role`.
 fn role_for(role: AccessRole) -> Role {
@@ -64,6 +76,13 @@ pub fn build_tree_update(nodes: &[AccessNode]) -> TreeUpdate {
         a11y_node.set_label(node.label.clone());
         if let Some(value) = &node.value {
             a11y_node.set_value(value.clone());
+        }
+        // Declare the actions an AT can request on this segment. Focus/Click
+        // both place the caret at the segment's byte offset (P5 #27); only
+        // segments with a real byte range are actionable.
+        if node.range.is_some() {
+            a11y_node.add_action(Action::Focus);
+            a11y_node.add_action(Action::Click);
         }
         root.push_child(id);
         all_nodes.push((id, a11y_node));
@@ -138,5 +157,31 @@ mod tests {
             .find(|(id, _)| id.0 == 0)
             .expect("child node");
         assert_eq!(child.1.role(), Role::Group);
+    }
+
+    #[test]
+    fn byte_offset_for_node_round_trips_segment_ids() {
+        // Segment node IDs encode range.start; the root is filtered out.
+        assert_eq!(byte_offset_for_node(NodeId(42)), Some(42));
+        assert_eq!(byte_offset_for_node(NodeId(0)), Some(0));
+        assert_eq!(byte_offset_for_node(NodeId(ROOT_ID)), None);
+    }
+
+    #[test]
+    fn segment_nodes_declare_focus_and_click_actions() {
+        let nodes = vec![AccessNode {
+            role: AccessRole::Probability,
+            label: "prob".into(),
+            value: None,
+            range: Some(5..10),
+        }];
+        let update = build_tree_update(&nodes);
+        let child = update
+            .nodes
+            .iter()
+            .find(|(id, _)| id.0 == 5)
+            .expect("child node");
+        assert!(child.1.supports_action(Action::Focus));
+        assert!(child.1.supports_action(Action::Click));
     }
 }
