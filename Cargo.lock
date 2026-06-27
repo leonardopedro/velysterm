@@ -5714,6 +5714,7 @@ version = "0.1.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
+ "arboard",
  "imaging",
  "imaging_vello_cpu",
  "kernel_client",
