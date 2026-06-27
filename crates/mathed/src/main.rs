@@ -859,6 +859,7 @@ fn sync_blocks(
     time: Res<Time>,
     world: VelystWorld,
     editor: Res<EditorDoc>,
+    kernel_bridge: Res<kernel_sys::KernelBridge>,
     mut state: ResMut<EditorState>,
     mut reveal: ResMut<RevealState>,
     mut scheduler: ResMut<Scheduler>,
@@ -1004,6 +1005,11 @@ fn sync_blocks(
     let sel = state.selection();
     let show_hidden = state.show_hidden;
 
+    // Inline kernel annotations (green `= 0.4231` / red `code_name`) keyed
+    // by each prob's body offset. Computed once per sync pass; the transform
+    // filters to segments within each block's range (P5 #24).
+    let annotations = kernel_bridge.result_annotations();
+
     // --- Per-block transform and eval ---
     for block in blocks.index.blocks.clone() {
         if !dirty_ids.contains(&block.id) {
@@ -1038,6 +1044,7 @@ fn sync_blocks(
         let opts = TransformOptions {
             reveal: block_reveal,
             show_hidden,
+            annotations: annotations.clone(),
             ..Default::default()
         };
 

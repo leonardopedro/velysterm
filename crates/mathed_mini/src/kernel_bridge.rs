@@ -143,8 +143,15 @@ impl KernelBridge {
     /// Re-scan `doc_text` and submit changed `\model`/`\prob` statements to the
     /// worker. Cheap when nothing changed (hash short-circuits). Results arrive
     /// asynchronously — call [`poll`](Self::poll) to collect them.
-    pub fn refresh(&mut self, doc_text: &str) {
+    ///
+    /// Returns `true` if a **synchronous** result was inserted (a dispatch
+    /// error from a bad translator / missing model / unparseable prior or
+    /// solver). Async worker responses are reported by [`poll`](Self::poll).
+    /// A frontend that renders inline annotations should re-transform the
+    /// affected blocks when this returns `true` (or when `poll` does).
+    pub fn refresh(&mut self, doc_text: &str) -> bool {
         let idx = build_index(doc_text);
+        let mut changed = false;
 
         // Models in document order.
         let mut models: Vec<&KernelStatement> = idx
@@ -184,6 +191,7 @@ impl KernelBridge {
                             stmt.span.start,
                             dispatch_error_result(&e),
                         );
+                        changed = true;
                     }
                 },
                 PropKind::Solver => {
@@ -199,6 +207,7 @@ impl KernelBridge {
                                 stmt.span.start,
                                 dispatch_error_result(&e),
                             );
+                            changed = true;
                         }
                     }
                 }
@@ -259,6 +268,7 @@ impl KernelBridge {
                         m.span.start,
                         dispatch_error_result(&e),
                     );
+                    changed = true;
                 }
             }
         }
@@ -315,9 +325,11 @@ impl KernelBridge {
                         stmt.span.start,
                         dispatch_error_result(&e),
                     );
+                    changed = true;
                 }
             }
         }
+        changed
     }
 
     /// Drain completed worker responses into [`results`](Self::results).
@@ -586,6 +598,24 @@ mod tests {
         // new (no panic, no duplicate session churn).
         bridge.refresh(doc);
         assert_eq!(bridge.model_hashes.len(), 1);
+    }
+
+    #[test]
+    fn refresh_reports_sync_dispatch_errors() {
+        // `refresh` returns `true` only when a *synchronous* result is
+        // inserted (a dispatch error); successful submissions go to the
+        // worker and are reported later by `poll`. This lets the Bevy
+        // frontend re-dirty the owning block so the inline `code_name`
+        // annotation renders without waiting for the next doc edit (P5 #24).
+        let mut bridge = KernelBridge::new();
+        // No kernel statements: nothing submitted, no synchronous error.
+        assert!(!bridge.refresh("#1 hello #2"));
+        // A prob whose translator emits invalid EventPredicate JSON inserts
+        // a dispatch error synchronously (see bad_event_translator_surfaces_error).
+        let doc = "#1 a #2 \\model(#1,#2)\n\
+                   #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
+                   #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
+        assert!(bridge.refresh(doc));
     }
 
     #[test]
