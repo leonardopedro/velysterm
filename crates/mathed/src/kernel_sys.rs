@@ -46,6 +46,13 @@ impl KernelBridge {
     pub fn result_annotations(&self) -> HashMap<usize, String> {
         self.inner.result_annotations()
     }
+
+    /// Translator error messages for `TransformOptions::translator_errors`
+    /// (P5 #28): keyed by translator body-start offset, shown in red in the
+    /// expanded panel when a translator fails.
+    pub fn translator_errors(&self) -> &HashMap<usize, String> {
+        self.inner.translator_errors()
+    }
 }
 
 /// On a document change, re-run the bridge: it rebuilds the semantic index,

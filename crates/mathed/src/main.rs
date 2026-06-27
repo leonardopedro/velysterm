@@ -1009,6 +1009,8 @@ fn sync_blocks(
     // by each prob's body offset. Computed once per sync pass; the transform
     // filters to segments within each block's range (P5 #24).
     let annotations = kernel_bridge.result_annotations();
+    // Translator error messages for the expanded panel (P5 #28).
+    let translator_errors = kernel_bridge.translator_errors().clone();
 
     // --- Per-block transform and eval ---
     for block in blocks.index.blocks.clone() {
@@ -1045,6 +1047,7 @@ fn sync_blocks(
             reveal: block_reveal,
             show_hidden,
             annotations: annotations.clone(),
+            translator_errors: translator_errors.clone(),
             ..Default::default()
         };
 
