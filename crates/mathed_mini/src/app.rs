@@ -10,11 +10,12 @@
 //! Typst layout.
 
 use std::num::NonZeroU32;
+use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use mathed_core::MathDoc;
-use mathed_core::glyphs::CaretGeom;
+use mathed_core::glyphs::{CaretGeom, RectF};
 use mathed_core::markers::{resolve_segments, scan};
 use mathed_core::semantics::SemanticIndex;
 use winit::application::ApplicationHandler;
@@ -24,7 +25,7 @@ use winit::event::{
 use winit::event_loop::{
     ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy,
 };
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 /// Caret blink interval (matches terminal convention ~530ms).
@@ -70,6 +71,13 @@ struct App {
     doc: MathDoc,
     /// Caret position as a document byte offset.
     caret: usize,
+    /// Selection anchor (the fixed end); `None` or equal to `caret` means no
+    /// selection. Extended by Shift+click, mouse drag, and Shift+arrows (P5 #25).
+    sel_anchor: Option<usize>,
+    /// `true` while the left mouse button is held (drag-select).
+    mouse_down: bool,
+    /// Current keyboard modifiers (Shift/Ctrl) — updated on ModifiersChanged.
+    mods: ModifiersState,
     /// Cached laid-out page; `None` until first render or after invalidation.
     layout: Option<DocLayout>,
     /// Width (px) the cached layout was laid out at.
@@ -103,6 +111,9 @@ impl App {
             surface: None,
             doc,
             caret,
+            sel_anchor: None,
+            mouse_down: false,
+            mods: ModifiersState::empty(),
             layout: None,
             layout_width: 0,
             layout_panel: None,
@@ -166,17 +177,151 @@ impl App {
         }
     }
 
-    /// Insert text at the caret and advance the caret past it.
+    /// The selected range, ordered, when the anchor differs from the caret.
+    fn selection(&self) -> Option<Range<usize>> {
+        selection_range(self.sel_anchor, self.caret)
+    }
+
+    /// Delete the selected text (if any), collapsing the caret to the
+    /// selection start. Returns `true` if a selection was deleted. Used by
+    /// Backspace/Delete/typing/Paste to replace the selection.
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection() else {
+            return false;
+        };
+        self.doc.delete(range.clone());
+        self.caret = range.start;
+        self.sel_anchor = None;
+        self.invalidate();
+        self.refresh_kernel();
+        self.reset_blink();
+        true
+    }
+
+    /// Ensure a selection anchor exists at the current caret before an extend
+    /// operation (Shift+click/drag/arrow). No-op if already anchored.
+    fn ensure_anchor(&mut self) {
+        if self.sel_anchor.is_none() {
+            self.sel_anchor = Some(self.caret);
+        }
+    }
+
+    /// Convert the last cursor position to a byte offset and place the caret
+    /// there. When `extend`, keep (or start) a selection anchor; otherwise
+    /// seed the anchor at the click point (empty until a drag extends it).
+    fn place_caret_from_cursor(&mut self, extend: bool) {
+        let Some((x, y)) = self.cursor_pos else {
+            return;
+        };
+        let byte = {
+            let Some(layout) = &self.layout else {
+                return;
+            };
+            layout
+                .glyphs
+                .byte_for_point(mathed_core::glyphs::V2::new(
+                    x as f32, y as f32,
+                ))
+                .map(|(b, _)| b)
+        };
+        let Some(byte) = byte else {
+            return;
+        };
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = Some(byte);
+        }
+        self.caret = byte;
+        self.reset_blink();
+        self.request_redraw();
+    }
+
+    /// Copy the selected source text to the system clipboard (P5 #25).
+    fn copy_selection(&mut self) {
+        let Some(range) = self.selection() else {
+            return;
+        };
+        let text = self.doc.text()[range].to_string();
+        if !text.is_empty()
+            && let Ok(mut cb) = arboard::Clipboard::new()
+        {
+            let _ = cb.set_text(text);
+        }
+    }
+
+    /// Paste clipboard text at the caret, replacing any selection (P5 #25).
+    fn paste(&mut self) {
+        let text = arboard::Clipboard::new()
+            .ok()
+            .and_then(|mut cb| cb.get_text().ok());
+        if let Some(text) = text {
+            self.insert(&text);
+        }
+    }
+
+    /// Select the entire document (P5 #25, Ctrl+A).
+    fn select_all(&mut self) {
+        if self.doc.is_empty() {
+            return;
+        }
+        self.caret = self.doc.len();
+        self.sel_anchor = Some(0);
+        self.reset_blink();
+    }
+
+    /// Handle a Ctrl-modified key (copy / paste / cut / select-all). Returns
+    /// `true` if the key was a recognized shortcut so the caller skips the
+    /// normal text-insert path.
+    fn handle_ctrl_shortcut(&mut self, key: &Key) -> bool {
+        let Key::Character(ch) = key else {
+            return false;
+        };
+        match ch.as_str() {
+            "c" | "C" => {
+                self.copy_selection();
+                true
+            }
+            "v" | "V" => {
+                self.paste();
+                self.request_redraw();
+                self.push_a11y_update();
+                true
+            }
+            "x" | "X" => {
+                self.copy_selection();
+                self.delete_selection();
+                self.request_redraw();
+                self.push_a11y_update();
+                true
+            }
+            "a" | "A" => {
+                self.select_all();
+                self.request_redraw();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Insert text at the caret and advance the caret past it. Replaces any
+    /// active selection first.
     fn insert(&mut self, s: &str) {
+        self.delete_selection();
         self.doc.insert(self.caret, s);
         self.caret += s.len();
+        self.sel_anchor = None;
         self.invalidate();
         self.refresh_kernel();
         self.reset_blink();
     }
 
-    /// Delete the character before the caret (Backspace).
+    /// Delete the character before the caret (Backspace), or the whole
+    /// selection if one is active.
     fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.caret == 0 {
             return;
         }
@@ -188,8 +333,12 @@ impl App {
         self.reset_blink();
     }
 
-    /// Delete the character after the caret (Delete).
+    /// Delete the character after the caret (Delete), or the whole
+    /// selection if one is active.
     fn delete_forward(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         let text = self.doc.text();
         if self.caret >= text.len() {
             return;
@@ -201,28 +350,44 @@ impl App {
         self.reset_blink();
     }
 
-    /// Move the caret one character left (no relayout).
-    fn move_left(&mut self) {
+    /// Move the caret one character left (no relayout). When `extend`, keep
+    /// (or start) a selection anchor so the move extends the selection.
+    fn move_left(&mut self, extend: bool) {
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = None;
+        }
         if self.caret > 0 {
             self.caret =
                 prev_char_boundary(self.doc.text(), self.caret);
-            self.reset_blink();
-            self.request_redraw();
         }
+        self.reset_blink();
+        self.request_redraw();
     }
 
     /// Move the caret one character right (no relayout).
-    fn move_right(&mut self) {
+    fn move_right(&mut self, extend: bool) {
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = None;
+        }
         let text = self.doc.text();
         if self.caret < text.len() {
             self.caret = next_char_boundary(text, self.caret);
-            self.reset_blink();
-            self.request_redraw();
         }
+        self.reset_blink();
+        self.request_redraw();
     }
 
     /// Move to the start of the current line.
-    fn move_home(&mut self) {
+    fn move_home(&mut self, extend: bool) {
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = None;
+        }
         let text = self.doc.text();
         self.caret =
             text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
@@ -231,7 +396,12 @@ impl App {
     }
 
     /// Move to the end of the current line.
-    fn move_end(&mut self) {
+    fn move_end(&mut self, extend: bool) {
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = None;
+        }
         let text = self.doc.text();
         self.caret = text[self.caret..]
             .find('\n')
@@ -243,7 +413,12 @@ impl App {
     /// Move the caret up one visual line (no relayout). Sticks to the
     /// caret's current x; falls back to the line start when there is
     /// no layout or the target is off-page.
-    fn move_up(&mut self) {
+    fn move_up(&mut self, extend: bool) {
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = None;
+        }
         if let Some(layout) = &self.layout
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
             && bi > 0
@@ -265,7 +440,12 @@ impl App {
     }
 
     /// Move the caret down one visual line (no relayout).
-    fn move_down(&mut self) {
+    fn move_down(&mut self, extend: bool) {
+        if extend {
+            self.ensure_anchor();
+        } else {
+            self.sel_anchor = None;
+        }
         if let Some(layout) = &self.layout
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
             && bi + 1 < layout.glyphs.bands.len()
@@ -323,6 +503,10 @@ impl App {
             self.layout_panel = panel;
         }
 
+        // Compute the selection up-front (owned) so it doesn't alias the
+        // mutable `surface` borrow below.
+        let sel = self.selection();
+
         let Some(surface) = self.surface.as_mut() else {
             return;
         };
@@ -339,6 +523,10 @@ impl App {
 
         if let Some(layout) = &self.layout {
             blit_over_white(&mut buffer, win_w, win_h, &layout.image);
+            if let Some(sel) = sel {
+                let rects = layout.glyphs.rects_for_range(sel);
+                draw_selection(&mut buffer, win_w, win_h, &rects);
+            }
             if self.caret_visible
                 && let Some(geom) =
                     layout.glyphs.caret_for_byte(self.caret)
@@ -387,7 +575,59 @@ fn draw_caret(
     }
 }
 
-/// Alpha-composite an unpremultiplied RGBA8 image over the white buffer,
+/// Alpha-composite a translucent selection highlight over the buffer for each
+/// rect (frame pt == px at scale 1). Drawn over the rendered doc, under the
+/// caret (P5 #25).
+fn draw_selection(
+    buffer: &mut [u32],
+    win_w: usize,
+    win_h: usize,
+    rects: &[RectF],
+) {
+    const SEL_RGB: (u32, u32, u32) = (0x33, 0x66, 0xFF); // blue
+    const SEL_A: u32 = 0x66; // ~40% alpha
+    let inv = 255 - SEL_A;
+    for r in rects {
+        let x0 = r.x0.round().max(0.0) as usize;
+        let y0 = r.y0.round().max(0.0) as usize;
+        let x1 = (r.x1.round() as usize).min(win_w);
+        let y1 = (r.y1.round() as usize).min(win_h);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            let row = y * win_w;
+            for px in &mut buffer[row + x0..row + x1] {
+                let pr = (*px >> 16) & 0xFF;
+                let pg = (*px >> 8) & 0xFF;
+                let pb = *px & 0xFF;
+                let cr = (SEL_RGB.0 * SEL_A + pr * inv) / 255;
+                let cg = (SEL_RGB.1 * SEL_A + pg * inv) / 255;
+                let cb = (SEL_RGB.2 * SEL_A + pb * inv) / 255;
+                *px = (cr << 16) | (cg << 8) | cb;
+            }
+        }
+    }
+}
+
+/// Ordered selection range from an anchor and caret, or `None` when empty
+/// (anchor absent, or equal to the caret). Pure helper so the selection
+/// maths is unit-testable independent of the winit/softbuffer `App` state.
+fn selection_range(
+    anchor: Option<usize>,
+    caret: usize,
+) -> Option<Range<usize>> {
+    let a = anchor?;
+    if a == caret {
+        return None;
+    }
+    if a < caret {
+        Some(a..caret)
+    } else {
+        Some(caret..a)
+    }
+}
+
 /// clipped to the window. softbuffer pixels are `0x00RRGGBB`.
 fn blit_over_white(
     buffer: &mut [u32],
@@ -522,26 +762,32 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => self.request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Some((position.x, position.y));
+                // Drag-select: extend the selection while the button is held.
+                if self.mouse_down {
+                    self.place_caret_from_cursor(true);
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some((x, y)) = self.cursor_pos
-                    && let Some(layout) = &self.layout
-                    && let Some((byte, _)) = layout
-                        .glyphs
-                        .byte_for_point(mathed_core::glyphs::V2::new(
-                            x as f32, y as f32,
-                        ))
-                {
-                    self.caret = byte;
-                    self.reset_blink();
-                    self.request_redraw();
-                }
+                self.mouse_down = true;
+                // Shift+click extends the selection; plain click seeds a fresh
+                // anchor at the click point (empty until a drag extends it).
+                self.place_caret_from_cursor(self.mods.shift_key());
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.mouse_down = false;
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -552,44 +798,63 @@ impl ApplicationHandler<UserEvent> for App {
                         ..
                     },
                 ..
-            } => match logical_key {
-                Key::Named(NamedKey::Escape) => event_loop.exit(),
-                Key::Named(NamedKey::Backspace) => {
-                    self.backspace();
-                    self.request_redraw();
-                    self.push_a11y_update();
+            } => {
+                // Ctrl-key shortcuts: copy / paste / cut / select-all (P5 #25).
+                if self.mods.control_key()
+                    && self.handle_ctrl_shortcut(&logical_key)
+                {
+                    return;
                 }
-                Key::Named(NamedKey::Delete) => {
-                    self.delete_forward();
-                    self.request_redraw();
-                    self.push_a11y_update();
-                }
-                Key::Named(NamedKey::Enter) => {
-                    self.insert("\n");
-                    self.request_redraw();
-                    self.push_a11y_update();
-                }
-                Key::Named(NamedKey::Space) => {
-                    self.insert(" ");
-                    self.request_redraw();
-                    self.push_a11y_update();
-                }
-                Key::Named(NamedKey::ArrowLeft) => self.move_left(),
-                Key::Named(NamedKey::ArrowRight) => self.move_right(),
-                Key::Named(NamedKey::ArrowUp) => self.move_up(),
-                Key::Named(NamedKey::ArrowDown) => self.move_down(),
-                Key::Named(NamedKey::Home) => self.move_home(),
-                Key::Named(NamedKey::End) => self.move_end(),
-                _ => {
-                    if let Some(t) = &text
-                        && !t.is_empty()
-                    {
-                        self.insert(t);
+                let shift = self.mods.shift_key();
+                match logical_key {
+                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Backspace) => {
+                        self.backspace();
                         self.request_redraw();
                         self.push_a11y_update();
                     }
+                    Key::Named(NamedKey::Delete) => {
+                        self.delete_forward();
+                        self.request_redraw();
+                        self.push_a11y_update();
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.insert("\n");
+                        self.request_redraw();
+                        self.push_a11y_update();
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        self.insert(" ");
+                        self.request_redraw();
+                        self.push_a11y_update();
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.move_left(shift)
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        self.move_right(shift)
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.move_up(shift)
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.move_down(shift)
+                    }
+                    Key::Named(NamedKey::Home) => {
+                        self.move_home(shift)
+                    }
+                    Key::Named(NamedKey::End) => self.move_end(shift),
+                    _ => {
+                        if let Some(t) = &text
+                            && !t.is_empty()
+                        {
+                            self.insert(t);
+                            self.request_redraw();
+                            self.push_a11y_update();
+                        }
+                    }
                 }
-            },
+            }
             _ => {}
         }
     }
@@ -611,5 +876,33 @@ impl ApplicationHandler<UserEvent> for App {
             }
             accesskit_winit::WindowEvent::AccessibilityDeactivated => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_range;
+
+    #[test]
+    fn selection_range_none_when_no_anchor() {
+        assert_eq!(selection_range(None, 5), None);
+    }
+
+    #[test]
+    fn selection_range_none_when_anchor_equals_caret() {
+        // A click that didn't drag leaves anchor == caret (empty).
+        assert_eq!(selection_range(Some(5), 5), None);
+    }
+
+    #[test]
+    fn selection_range_ordered_forward() {
+        // Drag right: anchor (click point) < caret (drag end).
+        assert_eq!(selection_range(Some(3), 10), Some(3..10));
+    }
+
+    #[test]
+    fn selection_range_ordered_backward() {
+        // Drag left / shift+arrow left: anchor > caret.
+        assert_eq!(selection_range(Some(10), 3), Some(3..10));
     }
 }
