@@ -6,7 +6,7 @@
 //! ```
 //! Each response is a single JSON object on stdout:
 //! ```json
-//! {"id":"1","ok":true,"result":{"version":"0.1.0"}}
+//! {"id":"1","ok":true,"result":{"version":"0.1.0"},"timing_ms":0}
 //! ```
 //!
 //! Ops:
@@ -17,15 +17,20 @@
 //! - `condition` — condition on an event predicate; returns prior P(e).
 //! - `probability` — query P(event) for a model.
 //! - `snapshot` — return top-k state components.
+//! - `save_session` — serialize the full session state to a JSON blob.
+//! - `restore_session` — create a new model from a saved blob; returns model_id.
 //! - `list_codes` — dump all UK-#### codes for self-documentation.
 //!
 //! Unknown ops return `ok:false` with code UK-1001 and a `ReplaceValue`
 //! hint listing the valid op names.
+//!
+//! All responses include `timing_ms` (wall-clock ms for the op).
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::time::Instant;
 
-use prob_kernel::Session;
+use prob_kernel::{Session, SessionBlob};
 use unfer_protocol::{
     AgentRequest, AgentResponse, Code, Diagnostic, EventPredicate,
     HintKind, ModelSpec, PriorSpec, RepairHint, Severity, codes,
@@ -40,6 +45,8 @@ const VALID_OPS: &[&str] = &[
     "condition",
     "probability",
     "snapshot",
+    "save_session",
+    "restore_session",
     "list_codes",
 ];
 
@@ -78,6 +85,13 @@ impl AgentState {
     }
 
     fn handle(&mut self, req: &AgentRequest) -> AgentResponse {
+        let t0 = Instant::now();
+        let resp = self.dispatch(req);
+        let ms = t0.elapsed().as_millis() as u64;
+        resp.with_timing(ms)
+    }
+
+    fn dispatch(&mut self, req: &AgentRequest) -> AgentResponse {
         match req.op.as_str() {
             "version" => AgentResponse::ok(
                 &req.id,
@@ -258,6 +272,50 @@ impl AgentState {
                     ),
                 }
             }
+            "save_session" => {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
+                    Some(id) => id,
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing or non-integer 'model_id' field"),
+                    ),
+                };
+                match self.sessions.get(&model_id) {
+                    Some(session) => {
+                        let blob = session.save();
+                        match serde_json::to_value(blob) {
+                            Ok(v) => AgentResponse::ok(&req.id, v),
+                            Err(e) => AgentResponse::err(
+                                &req.id,
+                                Diagnostic::new(
+                                    Code::INTERNAL,
+                                    format!("serialization failed: {e}"),
+                                    Severity::Error,
+                                ),
+                            ),
+                        }
+                    }
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
+                }
+            }
+            "restore_session" => {
+                let blob: SessionBlob = match serde_json::from_value(req.params.clone()) {
+                    Ok(b) => b,
+                    Err(e) => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid SessionBlob: {e}")),
+                    ),
+                };
+                match Session::restore(blob) {
+                    Ok(session) => {
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        self.sessions.insert(id, session);
+                        AgentResponse::ok(&req.id, serde_json::json!({ "model_id": id }))
+                    }
+                    Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                }
+            }
             _ => {
                 AgentResponse::err(&req.id, unknown_op_diag(&req.op))
             }
@@ -389,5 +447,62 @@ mod tests {
         assert!(!resp.ok);
         let diag = resp.error.unwrap();
         assert_eq!(diag.code, Code::BAD_HANDLE);
+    }
+
+    #[test]
+    fn response_includes_timing_ms() {
+        let mut state = AgentState::new();
+        let req = AgentRequest::new("5", "version", serde_json::json!({}));
+        let resp = state.handle(&req);
+        assert!(resp.ok);
+        assert!(resp.timing_ms.is_some());
+    }
+
+    #[test]
+    fn save_and_restore_session_roundtrip() {
+        let mut state = AgentState::new();
+
+        // Create a harmonic_chain model.
+        let create = AgentRequest::new(
+            "10",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        );
+        let create_resp = state.handle(&create);
+        assert!(create_resp.ok, "{:?}", create_resp.error);
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+
+        // Save the session.
+        let save = AgentRequest::new(
+            "11",
+            "save_session",
+            serde_json::json!({"model_id": model_id}),
+        );
+        let save_resp = state.handle(&save);
+        assert!(save_resp.ok, "{:?}", save_resp.error);
+        let blob_value = save_resp.result.unwrap();
+
+        // Restore into a new model id.
+        let restore = AgentRequest::new("12", "restore_session", blob_value);
+        let restore_resp = state.handle(&restore);
+        assert!(restore_resp.ok, "{:?}", restore_resp.error);
+        let new_model_id = restore_resp.result.unwrap()["model_id"].as_u64().unwrap();
+        assert_ne!(new_model_id, model_id);
+
+        // Query probability on restored model — should work without error.
+        let prob = AgentRequest::new(
+            "13",
+            "probability",
+            serde_json::json!({"model_id": new_model_id, "event": {"kind": "vacuum"}}),
+        );
+        let prob_resp = state.handle(&prob);
+        assert!(prob_resp.ok, "{:?}", prob_resp.error);
+        let p = prob_resp.result.unwrap()["probability"].as_f64().unwrap();
+        // Vacuum-started state at t=0 should be entirely in the vacuum sector.
+        assert!((p - 1.0).abs() < 1e-6, "expected p≈1.0, got {p}");
     }
 }
