@@ -26,7 +26,7 @@
 //!
 //! All responses include `timing_ms` (wall-clock ms for the op).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
@@ -47,6 +47,7 @@ const VALID_OPS: &[&str] = &[
     "snapshot",
     "save_session",
     "restore_session",
+    "poll_events",
     "list_codes",
 ];
 
@@ -71,8 +72,12 @@ fn bad_json_diag(msg: &str) -> Diagnostic {
     )
 }
 
+const EVENT_QUEUE_CAPACITY: usize = 64;
+
 struct AgentState {
     sessions: HashMap<u64, Session>,
+    /// Per-model event queue; bounded to EVENT_QUEUE_CAPACITY.
+    events: HashMap<u64, VecDeque<serde_json::Value>>,
     next_id: u64,
 }
 
@@ -80,8 +85,24 @@ impl AgentState {
     fn new() -> Self {
         Self {
             sessions: HashMap::new(),
+            events: HashMap::new(),
             next_id: 1,
         }
+    }
+
+    fn push_event(&mut self, model_id: u64, event: serde_json::Value) {
+        let q = self.events.entry(model_id).or_default();
+        if q.len() >= EVENT_QUEUE_CAPACITY {
+            q.pop_front();
+        }
+        q.push_back(event);
+    }
+
+    fn drain_events(&mut self, model_id: u64) -> Vec<serde_json::Value> {
+        self.events
+            .get_mut(&model_id)
+            .map(|q| q.drain(..).collect())
+            .unwrap_or_default()
     }
 
     fn handle(&mut self, req: &AgentRequest) -> AgentResponse {
@@ -152,10 +173,16 @@ impl AgentState {
                 match self.sessions.get_mut(&model_id) {
                     Some(session) => {
                         match session.set_prior(&prior) {
-                            Ok(_) => AgentResponse::ok(
-                                &req.id,
-                                serde_json::json!({ "ok": true }),
-                            ),
+                            Ok(_) => {
+                                self.push_event(
+                                    model_id,
+                                    serde_json::json!({"type": "prior_set"}),
+                                );
+                                AgentResponse::ok(
+                                    &req.id,
+                                    serde_json::json!({ "ok": true }),
+                                )
+                            }
                             Err(e) => AgentResponse::err(
                                 &req.id,
                                 e.to_diagnostic(),
@@ -178,10 +205,22 @@ impl AgentState {
                 };
                 match self.sessions.get_mut(&model_id) {
                     Some(session) => match session.evolve(t) {
-                        Ok(report) => AgentResponse::ok(
-                            &req.id,
-                            serde_json::to_value(report).unwrap(),
-                        ),
+                        Ok(report) => {
+                            self.push_event(
+                                model_id,
+                                serde_json::json!({
+                                    "type": "evolved",
+                                    "t": report.t,
+                                    "norm": report.norm,
+                                    "components": report.components,
+                                    "solve_ms": report.solve_ms,
+                                }),
+                            );
+                            AgentResponse::ok(
+                                &req.id,
+                                serde_json::to_value(report).unwrap(),
+                            )
+                        }
                         Err(e) => AgentResponse::err(
                             &req.id,
                             e.to_diagnostic(),
@@ -233,10 +272,19 @@ impl AgentState {
                 match self.sessions.get_mut(&model_id) {
                     Some(session) => {
                         match session.condition(&event) {
-                            Ok(p) => AgentResponse::ok(
-                                &req.id,
-                                serde_json::json!({ "prior_probability": p }),
-                            ),
+                            Ok(p) => {
+                                self.push_event(
+                                    model_id,
+                                    serde_json::json!({
+                                        "type": "conditioned",
+                                        "prior_probability": p,
+                                    }),
+                                );
+                                AgentResponse::ok(
+                                    &req.id,
+                                    serde_json::json!({ "prior_probability": p }),
+                                )
+                            }
                             Err(e) => AgentResponse::err(
                                 &req.id,
                                 e.to_diagnostic(),
@@ -271,6 +319,20 @@ impl AgentState {
                         bad_handle_diag(model_id),
                     ),
                 }
+            }
+            "poll_events" => {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
+                    Some(id) => id,
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing or non-integer 'model_id' field"),
+                    ),
+                };
+                if !self.sessions.contains_key(&model_id) {
+                    return AgentResponse::err(&req.id, bad_handle_diag(model_id));
+                }
+                let events = self.drain_events(model_id);
+                AgentResponse::ok(&req.id, serde_json::json!({ "events": events }))
             }
             "save_session" => {
                 let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
@@ -456,6 +518,59 @@ mod tests {
         let resp = state.handle(&req);
         assert!(resp.ok);
         assert!(resp.timing_ms.is_some());
+    }
+
+    #[test]
+    fn poll_events_after_evolve() {
+        let mut state = AgentState::new();
+
+        // Create model.
+        let create = AgentRequest::new(
+            "20",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        );
+        let model_id = state.handle(&create).result.unwrap()["model_id"].as_u64().unwrap();
+
+        // No events yet.
+        let poll0 = state.handle(&AgentRequest::new(
+            "21",
+            "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert!(poll0.ok);
+        assert_eq!(poll0.result.unwrap()["events"].as_array().unwrap().len(), 0);
+
+        // Evolve → event.
+        state.handle(&AgentRequest::new(
+            "22",
+            "evolve",
+            serde_json::json!({"model_id": model_id, "t": 0.01}),
+        ));
+
+        let poll1 = state.handle(&AgentRequest::new(
+            "23",
+            "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert!(poll1.ok);
+        let events = poll1.result.unwrap();
+        let arr = events["events"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "evolved");
+        assert!(arr[0]["t"].as_f64().unwrap() > 0.0);
+
+        // Queue drained — next poll is empty.
+        let poll2 = state.handle(&AgentRequest::new(
+            "24",
+            "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert_eq!(poll2.result.unwrap()["events"].as_array().unwrap().len(), 0);
     }
 
     #[test]
