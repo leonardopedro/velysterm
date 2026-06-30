@@ -6,18 +6,19 @@
 //! in-memory [`Source`], and there is no package/file I/O — imports are
 //! intentionally unsupported in this minimal frontend.
 
-use typst::comemo::{Constraint, Track};
+use typst::comemo::Track;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
-    Bytes, Content, Datetime, StyleChain, Value,
+    Bytes, Content, Datetime, Duration, StyleChain, Value,
 };
-use typst::introspection::{Introspector, Locator};
+use typst::introspection::{EmptyIntrospector, Locator};
 use typst::layout::{Frame, Region};
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
+use typst::utils::{LazyHash, Protected};
 use typst::{Library, LibraryExt, World};
+use typst_layout::layout_frame as typst_layout_frame;
 
 /// Load every font embedded in `typst-assets` into a book + slot list.
 fn load_fonts() -> (FontBook, Vec<Font>) {
@@ -69,8 +70,8 @@ impl MiniWorld {
         let world: &dyn World = self;
         let mut sink = Sink::new();
         let module = typst_eval::eval(
-            &typst::ROUTINES,
             world.track(),
+            world.library(),
             Traced::default().track(),
             sink.track_mut(),
             Route::default().track(),
@@ -101,8 +102,8 @@ impl MiniWorld {
         let world: &dyn World = self;
         let mut sink = Sink::new();
         let module = typst_eval::eval(
-            &typst::ROUTINES,
             world.track(),
+            world.library(),
             Traced::default().track(),
             sink.track_mut(),
             Route::default().track(),
@@ -126,22 +127,21 @@ impl MiniWorld {
     ) -> Option<Frame> {
         let world: &dyn World = self;
         let styles = StyleChain::new(&world.library().styles);
-        let introspector = Introspector::default();
-        let constraint = Constraint::default();
+        let introspector = EmptyIntrospector;
         let traced = Traced::default();
         let mut sink = Sink::new();
 
         let mut engine = Engine {
-            routines: &typst::ROUTINES,
             world: world.track(),
-            introspector: introspector.track_with(&constraint),
+            library: world.library(),
+            introspector: Protected::new(introspector.track()),
             traced: traced.track(),
             sink: sink.track_mut(),
             route: Route::default(),
         };
         let locator = Locator::root();
 
-        match (typst::ROUTINES.layout_frame)(
+        match typst_layout_frame(
             &mut engine,
             content,
             locator,
@@ -193,7 +193,7 @@ impl World for MiniWorld {
         self.fonts.get(index).cloned()
     }
 
-    fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
+    fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
         None
     }
 }

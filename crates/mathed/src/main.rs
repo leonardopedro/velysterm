@@ -41,7 +41,7 @@ use mathed_core::{
     to_render_text_range,
 };
 use velyst::prelude::*;
-use velyst::typst::syntax::{FileId, Source, VirtualPath};
+use velyst::typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 
 use blocks_view::{BlockView, Blocks, EditorRoot, PRELUDE};
 use glyphs::GlyphIndex;
@@ -917,13 +917,14 @@ fn sync_blocks(
 
         for (id, _range) in to_spawn {
             let source = Source::new(
-                FileId::new(
-                    None,
+                FileId::new(RootedPath::new(
+                    VirtualRoot::Project,
                     VirtualPath::new(format!(
                         "/__block_{}.typ",
                         id.0
-                    )),
-                ),
+                    ))
+                    .expect("block virtual path is valid"),
+                )),
                 String::new(),
             );
             let entity = commands

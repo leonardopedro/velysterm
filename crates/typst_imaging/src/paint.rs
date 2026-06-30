@@ -1,7 +1,8 @@
 use std::f32::consts::TAU;
 
-use peniko::kurbo::Affine;
-use peniko::{Brush, Color, GradientKind};
+use imaging::peniko::kurbo::Affine;
+use imaging::peniko::{Brush, Color, GradientKind};
+use imaging::{kurbo, peniko};
 use typst_library::layout::{Abs, Quadrant, Size};
 use typst_library::visualize as viz;
 
@@ -12,15 +13,15 @@ pub fn convert_color(color: &viz::Color) -> Color {
     Color::from_rgba8(r, g, b, a)
 }
 
-/// Convert a typst [`viz::Paint`] to a [`peniko::Brush`] for a
-/// [`viz::Shape`] fill and stroke.
-pub(crate) fn shape_paint(
+/// Convert a typst [`viz::Paint`] to a [`Brush`] for a [`viz::Shape`]
+/// fill and stroke.
+pub fn shape_paint(
     paint: &viz::Paint,
     shape: &viz::Shape,
     state: &RenderState,
 ) -> (Brush, Option<Affine>) {
     let shape_size =
-        shape.geometry.bbox_size().max(Size::splat(Abs::pt(1.0)));
+        shape.bbox(true).size().max(Size::splat(Abs::pt(1.0)));
 
     let brush_transform = match paint {
         viz::Paint::Gradient(gradient) => {
@@ -32,10 +33,11 @@ pub(crate) fn shape_paint(
                         shape_size.y.to_pt(),
                     ))
                 }
-                // Gradient maps unit square -> container size (pt), then
-                // container transform moves it into canvas space. The inverse
-                // is passed as brush_transform so vello un-applies it during
-                // sampling.
+                // Gradient maps unit square -> container size (pt),
+                // then container transform moves it
+                // into canvas space. The inverse
+                // is passed as brush_transform so vello un-applies it
+                // during sampling.
                 viz::RelativeTo::Parent => {
                     let inv = state.container_transform.inverse();
                     Some(
@@ -47,10 +49,11 @@ pub(crate) fn shape_paint(
                 }
             };
 
-            // Rotate brush for conic angle, around the gradient center.
+            // Rotate brush for conic angle, around the gradient
+            // center.
             if let viz::Gradient::Conic(conic) = gradient {
                 let rad = conic.angle.to_rad();
-                let center = peniko::kurbo::Vec2::new(
+                let center = kurbo::Vec2::new(
                     conic.center.x.get(),
                     conic.center.y.get(),
                 );
@@ -95,7 +98,7 @@ pub(crate) fn shape_paint(
 /// Convert a typst [`viz::Paint`] to a [`peniko ::Brush`] for a
 /// text glyph run, baking the brush transform directly into gradient
 /// control points.
-pub(crate) fn text_paint(
+pub fn text_paint(
     paint: &viz::Paint,
     state: &RenderState,
     last_glyph_x: f64,
@@ -104,12 +107,13 @@ pub(crate) fn text_paint(
 
     // TODO(nixon): Glyph runs does not support brush transform right
     // now. So we have to apply the transform on our own.
-    if let peniko::Brush::Gradient(gradient) = &mut brush {
+    if let Brush::Gradient(gradient) = &mut brush {
         let w = state.container_size.x.to_pt();
         let h = state.container_size.y.to_pt();
 
         // The brush lives in the last glyph's actual transform space,
-        // which includes vello's internal Y-flip matrix [1, 0, 0, -1].
+        // which includes vello's internal Y-flip matrix [1, 0, 0,
+        // -1].
         //
         // Factor that in so the brush correctly maps gradient unit to
         // container canvas space without needing glyph_transform to
@@ -138,7 +142,10 @@ pub fn build_brush(paint: &viz::Paint, size: Size) -> Brush {
                 .iter()
                 .map(|(color, ratio)| peniko::ColorStop {
                     offset: ratio.get() as f32,
-                    color: convert_color(color).into(),
+                    color: convert_color(&color.to_process_space(
+                        viz::ProcessColorSpace::Srgb,
+                    ))
+                    .into(),
                 })
                 .collect();
 

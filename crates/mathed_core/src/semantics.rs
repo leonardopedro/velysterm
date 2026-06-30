@@ -124,7 +124,7 @@ impl SemanticIndex {
                 if node.kind() == SyntaxKind::MathIdent
                     || (node.kind() == SyntaxKind::MathText
                         && node
-                            .text()
+                            .leaf_text()
                             .chars()
                             .all(|c| c.is_alphanumeric() || c == '_'))
                 {
@@ -136,7 +136,7 @@ impl SemanticIndex {
                     if doc_start < doc_end {
                         occurrences.push(Occurrence {
                             range: doc_start..doc_end,
-                            name: node.text().to_string(),
+                            name: node.leaf_text().to_string(),
                             resolved: None,
                         });
                     }

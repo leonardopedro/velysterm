@@ -1,6 +1,6 @@
 use typst::diag::EcoString;
 use typst::foundations::{
-    self, Content, Derived, Label, OneOrMultiple, Packed,
+    self, BundlePath, Content, Derived, Label, OneOrMultiple, Packed,
 };
 use typst::loading::{DataSource, Loaded};
 use typst::syntax::Spanned;
@@ -51,11 +51,14 @@ macro_rules! sequence {
 /// ```
 /// use typst_element::prelude::*;
 /// let vals = values!(1, false, 0.6);
-/// assert_eq!(vals, [
-///     foundations::Value::Int(1),
-///     foundations::Value::Bool(false),
-///     foundations::Value::Float(0.6),
-/// ]);
+/// assert_eq!(
+///     vals,
+///     [
+///         foundations::Value::Int(1),
+///         foundations::Value::Bool(false),
+///         foundations::Value::Float(0.6),
+///     ]
+/// );
 /// ```
 #[macro_export]
 macro_rules! values {
@@ -70,12 +73,16 @@ macro_rules! values {
 /// # Example
 /// ```
 /// use typst_element::prelude::*;
-/// let vals = named_values!(["arg0", 1], ["arg1", false], ["arg2", 0.6]);
-/// assert_eq!(vals, [
-///     ("arg0", foundations::Value::Int(1)),
-///     ("arg1", foundations::Value::Bool(false)),
-///     ("arg2", foundations::Value::Float(0.6)),
-/// ]);
+/// let vals =
+///     named_values!(["arg0", 1], ["arg1", false], ["arg2", 0.6]);
+/// assert_eq!(
+///     vals,
+///     [
+///         ("arg0", foundations::Value::Int(1)),
+///         ("arg1", foundations::Value::Bool(false)),
+///         ("arg2", foundations::Value::Float(0.6)),
+///     ]
+/// );
 /// ```
 #[macro_export]
 macro_rules! named_values {
@@ -86,12 +93,12 @@ macro_rules! named_values {
 
 // fn test(func: foundations::Func) {
 //     let var_str = String::from("var_arg_name");
-//     let array = foundations::Array::from(values!(10, "st", false).as_slice());
-//     let content = func
+//     let array = foundations::Array::from(values!(10, "st",
+// false).as_slice());     let content = func
 //         .call_with_named(
 //             &values!(10, "st", 2.5),
-//             &named_values!(["name0", 10], [&var_str, "st"], ["", 2.5]),
-//         )
+//             &named_values!(["name0", 10], [&var_str, "st"], ["",
+// 2.5]),         )
 //         .pack();
 // }
 
@@ -172,7 +179,7 @@ fn_elem!(rotate, layout::RotateElem);
 fn_elem!(hide, layout::HideElem);
 
 // Model
-fn_elem_empty!(doc, model::DocumentElem);
+fn_elem!(doc, model::DocumentElem, path = BundlePath, body = Content);
 fn_elem!(reference, model::RefElem, Label);
 fn_elem!(
     link,
@@ -267,7 +274,7 @@ fn_elem!(
     visualize::PolygonElem,
     Vec<layout::Axes<layout::Rel<layout::Length>>>
 );
-fn_elem!(path, visualize::PathElem, Vec<visualize::PathVertex>);
+fn_elem!(path, visualize::CurveElem, Vec<visualize::CurveComponent>);
 
 /// [visualize::Paint::Solid]
 pub fn solid(color: impl Into<visualize::Color>) -> visualize::Paint {

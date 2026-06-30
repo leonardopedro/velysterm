@@ -23,12 +23,13 @@ kernel_client = { path = "../kernel_client" }
 typst = { workspace = true }
 typst-library = { workspace = true }
 typst-eval = { workspace = true }
+typst-layout = { workspace = true }
 typst-assets = { workspace = true, features = ["fonts"] }
 
 # CPU rasterizer (software vello) + the shared RGBA8 image type. No GPU, so the
 # renderer runs on constrained hardware.
 imaging = { workspace = true, features = ["std"] }
-imaging_vello_cpu = { git = "https://github.com/forest-rs/imaging", rev = "79f02ae", features = ["std"] }
+imaging_vello_cpu = { version = "0.0.2", features = ["std"] }
 
 # Optional lightweight windowing — kept behind the `gui` feature so the render
 # core stays headless-capable. winit 0.30 matches the one Bevy already pulls.
