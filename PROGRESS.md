@@ -289,5 +289,84 @@ constraint: keep until the worker is wired).
 
 The translator pipeline + kernel integration (P3 #10/#11) is **complete**:
 both editors share one path document → translator → dispatcher → worker →
-`prob_kernel` → inline `\prob` value. Possible follow-ups: multi-model
+`prob_kernel` → inline `\prob` value. Possible follow-ons: multi-model
 documents, translator caching, richer event translators.
+
+## 2026-06-30 — P9.15.1 closure: port deleted velyst examples to velyst 0.15 API
+
+The three velysterm-vendored velyst-0.14-era examples
+(`examples/velyst_demo/examples/editor.rs`,
+`examples/velyst_demo/examples/terminal.rs`,
+`examples/velyst_demo/examples/rfc1751_demo.rs`) were deleted
+in the rev 21 velysterm merge as triply-stale. They have now been
+re-introduced, ported to the velyst 0.15 + typst 0.15 + Bevy 0.18
+API surface, and smoke-tested with 5 new integration tests.
+
+- **`rfc1751_demo.rs`** (9 lines, 1:1 port) — uses
+  `velyst::rfc1751::u64_to_rfc1751` (the velyst 0.15 re-export;
+  the upstream function is unchanged). The example is the
+  smallest of the three and verifies the velyst public surface
+  is reachable from a downstream example.
+- **`editor.rs`** (685 lines ported) — a dual-layer Typst + Bevy
+  Text text editor with live math rendering. Updated:
+  `VelystSourceHandle(asset_server.load(...))` → bare
+  `Handle<VelystSource>` (the new asset handle), and
+  `VelystFuncBundle { handle, func }` → `VelystFunc::new(handle,
+  func)` (the velyst 0.15 component name; `VelystContent` is
+  now `#[require]`d and auto-inserted). Bevy 0.18 `Val::Percent`
+  / `Val::Px` / `Val::Auto` field initializers → `percent()` /
+  `px()` / `auto()` helper functions. The custom
+  `find_text_index_in_frame` and `get_glyph_position_at_byte_index`
+  helpers use the velyst 0.15 `Frame` / `FrameItem` / `Span` /
+  `SyntaxKind` types via `velyst::typst::layout::{...}` and
+  `velyst::typst::syntax::{...}` re-exports. The custom
+  `Vec::remove(idx)` byte-offset math (UTF-8 safe) and the
+  `$...$` math-range detector are unchanged. The bundled
+  `assets/typst/editor.typ` and `assets/fonts/dejavu.ttf`
+  (extracted from `typst-assets-0.15.0/files/fonts/DejaVuSansMono.ttf`)
+  are new.
+- **`terminal.rs`** (~290 lines, simplified) — a PTY-backed
+  `bash` shell that renders the alacritty grid to Typst as plain
+  text, with three pre-registered command buttons mapped to
+  number-row keys 1/2/3 (`ls -la` / `pwd` / `echo hello from
+  velyst`). The full velysterm-fork's bespoke ANSI marker-chain
+  autocomplete (~500 lines), the
+  shift+arrow selection (≈100 lines), the magenta-marker cursor
+  tracking (≈80 lines), the per-cell color rendering to Typst
+  markup (≈200 lines), and the typst-link hit-testing for
+  clickable buttons (≈200 lines) are **not** re-implemented; the
+  goal of P9.15.1 was to port the *API surface*, not to
+  preserve every velysterm-fork-specific behaviour. A follow-on
+  revision can re-introduce the missing pieces against the new
+  velyst 0.15 surface. The bundled
+  `assets/typst/terminal.typ` is the velysterm-fork's
+  `term_v3.typ` (with the high-contrast button styling and the
+  cyan marker-chain underline rule) reused verbatim. vte 0.15.0
+  + alacritty_terminal 0.25.1 wired up:
+  `Processor::new()` now defaults to `StdSyncHandler` for the
+  `Timeout` trait parameter; the per-PTY `Term<DummyListener>`
+  continues to implement `Handler` and is the second argument
+  to `processor.advance(&mut term, &buf)`.
+- **5 new integration tests** in
+  `examples/velyst_demo/tests/ported_examples.rs`:
+  `editor_assets_present` (typ + font files exist; the
+  `render_editor` function is referenced in `editor.typ`),
+  `terminal_assets_present` (the `terminal_render` /
+  `final_terminal_fix` function is referenced in `terminal.typ`),
+  `rfc1751_demo_uses_velyst_helper` (the example imports from
+  `velyst::rfc1751`, not a local copy), and the two
+  regression-pinning tests `ported_examples_use_new_velyst_api`
+  (no surviving references to `VelystFuncBundle` /
+  `VelystSourceHandle` in the ported files) and
+  `ported_examples_use_bevy_val_helpers` (no surviving
+  references to `Val::Percent` / `Val::Px(` / `Val::Auto` in
+  the ported files). All 5 pass.
+- **velysterm workspace `cargo check --workspace --all-targets`:** green.
+- **velysterm workspace `cargo test -p velyst_demo --test ported_examples`:** 5/5 green.
+- **mathed_core / mathed_mini test counts:** unchanged from rev 22
+  (72 / 47 / 59).
+- **Cargo workspace members:** unchanged. No new dependencies;
+  `alacritty_terminal` + `portable-pty` + `arboard` were already
+  in `examples/velyst_demo/Cargo.toml` (kept since the rev 21
+  merge for the terminal example; now actually used by the
+  ported `terminal.rs`).
