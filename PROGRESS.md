@@ -141,7 +141,33 @@ A new optional frontend, `crates/mathed_mini`, targets constrained hardware
   `band_for_byte()` method on `GlyphIndex`, `move_up`/`move_down` in
   `app.rs`, 3 new tests. 6 mathed_mini tests total.
 - **Deferred:** Step 4 (caret blink via `ControlFlow::WaitUntil`),
-  `mathed_a11y` (AccessKit bridge crate).
+  `mathed_a11y` (AccessKit bridge crate). **RESOLVED (2026-06-30, rev 22,
+  commit `8d1cbf6`):** all four Step 4 sub-items are now implemented and
+  tested. (1) **Caret blink** wired via
+  `ControlFlow::WaitUntil(self.next_blink)` in `app.rs:750`; `caret_visible`
+  toggled at `BLINK_INTERVAL`; `reset_blink()` called on every caret move.
+  (2) **Mouse hit-testing / click-to-place-caret + selection** via
+  `App::place_caret_from_cursor(extend)` in `app.rs:212` using
+  `layout.glyphs.byte_for_point`; `MouseInput::Pressed` calls it with
+  `shift_key()` for extend; `CursorMoved` + held button calls with
+  `extend=true` for drag-select; 4 `selection_range` tests cover the
+  anchor logic. (3) **`mathed_a11y` AccessKit bridge** in
+  `mathed_mini/src/a11y.rs` (gated on `gui` feature):
+  `build_tree_update(&[AccessNode]) -> accesskit::TreeUpdate` maps
+  `AccessRole` → `accesskit::Role`; `App::push_a11y_update` rebuilds the
+  tree on every edit / caret move / window resize;
+  `accesskit_winit::WindowEvent::ActionRequested` (Focus / Click) places
+  the caret via `byte_offset_for_node` (P5 #27). 5 a11y tests added in
+  rev 22 (`translator_role_maps_to_group`, `reference_role_maps_to_link`,
+  `end_to_end_pipeline_builds_tree_from_document_text`) plus 2
+  `rects_for_range` tests in `render.rs` (single-band selection has
+  positive-width rect aligned with band 0; out-of-range selection is
+  empty). (4) **`kernel_client` → `mathed_mini` wiring** is
+  `crates/mathed_mini/src/kernel_bridge.rs` (1171 lines, 10+ tests in
+  `kernel_bridge::tests`). The Bevy-free frontend now shows inline `\prob`
+  results (green value / red error code) just like the Bevy `mathed`
+  frontend. **mathed_mini: 45 → 47 headless tests / 54 → 59 gui tests
+  (rev 22).** mathed_core 72 (unchanged).
 
 ## 2026-06-25 — Dependency updates
 

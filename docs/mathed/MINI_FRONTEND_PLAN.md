@@ -30,7 +30,7 @@ typst_imaging  CPU renderer: Typst Frame → RGBA8                              
 mathed_mini    winit + softbuffer frontend (gui feature)                     ✓ Inc.1 + Inc.2
   └─ `--no-default-features` builds the headless render core (no window)      ✓
 mathed (bevy)  existing rich GPU frontend → now just one OPTIONAL frontend    (untouched)
-mathed_a11y    OPTIONAL AccessKit bridge over accessibility nodes             ⏳ TODO
+mathed_a11y    OPTIONAL AccessKit bridge over accessibility nodes             ✅ DONE (rev 22, `a11y.rs` in `mathed_mini/`)
 ```
 
 ## Done (committed: velysterm `0ed6015` + `a456156`, branch `gitbutler/workspace`, NOT pushed)
@@ -105,13 +105,29 @@ moves — cursor motion must NOT re-run Typst layout.
   `band_for_byte_distinguishes_lines`, `byte_for_point_hits_within_band`).
 
 ### Step 4 (optional, deferred) — caret blink via `ControlFlow::WaitUntil` +
-`about_to_wait`.
+`about_to_wait`. **DONE (rev 22, commit `8d1cbf6`):** `app.rs:750` sets
+`ControlFlow::WaitUntil(self.next_blink)`; `caret_visible` toggles on the
+`BLINK_INTERVAL` deadline; `reset_blink()` is called on every caret move /
+edit. Mouse hit-testing / click-to-place-caret + selection is wired in
+`app.rs:212` (`place_caret_from_cursor`) and `app.rs:776-790`
+(`CursorMoved` + `MouseInput::Pressed`); 4 `selection_range` tests cover
+the anchor logic. `rects_for_range` plumbing (2 new tests in `render.rs`)
+covers the selection highlight geometry.
 
 ## AFTER Increment 3: `mathed_a11y` (optional crate)
-AccessKit bridge over `mathed_core::accessibility`, driven by `accesskit_winit`
-on the `mathed_mini` window. `accesskit 0.21.1` + `accesskit_winit` are already
-in velysterm's lock. Map `AccessRole → accesskit::Role`, `AccessNode.label →
-node name; range → text bounds`. Build `TreeUpdate` from `build_access_nodes`.
+**DONE (rev 22, commit `8d1cbf6`):** AccessKit bridge in
+`mathed_mini/src/a11y.rs` (gated on `gui` feature). `accesskit 0.21.1` +
+`accesskit_winit` are already in velysterm's lock. `build_tree_update(&[AccessNode])`
+maps `AccessRole → accesskit::Role` (Model / Prior / Solver / Event /
+Probability / Translator → `Group`, Definition → `Definition`, Theorem /
+Lemma / Axiom → `Heading`, Reference → `Link`, Math → `Math`); declares
+`Action::Focus` + `Action::Click` on segment nodes (P5 #27 caret
+placement); `byte_offset_for_node` round-trips the segment ID back to a
+doc byte offset. `App::push_a11y_update` rebuilds the tree on every
+edit / caret move / window resize. 5 a11y tests cover the structural
+mapping + 1 end-to-end pipeline test (`end_to_end_pipeline_builds_tree_from_document_text`)
+runs doc → scan → resolve_segments → to_render_text → build_access_nodes
+→ build_tree_update and verifies every child node's ID round-trips.
 
 ## Verified API anchors
 
