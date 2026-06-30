@@ -385,4 +385,51 @@ mod tests {
             "byte_for_point near caret x should hit byte ~6, got {b}"
         );
     }
+
+    #[test]
+    fn rects_for_range_covers_selected_bytes() {
+        // The selection highlight geometry (`rects_for_range`) must return
+        // at least one rect that horizontally spans the selected bytes'
+        // glyph advances. P9.14 (mathed_mini Step 4) needs this for the
+        // drag-to-select path: a single-band selection produces one rect,
+        // a multi-line selection produces one rect per band.
+        let layout = layout_doc("hello world", 400.0)
+            .expect("layout should succeed");
+        let rects = layout.glyphs.rects_for_range(0..5);
+        assert!(
+            !rects.is_empty(),
+            "selection across bytes 0..5 must produce at least one rect"
+        );
+        let r = &rects[0];
+        assert!(
+            r.x0 < r.x1,
+            "selection rect must have positive width"
+        );
+        // The rect's y-band must match the glyph index's first band — the
+        // selected bytes are all on line 0 in a single-line document.
+        let band = &layout.glyphs.bands[0];
+        assert!(
+            (r.y0 - band.top).abs() < 0.01
+                && (r.y1 - band.bottom).abs() < 0.01,
+            "single-line selection rect must align with band 0, \
+             got y0={}, y1={}, band top={}, bottom={}",
+            r.y0,
+            r.y1,
+            band.top,
+            band.bottom
+        );
+    }
+
+    #[test]
+    fn rects_for_range_empty_outside_document() {
+        // A range past the document end produces no rects (the rendering
+        // code can call this with a stale selection without panicking).
+        let layout =
+            layout_doc("hi", 400.0).expect("layout should succeed");
+        let rects = layout.glyphs.rects_for_range(100..200);
+        assert!(
+            rects.is_empty(),
+            "out-of-range selection must produce no rects, got {rects:?}"
+        );
+    }
 }

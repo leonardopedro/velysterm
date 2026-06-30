@@ -184,4 +184,104 @@ mod tests {
         assert!(child.1.supports_action(Action::Focus));
         assert!(child.1.supports_action(Action::Click));
     }
+
+    #[test]
+    fn translator_role_maps_to_group() {
+        // The translator panel is a content span, not a math expression;
+        // screen readers should announce it as a group container, not as math.
+        let nodes = vec![AccessNode {
+            role: AccessRole::Translator,
+            label: "translator: identity".into(),
+            value: Some("identity".into()),
+            range: Some(20..30),
+        }];
+        let update = build_tree_update(&nodes);
+        let child = update
+            .nodes
+            .iter()
+            .find(|(id, _)| id.0 == 20)
+            .expect("translator child");
+        assert_eq!(child.1.role(), Role::Group);
+        assert!(child.1.supports_action(Action::Click));
+    }
+
+    #[test]
+    fn reference_role_maps_to_link() {
+        // Unresolved references (P5 #28) surface as warnings to AT users; the
+        // Link role hints that the segment is a pointer, not text content.
+        let nodes = vec![AccessNode {
+            role: AccessRole::Reference,
+            label: "unresolved reference x".into(),
+            value: Some("x".into()),
+            range: Some(0..1),
+        }];
+        let update = build_tree_update(&nodes);
+        let child = update
+            .nodes
+            .iter()
+            .find(|(id, _)| id.0 == 0)
+            .expect("reference child");
+        assert_eq!(child.1.role(), Role::Link);
+    }
+
+    #[test]
+    fn end_to_end_pipeline_builds_tree_from_document_text() {
+        // Run the full pipeline that `push_a11y_update` uses in app.rs:
+        // doc text -> markers::scan -> resolve_segments -> to_render_text
+        // -> build_access_nodes -> build_tree_update. The resulting tree
+        // must contain a Document root plus one child per resolved segment,
+        // and every child node ID must round-trip through
+        // `byte_offset_for_node`.
+        use mathed_core::markers::{resolve_segments, scan};
+        use mathed_core::semantics::SemanticIndex;
+        use mathed_core::transform::{
+            TransformOptions, to_render_text,
+        };
+
+        // Fixture: a model + a prob. The `#N` markers are placeholders that
+        // `markers::scan` resolves to actual byte offsets; the surrounding
+        // names (`a` and `vacuum`) are segment content.
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #3 vac #4 \\prob(#3,#4)";
+        let scan = scan(doc);
+        let segments = resolve_segments(&scan);
+        assert!(
+            !segments.is_empty(),
+            "fixture must contain resolved segments"
+        );
+
+        let mut idx = SemanticIndex::default();
+        let render = to_render_text(
+            doc,
+            &scan,
+            &segments,
+            &TransformOptions::default(),
+        );
+        idx.build_index(doc, &segments, &[&render]);
+        let nodes = mathed_core::accessibility::build_access_nodes(
+            doc, &segments, &idx,
+        );
+        assert!(
+            nodes.len() >= 2,
+            "expected at least model + prob nodes, got {nodes:?}"
+        );
+
+        let update = build_tree_update(&nodes);
+        // Root + N children.
+        assert_eq!(update.nodes.len(), nodes.len() + 1);
+        // Every child node's ID must round-trip back to a byte offset that
+        // lies inside the document.
+        for (id, _) in &update.nodes {
+            if id.0 == ROOT_ID {
+                continue;
+            }
+            let offset = byte_offset_for_node(*id)
+                .expect("non-root node must carry a byte offset");
+            assert!(
+                offset <= doc.len(),
+                "node ID {id:?} decoded to offset {offset}, doc len = {}",
+                doc.len()
+            );
+        }
+    }
 }
