@@ -91,6 +91,19 @@ pub enum PropKind {
     /// `translator:` extra-arg. Collected into
     /// `SemanticIndex.translators` for the dispatcher (P3 #10).
     Translator,
+    /// Bibliography/citation (P11.21, `mathed_biblio` bridge to
+    /// `../hayagriva`): populates `SemanticIndex.biblio_statements`,
+    /// mirroring the kernel-statement collection but routed to the
+    /// citation backend instead of `prob_kernel`. Segment body is a YAML
+    /// or BibTeX bibliography source; `format:`/`style:`/`name:`
+    /// extra-args pick the parser, CSL style, and a label for `\cite`'s
+    /// `bib:` binding (mirrors `\prob`'s `model:` binding).
+    Bibliography,
+    /// An in-text citation marker: `\cite(#1,#2, "key-a", "key-b",
+    /// style: "apa", bib: "refs")`. The translator emits these spans —
+    /// never hand-written Typst-math (P3.10 pivot) — with the bare
+    /// literal extra-args naming the cited keys, in order.
+    Cite,
     /// Unknown property: kept, semantically inert in v1.
     Other,
 }
@@ -114,6 +127,8 @@ impl PropKind {
             "event" => Self::Event,
             "prob" => Self::Prob,
             "translator" => Self::Translator,
+            "bibliography" | "refs" => Self::Bibliography,
+            "cite" | "citation" => Self::Cite,
             _ => Self::Other,
         }
     }
@@ -136,6 +151,13 @@ impl PropKind {
                 | Self::Prob
                 | Self::Translator
         )
+    }
+
+    /// Bibliography statements populate `SemanticIndex.biblio_statements`
+    /// and drive the `mathed_biblio` citation bridge (P11.21) instead of
+    /// the probability kernel.
+    pub fn is_biblio(self) -> bool {
+        matches!(self, Self::Bibliography | Self::Cite)
     }
 }
 

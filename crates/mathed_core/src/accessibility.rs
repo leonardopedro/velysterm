@@ -44,6 +44,10 @@ pub enum AccessRole {
     Probability,
     /// A user-defined translator panel (P3 #10).
     Translator,
+    /// A `\bibliography` library segment (P11.21, `mathed_biblio`).
+    Bibliography,
+    /// A `\cite` in-text citation marker (P11.21, `mathed_biblio`).
+    Citation,
 }
 
 impl AccessRole {
@@ -67,6 +71,8 @@ impl AccessRole {
             AccessRole::Event => "event",
             AccessRole::Probability => "probability",
             AccessRole::Translator => "translator",
+            AccessRole::Bibliography => "bibliography",
+            AccessRole::Citation => "citation",
         }
     }
 }
@@ -158,6 +164,16 @@ pub fn describe_segment(
         }
         PropKind::Translator => {
             (AccessRole::Translator, format!("translator: {content}"))
+        }
+        PropKind::Bibliography => {
+            let lead = match &name {
+                Some(n) => format!("bibliography {n}"),
+                None => "bibliography".to_string(),
+            };
+            (AccessRole::Bibliography, lead)
+        }
+        PropKind::Cite => {
+            (AccessRole::Citation, format!("citation: {content}"))
         }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }

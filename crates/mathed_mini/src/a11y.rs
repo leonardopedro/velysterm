@@ -37,7 +37,8 @@ fn role_for(role: AccessRole) -> Role {
         | AccessRole::Solver
         | AccessRole::Event
         | AccessRole::Probability
-        | AccessRole::Translator => Role::Group,
+        | AccessRole::Translator
+        | AccessRole::Bibliography => Role::Group,
         // Semantic statement family.
         AccessRole::Definition => Role::Definition,
         AccessRole::Theorem => Role::Heading,
@@ -46,7 +47,9 @@ fn role_for(role: AccessRole) -> Role {
         AccessRole::Statement => Role::Paragraph,
         AccessRole::Function => Role::Group,
         AccessRole::Variable => Role::ListItem,
-        AccessRole::Reference => Role::Link,
+        // A citation is a referential link to a bibliography entry, same as
+        // `Reference`'s mapping to a document-internal definition.
+        AccessRole::Reference | AccessRole::Citation => Role::Link,
         AccessRole::Emphasis => Role::Emphasis,
     }
 }

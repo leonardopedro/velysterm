@@ -15,6 +15,10 @@ pub struct SemanticIndex {
     /// Last-wins on name collision (a later `\translator` shadows an
     /// earlier one with the same name).
     pub translators: HashMap<String, TranslatorDef>,
+    /// `\bibliography`/`\cite` statements (P11.21) collected for the
+    /// `mathed_biblio` citation bridge, mirroring `kernel_statements` but
+    /// routed to the bibliography backend instead of `prob_kernel`.
+    pub biblio_statements: Vec<BiblioStatement>,
 }
 
 /// A `\translator(#3,#4, name: "harmonic")` segment (P3 #10).
@@ -74,6 +78,38 @@ pub struct KernelStatement {
     pub body_text: String,
     pub translator: Option<String>,
     pub model_name: Option<String>,
+    pub span: Range<usize>,
+}
+
+/// A `\bibliography`/`\cite` statement (P11.21) extracted from the
+/// document, ready to be dispatched to the `mathed_biblio` bridge.
+///
+/// - `kind` — `Bibliography` (a library source segment) or `Cite` (an
+///   in-text citation marker).
+/// - `name` — for `Bibliography`, the label used by `\cite`'s `bib:`
+///   binding (first bare literal extra-arg, mirrors `\prob`'s `name`).
+///   `None` for `Cite`.
+/// - `keys` — for `Cite`, every bare (non-`key: value`) literal extra-arg,
+///   in source order — the cited entry keys. Empty for `Bibliography`.
+/// - `format` — `Bibliography` only: `format: "yaml"|"bibtex"` (default
+///   `"yaml"` at the consuming side).
+/// - `style` — CSL style name (`style: "apa"`, ...); may appear on either
+///   kind, with `Cite`'s value overriding the bound `Bibliography`'s.
+/// - `bib_name` — `Cite` only: which `\bibliography` to resolve `keys`
+///   against (`bib: "name"`); `None` binds to the nearest preceding one.
+/// - `body_text` — trimmed doc text between the two marker refs (the
+///   library source for `Bibliography`; usually empty/inert for `Cite`).
+/// - `span` — doc byte range of the body text (exclusive of markers).
+#[derive(Debug, Clone)]
+pub struct BiblioStatement {
+    pub kind: PropKind,
+    pub block: usize,
+    pub name: Option<String>,
+    pub keys: Vec<String>,
+    pub format: Option<String>,
+    pub style: Option<String>,
+    pub bib_name: Option<String>,
+    pub body_text: String,
     pub span: Range<usize>,
 }
 
@@ -242,10 +278,71 @@ impl SemanticIndex {
             });
         }
 
+        // --- Collect bibliography statements (Bibliography/Cite, P11.21). ---
+        let mut biblio_statements = Vec::new();
+        for seg in segments {
+            if !seg.kind.is_biblio() {
+                continue;
+            }
+            let span = match seg.span.clone() {
+                Some(s) => s,
+                None => continue,
+            };
+            let body_text = doc_text[span.clone()].trim().to_string();
+            let block = find_block_for_doc_pos(per_block_renders, span.start);
+
+            let keys: Vec<String> = seg
+                .extra_args
+                .iter()
+                .filter_map(|arg| {
+                    let Arg::Literal { text, .. } = arg else {
+                        return None;
+                    };
+                    let t = text.trim();
+                    if t.contains(':') {
+                        return None;
+                    }
+                    let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+                        &t[1..t.len() - 1]
+                    } else {
+                        t
+                    };
+                    Some(t.to_string())
+                })
+                .collect();
+            let format = extract_named_string(&seg.extra_args, "format");
+            let style = extract_named_string(&seg.extra_args, "style");
+            let bib_name = match seg.kind {
+                PropKind::Cite => extract_named_string(&seg.extra_args, "bib"),
+                _ => None,
+            };
+            let name = match seg.kind {
+                PropKind::Bibliography => keys.first().cloned(),
+                _ => None,
+            };
+            let keys = match seg.kind {
+                PropKind::Cite => keys,
+                _ => Vec::new(),
+            };
+
+            biblio_statements.push(BiblioStatement {
+                kind: seg.kind,
+                block,
+                name,
+                keys,
+                format,
+                style,
+                bib_name,
+                body_text,
+                span,
+            });
+        }
+
         self.defs = defs;
         self.occurrences = occurrences;
         self.kernel_statements = kernel_statements;
         self.translators = translators;
+        self.biblio_statements = biblio_statements;
     }
 
     pub fn plan_rename(
@@ -596,5 +693,41 @@ mod tests {
             .expect("a solver statement");
         assert_eq!(solver.body_text, "krylov_dim: 12");
         assert_eq!(solver.model_name.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn bibliography_statement_collected_with_name_and_format() {
+        let doc = "#1 crazy-rich:\\n  type: Book #2 \\bibliography(#1,#2, refs, format: \"yaml\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.biblio_statements.len(), 1);
+        let b = &idx.biblio_statements[0];
+        assert_eq!(b.kind, PropKind::Bibliography);
+        assert_eq!(b.name.as_deref(), Some("refs"));
+        assert_eq!(b.format.as_deref(), Some("yaml"));
+        assert!(b.keys.is_empty(), "Bibliography statements carry no cite keys");
+    }
+
+    #[test]
+    fn cite_statement_collects_keys_in_order() {
+        let doc = "#1 x #2 \\cite(#1,#2, \"crazy-rich\", \"other-book\", bib: \"refs\", style: \"apa\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.biblio_statements.len(), 1);
+        let c = &idx.biblio_statements[0];
+        assert_eq!(c.kind, PropKind::Cite);
+        assert_eq!(c.keys, vec!["crazy-rich".to_string(), "other-book".to_string()]);
+        assert_eq!(c.bib_name.as_deref(), Some("refs"));
+        assert_eq!(c.style.as_deref(), Some("apa"));
+        assert!(c.name.is_none(), "Cite statements carry no bibliography label");
+    }
+
+    #[test]
+    fn bibliography_and_cite_do_not_pollute_kernel_statements() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #3 x #4 \\bibliography(#3,#4, refs)\n\n\
+                   #5 y #6 \\cite(#5,#6, \"crazy-rich\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.kernel_statements.len(), 1, "only \\model is a kernel statement");
+        assert_eq!(idx.kernel_statements[0].kind, PropKind::Model);
+        assert_eq!(idx.biblio_statements.len(), 2);
     }
 }
