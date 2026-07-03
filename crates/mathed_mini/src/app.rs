@@ -33,6 +33,11 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 use crate::a11y::build_tree_update;
 use crate::kernel_bridge::KernelBridge;
+use crate::references_panel::{
+    ReferencesPanelData, open_references_panel,
+    panel_height as references_panel_height,
+    update_references_panel as update_references_panel_data,
+};
 use crate::render::{
     DocLayout, active_translator_span, layout_doc_with_footer,
 };
@@ -99,6 +104,25 @@ struct App {
     /// the same `N`. The deepest entry is the *front* of the stack — the
     /// one drawn on top of all the others.
     popup_stack: Vec<u32>,
+    /// Marker overlay toggle (marker_overlay_and_references_panel plan,
+    /// Stage 5). When `true`, every `#id` marker gets a small framed
+    /// label drawn on top of the rendered text at the marker's byte
+    /// position. Z-order is painter's algorithm: labels are drawn in
+    /// document order ascending, so the last marker in the doc is on
+    /// top of all the others. Toggled with `Ctrl+Shift+M`.
+    show_marker_overlay: bool,
+    /// References panel (marker_overlay_and_references_panel plan,
+    /// Stage 5). `None` when closed; `Some(data)` when open. The panel
+    /// is a vertical strip drawn *below* the doc area that lists every
+    /// marker-defined segment whose body contains the caret. Toggled
+    /// with `Ctrl+0`. Entries track the caret on every move
+    /// (re-derived via `references_for_cursor`), but cached body images
+    /// are transferred by segment range to avoid re-rendering.
+    references_panel: Option<ReferencesPanelData>,
+    /// Cached panel height in pixels, recomputed when the entries or
+    /// their body images change. Used to shrink the doc area at the
+    /// next redraw.
+    references_panel_height: u32,
     /// Caret blink visibility — toggles at [`BLINK_INTERVAL`].
     caret_visible: bool,
     /// When the next caret blink toggle should occur.
@@ -129,6 +153,9 @@ impl App {
             bridge: KernelBridge::new(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
+            show_marker_overlay: false,
+            references_panel: None,
+            references_panel_height: 0,
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -142,6 +169,64 @@ impl App {
     fn reset_blink(&mut self) {
         self.caret_visible = true;
         self.next_blink = Instant::now() + BLINK_INTERVAL;
+    }
+
+    /// Re-derive the references panel entries for the current caret
+    /// (if the panel is open) and recompute the cached panel height.
+    /// Cached body images are transferred from old to new entries by
+    /// segment range — the expensive Typst render only happens for
+    /// new entries. The height cap uses the current window height
+    /// (or 800 as a default if the window isn't created yet).
+    fn update_references_panel(&mut self) {
+        if let Some(panel) = self.references_panel.as_mut() {
+            update_references_panel_data(
+                panel,
+                self.doc.text(),
+                self.caret,
+            );
+            let win_h = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().height as usize)
+                .unwrap_or(800);
+            self.references_panel_height =
+                references_panel_height(panel, win_h);
+        }
+    }
+
+    /// Hook called from every caret-move/edit path: resets the
+    /// caret blink, updates the references panel, and requests a
+    /// redraw. The replacement for the
+    /// `reset_blink(); request_redraw();` pattern.
+    fn caret_changed(&mut self) {
+        self.reset_blink();
+        self.update_references_panel();
+        self.request_redraw();
+    }
+
+    /// Toggle the marker overlay on/off (Ctrl+Shift+M).
+    fn toggle_marker_overlay(&mut self) {
+        self.show_marker_overlay = !self.show_marker_overlay;
+        self.request_redraw();
+    }
+
+    /// Toggle the references panel on/off (Ctrl+0). On open, build
+    /// a fresh panel for the current caret. On close, drop the
+    /// panel and free its cached body images.
+    fn toggle_references_panel(&mut self) {
+        if self.references_panel.is_some() {
+            self.references_panel = None;
+            self.references_panel_height = 0;
+        } else {
+            self.references_panel = Some(open_references_panel(
+                self.doc.text(),
+                self.caret,
+            ));
+            // Force a redraw with the panel open; the height will
+            // be recomputed on the first frame.
+            self.invalidate();
+        }
+        self.request_redraw();
     }
 
     /// Build an accessibility tree from the current document's semantic
@@ -265,7 +350,7 @@ impl App {
         self.sel_anchor = None;
         self.invalidate();
         self.refresh_kernel();
-        self.reset_blink();
+        self.caret_changed();
         true
     }
 
@@ -304,8 +389,7 @@ impl App {
             self.sel_anchor = Some(byte);
         }
         self.caret = byte;
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Copy the selected source text to the system clipboard (P5 #25).
@@ -338,7 +422,7 @@ impl App {
         }
         self.caret = self.doc.len();
         self.sel_anchor = Some(0);
-        self.reset_blink();
+        self.caret_changed();
     }
 
     /// Handle a Ctrl-modified key (copy / paste / cut / select-all). Returns
@@ -384,7 +468,7 @@ impl App {
         self.sel_anchor = None;
         self.invalidate();
         self.refresh_kernel();
-        self.reset_blink();
+        self.caret_changed();
     }
 
     /// Typing an unescaped `#` inserts a fresh auto-named marker (`#3ad`:
@@ -404,7 +488,7 @@ impl App {
         self.sel_anchor = None;
         self.invalidate();
         self.refresh_kernel();
-        self.reset_blink();
+        self.caret_changed();
     }
 
     /// Push a cite onto the popup stack (cite_popup_boxes plan, Stage 4).
@@ -461,7 +545,7 @@ impl App {
         self.caret = prev;
         self.invalidate();
         self.refresh_kernel();
-        self.reset_blink();
+        self.caret_changed();
     }
 
     /// Delete the character after the caret (Delete), or the whole
@@ -478,7 +562,7 @@ impl App {
         self.doc.delete(self.caret..next);
         self.invalidate();
         self.refresh_kernel();
-        self.reset_blink();
+        self.caret_changed();
     }
 
     /// Move the caret one character left (no relayout). When `extend`, keep
@@ -493,8 +577,7 @@ impl App {
             self.caret =
                 prev_char_boundary(self.doc.text(), self.caret);
         }
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Move the caret one character right (no relayout).
@@ -508,8 +591,7 @@ impl App {
         if self.caret < text.len() {
             self.caret = next_char_boundary(text, self.caret);
         }
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Move to the start of the current line.
@@ -522,8 +604,7 @@ impl App {
         let text = self.doc.text();
         self.caret =
             text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Move to the end of the current line.
@@ -537,8 +618,7 @@ impl App {
         self.caret = text[self.caret..]
             .find('\n')
             .map_or(text.len(), |i| self.caret + i);
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Move the caret up one visual line (no relayout). Sticks to the
@@ -566,8 +646,7 @@ impl App {
                 self.caret = b;
             }
         }
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Move the caret down one visual line (no relayout).
@@ -593,8 +672,7 @@ impl App {
                 self.caret = b;
             }
         }
-        self.reset_blink();
-        self.request_redraw();
+        self.caret_changed();
     }
 
     /// Lay out the current document (if the cache is stale) and present it.
@@ -654,38 +732,108 @@ impl App {
         let (win_w, win_h) =
             (size.width as usize, size.height as usize);
 
+        // The references panel (marker_overlay_and_references_panel
+        // plan, Stage 5) is drawn below the doc area. While it is
+        // open, the doc area is shrunk to `doc_h = win_h - panel_h`
+        // and the panel takes the bottom `panel_h` rows. The
+        // cached layout is reused (no relayout on toggle); the
+        // blit just truncates at `doc_h` and the marker overlay /
+        // popup boxes clip their bottom edge at the same boundary.
+        let panel_h: usize = if self.references_panel.is_some() {
+            // Recompute the height each frame: the body images
+            // are filled in lazily, so the height grows until all
+            // bodies are rendered.
+            if let Some(panel) = self.references_panel.as_ref() {
+                let h = references_panel_height(panel, win_h);
+                self.references_panel_height = h;
+                h as usize
+            } else {
+                0
+            }
+        } else {
+            self.references_panel_height = 0;
+            0
+        };
+        let doc_h = win_h.saturating_sub(panel_h);
+        let panel_clip: Option<f64> = if panel_h > 0 {
+            Some(doc_h as f64)
+        } else {
+            None
+        };
+
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
         buffer.fill(0x00FF_FFFF); // white page
 
         if let Some(layout) = &self.layout {
-            blit_over_white(&mut buffer, win_w, win_h, &layout.image);
+            blit_over_white(&mut buffer, win_w, doc_h, &layout.image);
             if let Some(sel) = sel {
                 let rects = layout.glyphs.rects_for_range(sel);
-                draw_selection(&mut buffer, win_w, win_h, &rects);
+                draw_selection(&mut buffer, win_w, doc_h, &rects);
             }
             if self.caret_visible
                 && let Some(geom) =
                     layout.glyphs.caret_for_byte(self.caret)
+                && (geom.top as usize) < doc_h
             {
-                draw_caret(&mut buffer, win_w, win_h, geom);
+                draw_caret(&mut buffer, win_w, doc_h, geom);
+            }
+            // Marker overlay (marker_overlay_and_references_panel
+            // plan, Stage 5): drawn on top of the doc text, clipped
+            // at the doc/panel boundary. Painter's algorithm — the
+            // labels are drawn in document order ascending, so the
+            // last marker in the doc covers any earlier one it
+            // overlaps.
+            if self.show_marker_overlay {
+                let labels =
+                    crate::marker_overlay::collect_marker_labels(
+                        self.doc.text(),
+                        layout,
+                        panel_clip,
+                    );
+                crate::marker_overlay::draw_marker_overlay(
+                    &mut buffer,
+                    win_w,
+                    doc_h,
+                    &labels,
+                    panel_clip,
+                );
             }
             // Cite popup boxes (cite_popup_boxes plan, Stage 5):
-            // drawn *over* the caret so the box is the topmost
-            // visual element. The base doc is not re-laid-out; the
-            // box is a render-time overlay on top of the cached
-            // `layout.image`.
+            // drawn *over* the marker overlay and caret so the box
+            // is the topmost visual element. The base doc is not
+            // re-laid-out; the box is a render-time overlay on top
+            // of the cached `layout.image`. Boxes anchored to
+            // cites below the doc area are skipped (the
+            // `doc_h` clip replaces the win_h clip).
             if !self.popup_stack.is_empty() {
                 Self::draw_popup_boxes(
                     self.doc.text(),
                     &self.popup_stack,
                     &mut buffer,
                     win_w,
-                    win_h,
+                    doc_h,
                     layout,
                 );
             }
+        }
+        // References panel — drawn in the bottom strip when open.
+        // `self.references_panel` is a different field from
+        // `self.surface`, so the mutable borrow is independent of
+        // the surface borrow above (splitting borrows).
+        if panel_h > 0
+            && let Some(panel) = self.references_panel.as_mut()
+        {
+            crate::references_panel::draw_references_panel(
+                &mut buffer,
+                win_w,
+                win_h,
+                self.doc.text(),
+                panel,
+                doc_h,
+                panel_h,
+            );
         }
         let _ = buffer.present();
     }
@@ -945,17 +1093,19 @@ fn cite_number_exists_in_current_scope(
     .any(|e| e.numbers.contains(&target))
 }
 
-/// clipped to the window. softbuffer pixels are `0x00RRGGBB`.
+/// clipped to `max_h` rows. softbuffer pixels are `0x00RRGGBB`.
+/// `max_h` is the row cap (typically `win_h`; smaller when the
+/// references panel is open and the doc area is shrunk).
 fn blit_over_white(
     buffer: &mut [u32],
     win_w: usize,
-    win_h: usize,
+    max_h: usize,
     img: &imaging::RgbaImage,
 ) {
     let iw = img.width as usize;
     let ih = img.height as usize;
     let copy_w = iw.min(win_w);
-    let copy_h = ih.min(win_h);
+    let copy_h = ih.min(max_h);
 
     for y in 0..copy_h {
         let src_row = y * iw * 4;
@@ -1116,6 +1266,20 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                 ..
             } => {
+                // Ctrl+Shift shortcuts: marker overlay toggle
+                // (marker_overlay_and_references_panel plan, Stage 5).
+                // The user said "click Ctrl+Shift" for the overlay
+                // toggle; we bind it to Ctrl+Shift+M (M for
+                // markers) so a single key is well-defined in winit.
+                if self.mods.control_key()
+                    && self.mods.shift_key()
+                    && let Key::Character(ch) = &logical_key
+                    && (ch == "M" || ch == "m")
+                {
+                    self.toggle_marker_overlay();
+                    self.push_a11y_update();
+                    return;
+                }
                 // Ctrl-key shortcuts: copy / paste / cut / select-all (P5 #25).
                 if self.mods.control_key()
                     && self.handle_ctrl_shortcut(&logical_key)
@@ -1176,6 +1340,16 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(t) = &text
                             && !t.is_empty()
                         {
+                            // Ctrl+0 — toggle the references panel
+                            // (marker_overlay_and_references_panel
+                            // plan, Stage 5). Handled before the
+                            // digit-popup arm so it doesn't fall
+                            // through to "insert 0".
+                            if self.mods.control_key() && t == "0" {
+                                self.toggle_references_panel();
+                                self.push_a11y_update();
+                                return;
+                            }
                             // Ctrl+digit (1..=9) — push a cite popup
                             // (cite_popup_boxes plan, Stage 4). The
                             // digit is the auto-assigned number `N` of a

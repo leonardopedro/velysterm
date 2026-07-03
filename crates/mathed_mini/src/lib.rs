@@ -16,6 +16,8 @@ pub mod app;
 pub mod cite_popup;
 pub mod dispatch;
 pub mod kernel_bridge;
+pub mod marker_overlay;
+pub mod references_panel;
 pub mod render;
 pub mod translate;
 pub mod world;

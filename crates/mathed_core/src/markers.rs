@@ -446,6 +446,86 @@ pub fn cite_label_text(entry: &ReferenceEntry) -> String {
     }
 }
 
+/// First 10 alphanumeric characters of `body_text`. Non-alphanumeric
+/// characters are stripped; falls back to `"untitled"` if the body has
+/// none. Used as the visible tag for the references panel
+/// (`tag1 [1], tag2 [2], ...`). ASCII-only on purpose: the tag is
+/// intended to be a short, typeable identifier, and Unicode scripts
+/// beyond Latin/digits are out of scope for v1.
+pub fn derive_tag(body_text: &str) -> String {
+    let tag: String = body_text
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(10)
+        .collect();
+    if tag.is_empty() {
+        "untitled".to_string()
+    } else {
+        tag
+    }
+}
+
+/// One entry in the "references at cursor" panel: a marker-defined
+/// segment that contains the caret, paired with a 10-character
+/// alphanumeric tag derived from its body. See
+/// [`references_for_cursor`] and the marker_overlay_and_references_panel
+/// plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferencesEntry {
+    /// The first 10 alphanumeric chars of the segment body (or
+    /// `"untitled"` if the body has none).
+    pub tag: String,
+    /// The body byte range in the document (`end of #start .. start
+    /// of #end`). Exclusive of the marker tokens themselves.
+    pub segment_range: Range<usize>,
+}
+
+/// All segments whose body contains `cursor_byte` (inclusive on both
+/// ends, matching [`crate::transform::TransformOptions::reveal`] and
+/// [`crate::render::active_translator_span`]). Segments with
+/// `span: None` (dangling) are excluded.
+///
+/// The tag is derived from the *rendered* body (markers hidden, cite
+/// labels spliced) so inner markers and property statements don't
+/// pollute it. The body is treated as a self-contained doc and run
+/// through [`crate::transform::to_render_text`], the same way the
+/// cite-popup body is re-laid out for recursive expansion.
+pub fn references_for_cursor(
+    doc_text: &str,
+    marker_scan: &MarkerScan,
+    cursor_byte: usize,
+) -> Vec<ReferencesEntry> {
+    let segments = resolve_segments(marker_scan);
+    segments
+        .into_iter()
+        .filter_map(|seg| {
+            let span = seg.span?;
+            if !(span.start <= cursor_byte && cursor_byte <= span.end)
+            {
+                return None;
+            }
+            let body = &doc_text[span.clone()];
+            // Re-scan and transform the body so inner markers are
+            // hidden and cite labels are spliced before we derive
+            // the tag.
+            let body_scan = scan(body);
+            let body_segs = resolve_segments(&body_scan);
+            let body_refs = scan_references(&body_scan);
+            let mut opts =
+                crate::transform::TransformOptions::default();
+            opts.references = body_refs;
+            let body_rendered = crate::transform::to_render_text(
+                body, &body_scan, &body_segs, &opts,
+            )
+            .text;
+            Some(ReferencesEntry {
+                tag: derive_tag(&body_rendered),
+                segment_range: span,
+            })
+        })
+        .collect()
+}
+
 fn try_parse_marker(text: &str, at: usize) -> Option<Marker> {
     let bytes = text.as_bytes();
     debug_assert_eq!(bytes[at], b'#');
@@ -780,5 +860,102 @@ mod tests {
             }
             _ => panic!("expected DocumentRef"),
         }
+    }
+
+    #[test]
+    fn derive_tag_basic() {
+        // Alphanumerics are kept, in order, up to 10.
+        assert_eq!(derive_tag("hello world"), "helloworld");
+        // Spaces, parens, and '=' are non-alphanumeric, so they're
+        // dropped (the digits 0 and 0 are kept, but '=' is dropped).
+        assert_eq!(derive_tag("F(x) = 0"), "Fx0");
+        assert_eq!(derive_tag("abcdefghijklmnop"), "abcdefghij");
+    }
+
+    #[test]
+    fn derive_tag_strips_punct() {
+        assert_eq!(derive_tag("a, b! c?"), "abc");
+        assert_eq!(derive_tag("---***"), "untitled");
+        assert_eq!(derive_tag("(1 + 2) * 3"), "123");
+    }
+
+    #[test]
+    fn derive_tag_short_body() {
+        assert_eq!(derive_tag("hi"), "hi");
+        assert_eq!(derive_tag(""), "untitled");
+        assert_eq!(derive_tag("    "), "untitled");
+        assert_eq!(derive_tag("12345678"), "12345678");
+    }
+
+    #[test]
+    fn references_for_cursor_empty() {
+        let doc = "no markers at all here";
+        let s = scan(doc);
+        assert!(references_for_cursor(doc, &s, 5).is_empty());
+    }
+
+    #[test]
+    fn references_for_cursor_single() {
+        // A caret inside the body of one segment returns one entry.
+        // Doc: "#1 hello #2 \\bold(#1,#2)"
+        //   #1 at 0..2, #2 at 9..11, body = bytes 2..9 = " hello ".
+        let doc = "#1 hello #2 \\bold(#1,#2)";
+        let s = scan(doc);
+        let entries = references_for_cursor(doc, &s, 5);
+        assert_eq!(entries.len(), 1);
+        // Tag is the first 10 alphanumerics of the rendered body
+        // (markers are hidden, so just "hello").
+        assert_eq!(entries[0].tag, "hello");
+        assert_eq!(entries[0].segment_range, 2..9);
+    }
+
+    #[test]
+    fn references_for_cursor_nested() {
+        // Two segments: outer (#1..#3) and inner (#2..#3). A caret
+        // inside the inner segment is inside both.
+        let doc = "#1 a #2 b #3 \\bold(#1,#3) \\italic(#2,#3)";
+        let s = scan(doc);
+        // Caret at byte 9 (between 'a' and 'b' boundaries) is in both.
+        let entries = references_for_cursor(doc, &s, 9);
+        assert_eq!(entries.len(), 2);
+        // Tags are derived from the *rendered* body, so inner
+        // markers don't pollute them: outer = "ab", inner = "b".
+        let tags: Vec<&str> =
+            entries.iter().map(|e| e.tag.as_str()).collect();
+        assert!(tags.contains(&"ab"), "tags: {tags:?}");
+        assert!(tags.contains(&"b"), "tags: {tags:?}");
+    }
+
+    #[test]
+    fn references_for_cursor_none_at_cursor() {
+        let doc = "#1 hello #2 \\bold(#1,#2) trailing text";
+        let s = scan(doc);
+        // Past the segment, no references.
+        let past = doc.len() - 5;
+        assert!(references_for_cursor(doc, &s, past).is_empty());
+        // At the segment boundary (byte 2 = end of #1) still counts.
+        assert_eq!(references_for_cursor(doc, &s, 2).len(), 1);
+    }
+
+    #[test]
+    fn references_for_cursor_tag_uses_rendered_body() {
+        // A body containing inner markers and a property statement
+        // tags itself from the *rendered* text — markers are hidden
+        // and visual styling (#strong[...]) is stripped, so the tag
+        // reflects what the user sees.
+        // Doc: "#1 #2 x #3 \\bold(#2,#3) \\italic(#1,#3)"
+        //   #1 at 0..2, #2 at 3..5, #3 at 8..10.
+        //   Outer body (\italic(#1,#3)) = bytes 2..8 = " #2 x ".
+        //   After transform: " x " (markers hidden). Tag: "x".
+        let doc = "#1 #2 x #3 \\bold(#2,#3) \\italic(#1,#3)";
+        let s = scan(doc);
+        let entries = references_for_cursor(doc, &s, 6);
+        let outer = entries
+            .iter()
+            .find(|e| {
+                e.segment_range.start == 2 && e.segment_range.end == 8
+            })
+            .expect("outer segment present");
+        assert_eq!(outer.tag, "x");
     }
 }

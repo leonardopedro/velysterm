@@ -120,3 +120,93 @@ underlying text below the first box.
 **New module `mathed_mini::cite_popup`** (cite_popup_boxes plan,
 Stage 5): `cite_label_pos`, `resolve_popup_body`, `render_popup_body`,
 `doc_ref_body_markup` for the box content + body resolution.
+
+### Added — marker overlay + references panel
+
+Two new overlays for the `mathed_mini` (Bevy-free) frontend, both
+pure render-time overlays on top of the cached document layout
+(foot-style: no relayout on toggle, the cached `DocLayout` is reused).
+
+**Marker overlay (Ctrl+Shift+M).** When the overlay is on, every
+`#id` marker in the document gets a small framed label drawn on top
+of the rendered text at the marker's byte position. Toggle: press
+`Ctrl+Shift+M` to show, press again to hide. The label is a 5×7
+bitmap-font `#id` glyph on a pale-yellow translucent background with
+a dark-amber frame, sized to the marker's text. The user said "click
+Ctrl+Shift" without specifying a letter; `Ctrl+Shift+M` is the chosen
+binding (M for markers), one-line change in `app.rs::KeyboardInput`
+if a different key is preferred.
+
+**Z-order is painter's algorithm.** The labels are drawn in
+document order ascending (later markers cover earlier ones), so if
+a marker's name is too long and would extend over an earlier
+marker's label, the later marker wins. Concretely: `#1`, `#2`, `#3`
+in source order → `#3` is drawn last and is on top of any
+overlapping label.
+
+**References panel (Ctrl+0).** A vertical strip drawn below the
+doc area that lists every marker-defined segment whose body
+contains the caret. Toggle: press `Ctrl+0` to open, press again to
+close. The panel shrinks the doc area to make room (the cached
+layout is reused, only the blit is truncated at the new doc-area
+boundary).
+
+**Layout:**
+- An initial one-line header: `tag1 [1], tag2 [2], ...` enumerating
+  the references in document order, where `tagN` is the 10-character
+  alphanumeric tag derived from segment N's body and `[N]` is the
+  1-based index in the panel's entry list.
+- One body box per reference, stacked vertically below the header.
+  Each box is a small rendered preview of the body, with a thin
+  grey frame on a near-opaque pale-cream background.
+- A "no references at cursor" line is shown in the header when the
+  cursor is outside every segment.
+
+**Tag derivation.** The `tag` is the first 10 ASCII-alphanumeric
+characters of the segment's body, in document order. Non-alphanumeric
+characters are stripped (e.g. `F(x) = 0` → `Fx0`). The tag is derived
+from the *rendered* body (markers hidden, cite labels spliced) so
+inner markers don't pollute it. An empty body yields the placeholder
+`"untitled"`.
+
+**Tracking the caret.** The panel re-derives its entries on every
+caret move / edit (the entry list is `O(segments)` to compute).
+Cached body images are transferred by segment range from the old
+entries to the new, so the expensive Typst render only happens for
+entries that newly enter the panel. Edit → invalidate cycle is
+handled by `invalidate()` (which drops the layout, the next frame
+rebuilds it; the panel survives across the rebuild since it lives
+in App state, not in the layout cache).
+
+**Stage 7 (Bevy mathed) — deferred.** The Bevy `mathed` frontend
+isn't updated for this feature; velyst + Typst doesn't expose vello
+scene composition for the overlay. The `mathed_mini` implementation
+is the v1 deliverable; the Bevy port is a tracked follow-up (no
+plan file yet, similar shape to `PLAN_bevy_cite_popup.md`).
+
+**New public API in `mathed_core::markers`** (marker_overlay_and_references_panel
+plan, Stages 1–2):
+- `pub fn derive_tag(body_text: &str) -> String` — first 10
+  ASCII-alphanumeric characters of `body_text`, with
+  `"untitled"` as a fallback.
+- `pub struct ReferencesEntry { tag, segment_range }` — one entry
+  in the panel.
+- `pub fn references_for_cursor(doc_text, scan, cursor_byte) -> Vec<ReferencesEntry>`
+  — all segments containing the caret (inclusive on both ends,
+  matching `active_translator_span`).
+
+**New modules in `mathed_mini`** (Stages 3–4):
+- `marker_overlay.rs` — `MarkerLabel`, `collect_marker_labels`,
+  `draw_marker_label`, `draw_marker_overlay`, plus a public
+  `FONT5X7` 5×7 bitmap font table.
+- `references_panel.rs` — `ReferencesPanelEntry`,
+  `ReferencesPanelData`, `open_references_panel`,
+  `update_references_panel`, `render_entry_body`, `panel_height`,
+  `header_text`, `draw_references_panel`.
+
+**Keybindings in `mathed_mini::app::App`:**
+- `Ctrl+Shift+M` → toggle marker overlay (`toggle_marker_overlay`).
+- `Ctrl+0` → toggle references panel (`toggle_references_panel`).
+- All caret-move / edit paths now route through `caret_changed()`,
+  which (in addition to the old `reset_blink + request_redraw`)
+  re-derives the open panel's entries.

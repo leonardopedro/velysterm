@@ -37,9 +37,10 @@ pub use glyphs::{
 };
 pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, ReferenceEntry,
-    ReferenceKind, Segment, auto_marker_id, auto_marker_token,
-    backslash_escaped, cite_label_text, lowest_free_marker_numbers,
-    next_marker_id, resolve_segments, scan, scan_references,
+    ReferenceKind, ReferencesEntry, Segment, auto_marker_id,
+    auto_marker_token, backslash_escaped, cite_label_text,
+    derive_tag, lowest_free_marker_numbers, next_marker_id,
+    references_for_cursor, resolve_segments, scan, scan_references,
 };
 pub use semantics::{
     Definition, KernelStatement, Occurrence, SemanticIndex,

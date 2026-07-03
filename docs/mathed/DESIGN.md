@@ -120,6 +120,94 @@ full set of helpers in `mathed_mini::cite_popup`
 (`cite_label_pos`, `resolve_popup_body`, `render_popup_body`,
 `doc_ref_body_markup`).
 
+### Marker overlay + references panel
+
+Two new overlays for the `mathed_mini` frontend, both foot-style
+(separate the expensive content render from the cheap overlay):
+the cached `DocLayout` is reused, the overlays are render-time
+pixel writes on top of the blitted doc image, and the overlays
+toggle without invalidating the layout.
+
+**Marker overlay (Ctrl+Shift+M).** When the overlay is on, every
+`#id` marker in the document gets a small framed label drawn on top
+of the rendered text at the marker's byte position. The label is a
+5×7 bitmap-font `#id` glyph on a pale-yellow translucent
+background with a dark-amber 1-px frame. The user said "click
+Ctrl+Shift" for the toggle; we bind it to **Ctrl+Shift+M** (M for
+markers) so a single key is well-defined in winit, with a clear
+one-line change in `app.rs::KeyboardInput` if a different key is
+preferred.
+
+**Z-order.** The labels are drawn in document order ascending
+(painter's algorithm: later markers cover earlier ones), so the
+last marker in the doc is always on top of any earlier marker it
+overlaps. The user explicitly asked for "the last marker always
+should appear on top, and so on on this order until the first
+marker"; painter's algorithm is the natural implementation.
+
+**References panel (Ctrl+0).** A vertical strip drawn below the
+doc area that lists every marker-defined segment whose body
+contains the caret. The doc area is shrunk to make room (the
+cached layout is reused, only the blit is truncated at the new
+doc-area boundary).
+
+**Panel layout:**
+- An initial one-line header: `tag1 [1], tag2 [2], ...` enumerating
+  the references in document order. `tagN` is the 10-character
+  alphanumeric tag derived from segment N's body, `[N]` is the
+  1-based index in the panel's entry list. When the cursor is
+  outside every segment, the header is the placeholder
+  `(no references at cursor)`.
+- One body box per reference, stacked vertically below the header.
+  Each box is a small rendered preview of the body (laid out via
+  `render_entry_body` → `transform::to_render_text` →
+  `render::render_markup` at 400 pt), with a thin grey 1-px frame
+  on a near-opaque pale-cream background.
+- The panel height is capped at `min(400 px, win_h * 50 %)` so the
+  doc never loses more than half the window. Per-entry body images
+  are capped at 100 px tall.
+
+**Tag derivation.** `derive_tag(body) → String` returns the first
+10 ASCII-alphanumeric characters of `body` (in order, contiguous,
+dropping non-alphanumerics), or `"untitled"` for an empty body.
+Tags are derived from the **rendered** body (markers hidden, cite
+labels spliced) so inner markers don't pollute them. ASCII-only on
+purpose: the tag is a short, typeable identifier, not a localized
+name.
+
+**Tracking the caret.** The panel re-derives its entries on every
+caret move / edit (the entry list is `O(segments)` to compute).
+The entry list is rebuilt by `update_references_panel`, which
+transfers cached body images from the old entries to the new by
+segment range — the expensive Typst render only happens for
+entries that newly enter the panel. The integration is in
+`caret_changed()`: every caret-move / edit method now routes
+through that helper, which does `reset_blink` + `update_references_panel`
++ `request_redraw`.
+
+**Caret-on-cite inside a popup.** The marker overlay and the
+references panel both coexist with the existing cite popup stack
+(Stage 5, `cite_popup_boxes` plan). The draw order in `redraw` is:
+doc image → selection → caret → marker overlay → popup boxes →
+references panel. Popup boxes are drawn on top of the marker labels
+(the user can see both when a popup isn't open). When the
+references panel is open, all of the above are clipped at the
+`doc_h` boundary so labels and popups don't bleed into the panel.
+
+**Stage 7 (Bevy `mathed`) — deferred.** The Bevy frontend isn't
+updated for this feature. velyst + Typst doesn't expose vello
+scene composition for the overlay (the same limitation that
+postponed the cite-popup boxes for Bevy). The `mathed_mini`
+implementation is the v1 deliverable; the Bevy port is a tracked
+follow-up.
+
+**Public API**:
+- `mathed_core::markers::derive_tag(body) → String`.
+- `mathed_core::markers::ReferencesEntry { tag, segment_range }`.
+- `mathed_core::markers::references_for_cursor(doc, scan, byte) → Vec<ReferencesEntry>`.
+- `mathed_mini::marker_overlay::{MarkerLabel, collect_marker_labels, draw_marker_label, draw_marker_overlay, FONT5X7}`.
+- `mathed_mini::references_panel::{ReferencesPanelEntry, ReferencesPanelData, open_references_panel, update_references_panel, render_entry_body, panel_height, header_text, draw_references_panel}`.
+
 ## Render pipeline
 
 ```
