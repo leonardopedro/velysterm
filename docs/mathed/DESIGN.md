@@ -128,15 +128,17 @@ the cached `DocLayout` is reused, the overlays are render-time
 pixel writes on top of the blitted doc image, and the overlays
 toggle without invalidating the layout.
 
-**Marker overlay (Ctrl+Shift+M).** When the overlay is on, every
+**Marker overlay (Ctrl+Shift).** When the overlay is on, every
 `#id` marker in the document gets a small framed label drawn on top
 of the rendered text at the marker's byte position. The label is a
 5×7 bitmap-font `#id` glyph on a pale-yellow translucent
-background with a dark-amber 1-px frame. The user said "click
-Ctrl+Shift" for the toggle; we bind it to **Ctrl+Shift+M** (M for
-markers) so a single key is well-defined in winit, with a clear
-one-line change in `app.rs::KeyboardInput` if a different key is
-preferred.
+background with a dark-amber 1-px frame. The trigger is the
+**rising edge of "Ctrl+Shift both held"** in
+`WindowEvent::ModifiersChanged` — the user said "click Ctrl+Shift"
+with no third key. The previous state is remembered in
+`App::prev_mods_both` so the toggle only fires on the transition
+into "both held", not on every modifier event (releasing one of
+the two keys and re-pressing it would otherwise re-toggle).
 
 **Z-order.** The labels are drawn in document order ascending
 (painter's algorithm: later markers cover earlier ones), so the

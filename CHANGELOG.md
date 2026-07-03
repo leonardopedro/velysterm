@@ -127,15 +127,16 @@ Two new overlays for the `mathed_mini` (Bevy-free) frontend, both
 pure render-time overlays on top of the cached document layout
 (foot-style: no relayout on toggle, the cached `DocLayout` is reused).
 
-**Marker overlay (Ctrl+Shift+M).** When the overlay is on, every
+**Marker overlay (Ctrl+Shift).** When the overlay is on, every
 `#id` marker in the document gets a small framed label drawn on top
-of the rendered text at the marker's byte position. Toggle: press
-`Ctrl+Shift+M` to show, press again to hide. The label is a 5×7
-bitmap-font `#id` glyph on a pale-yellow translucent background with
-a dark-amber frame, sized to the marker's text. The user said "click
-Ctrl+Shift" without specifying a letter; `Ctrl+Shift+M` is the chosen
-binding (M for markers), one-line change in `app.rs::KeyboardInput`
-if a different key is preferred.
+of the rendered text at the marker's byte position. Toggle: tap
+`Ctrl+Shift` (the modifier combo itself, no third key) to show,
+tap again to hide. The detection watches the rising edge of "Ctrl
++Shift both held" in `WindowEvent::ModifiersChanged` — the previous
+state is remembered in `App::prev_mods_both` so the toggle only
+fires on the transition, not on every modifier event. The label
+is a 5×7 bitmap-font `#id` glyph on a pale-yellow translucent
+background with a dark-amber frame, sized to the marker's text.
 
 **Z-order is painter's algorithm.** The labels are drawn in
 document order ascending (later markers cover earlier ones), so if
@@ -205,7 +206,9 @@ plan, Stages 1–2):
   `header_text`, `draw_references_panel`.
 
 **Keybindings in `mathed_mini::app::App`:**
-- `Ctrl+Shift+M` → toggle marker overlay (`toggle_marker_overlay`).
+- `Ctrl+Shift` (modifier combo rising edge) → toggle marker overlay
+  (`toggle_marker_overlay`). Detection lives in
+  `WindowEvent::ModifiersChanged`, not the keypress handler.
 - `Ctrl+0` → toggle references panel (`toggle_references_panel`).
 - All caret-move / edit paths now route through `caret_changed()`,
   which (in addition to the old `reset_blink + request_redraw`)

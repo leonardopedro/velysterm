@@ -83,6 +83,14 @@ struct App {
     mouse_down: bool,
     /// Current keyboard modifiers (Shift/Ctrl) — updated on ModifiersChanged.
     mods: ModifiersState,
+    /// Previous "Ctrl+Shift both held" state. The marker overlay
+    /// toggles on the transition from "not both" to "both"
+    /// (the user said "click Ctrl+Shift" to show, click again to
+    /// hide — pure modifier combo, no third key). The previous
+    /// state is needed to detect the rising edge; without it
+    /// the overlay would re-toggle on every modifier event
+    /// (release + re-press of either key would flip it again).
+    prev_mods_both: bool,
     /// Cached laid-out page; `None` until first render or after invalidation.
     layout: Option<DocLayout>,
     /// Width (px) the cached layout was laid out at.
@@ -147,6 +155,7 @@ impl App {
             sel_anchor: None,
             mouse_down: false,
             mods: ModifiersState::empty(),
+            prev_mods_both: false,
             layout: None,
             layout_width: 0,
             layout_panel: None,
@@ -204,10 +213,29 @@ impl App {
         self.request_redraw();
     }
 
-    /// Toggle the marker overlay on/off (Ctrl+Shift+M).
+    /// Toggle the marker overlay on/off. Triggered by the
+    /// rising edge of "Ctrl+Shift both held" in
+    /// `WindowEvent::ModifiersChanged` — the user said "click
+    /// Ctrl+Shift" with no third key, so this is called from
+    /// there rather than from a keypress handler.
     fn toggle_marker_overlay(&mut self) {
         self.show_marker_overlay = !self.show_marker_overlay;
         self.request_redraw();
+    }
+
+    /// `true` when the modifier state has just transitioned
+    /// into "Ctrl+Shift both held" — the rising edge that
+    /// toggles the marker overlay. `prev_both` is the
+    /// `App::prev_mods_both` snapshot from the previous
+    /// `ModifiersChanged` event. Pure helper so the edge
+    /// detection is unit-testable independent of winit.
+    fn marker_overlay_rising_edge(
+        new_state: ModifiersState,
+        prev_both: bool,
+    ) -> bool {
+        let new_both =
+            new_state.control_key() && new_state.shift_key();
+        new_both && !prev_both
     }
 
     /// Toggle the references panel on/off (Ctrl+0). On open, build
@@ -1230,7 +1258,25 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(_) => self.request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::ModifiersChanged(m) => {
-                self.mods = m.state();
+                // Marker overlay toggle (marker_overlay_and_references_panel
+                // plan, Stage 5) on the rising edge of "Ctrl+Shift
+                // both held" — the user asked for "click Ctrl+Shift"
+                // (no third key). The previous state is remembered
+                // in `prev_mods_both` so the toggle only fires on
+                // the transition, not on every modifier event
+                // (releasing one of the two keys and re-pressing
+                // it would otherwise re-toggle).
+                let new_state = m.state();
+                if Self::marker_overlay_rising_edge(
+                    new_state,
+                    self.prev_mods_both,
+                ) {
+                    self.toggle_marker_overlay();
+                    self.push_a11y_update();
+                }
+                self.prev_mods_both =
+                    new_state.control_key() && new_state.shift_key();
+                self.mods = new_state;
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Some((position.x, position.y));
@@ -1266,20 +1312,6 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                 ..
             } => {
-                // Ctrl+Shift shortcuts: marker overlay toggle
-                // (marker_overlay_and_references_panel plan, Stage 5).
-                // The user said "click Ctrl+Shift" for the overlay
-                // toggle; we bind it to Ctrl+Shift+M (M for
-                // markers) so a single key is well-defined in winit.
-                if self.mods.control_key()
-                    && self.mods.shift_key()
-                    && let Key::Character(ch) = &logical_key
-                    && (ch == "M" || ch == "m")
-                {
-                    self.toggle_marker_overlay();
-                    self.push_a11y_update();
-                    return;
-                }
                 // Ctrl-key shortcuts: copy / paste / cut / select-all (P5 #25).
                 if self.mods.control_key()
                     && self.handle_ctrl_shortcut(&logical_key)
@@ -1486,5 +1518,36 @@ mod tests {
         let doc = "\\cite(authorA89)";
         let scope = cite_popup_scope_text(doc, &[1]);
         assert_eq!(scope, doc);
+    }
+
+    #[test]
+    fn marker_overlay_rising_edge_only_on_transition() {
+        use winit::keyboard::ModifiersState;
+        // No modifiers held → no toggle, regardless of prev.
+        assert!(!super::App::marker_overlay_rising_edge(
+            ModifiersState::empty(),
+            false,
+        ));
+        assert!(!super::App::marker_overlay_rising_edge(
+            ModifiersState::empty(),
+            true,
+        ));
+        // Only Ctrl held → no toggle.
+        assert!(!super::App::marker_overlay_rising_edge(
+            ModifiersState::CONTROL,
+            false,
+        ));
+        // Only Shift held → no toggle.
+        assert!(!super::App::marker_overlay_rising_edge(
+            ModifiersState::SHIFT,
+            false,
+        ));
+        // Ctrl+Shift both held, prev was empty → rising edge
+        // → toggle.
+        let both = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(super::App::marker_overlay_rising_edge(both, false));
+        // Ctrl+Shift both held, prev was both → already in
+        // state, no re-toggle.
+        assert!(!super::App::marker_overlay_rising_edge(both, true));
     }
 }

@@ -23,13 +23,20 @@ no relayout on toggle, the cached `DocLayout` is reused).
 
 ## Keybindings
 
-- `Ctrl+Shift+M` — toggle marker overlay (M = markers)
+- `Ctrl+Shift` (modifier combo, rising edge of "both held") — toggle
+  marker overlay. Detection is in `WindowEvent::ModifiersChanged`,
+  not in a keypress handler. The previous "both held" state is
+  remembered in `App::prev_mods_both` so the toggle only fires on
+  the transition.
 - `Ctrl+0` — toggle references panel at the current caret position
 - `ESC` — close popup (existing); no change for these new overlays
 
-The user said "when I click Ctrl+Shift" without specifying a letter.
-`Ctrl+Shift+M` is the chosen binding; if a different key is preferred,
-it's a one-line change in `app.rs::handle_ctrl_shortcut`.
+The user said "when I click Ctrl+Shift" without specifying a third
+key, so the binding is the modifier combo itself (no letter). The
+rising-edge detection is necessary because winit fires
+`ModifiersChanged` for every modifier change (Ctrl down, Shift down,
+Shift up, Ctrl up, …) and we want exactly one toggle per "click
+Ctrl+Shift".
 
 ## Stage 1 — mathed_core: `derive_tag`
 
