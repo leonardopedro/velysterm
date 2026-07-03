@@ -62,6 +62,64 @@ The core naming helpers are in `mathed_core::markers`:
 `auto_marker_token`; the entire behavior is unit-testable from
 `mathed_core` without an event loop.
 
+### Numbered `\cite(...)` references + Ctrl+N popup boxes
+
+A `\cite(...)` statement is a **numbered reference**: the cite
+token is hidden like any property statement, and a visible label
+`[N]` is spliced in its place by the transform layer. A single
+counter is walked in document order across the whole document;
+both forms share it:
+
+- `\cite(#s, #f)` — **doc-ref** (cite_popup_boxes plan, Stage 1).
+  Resolves to `PropKind::Reference` (a segment with body) when
+  *all* args are marker refs. The body is the text between `#s`
+  and `#f`; the cite token itself is outside the body. Renders
+  as `[N]`.
+- `\cite(key1, key2, ...)` — **bib-key cite**. Resolves to
+  `PropKind::Cite` (no segment) when any arg is a literal. Renders
+  as `[N1, N2, ...]`, one number per key.
+
+**Sequential numbering across forms.** `scan_references` walks
+all `\cite` statements in document order, assigning each one
+(or each key of a bib-key cite) a unique sequential number
+starting at 1. A doc with `\cite(#1,#2) \cite(k1) \cite(k2,k3)
+\cite(#3,#4)` produces `[1] [2] [3, 4] [5]`.
+
+**Ctrl+N popup boxes** (Stage 4-6, `mathed_mini` frontend). The
+`App` carries a `popup_stack: Vec<u32>` of cite numbers currently
+popped up as overlay boxes. Pressing `Ctrl+1`..`Ctrl+9` pushes
+the matching number; `ESC` or pressing `Ctrl+N` again pops the
+topmost matching entry. The box is a translucent, framed overlay
+drawn on top of the cached `DocLayout` — the base document is
+**not** re-laid-out. The box content is the rendered body of the
+referenced segment (doc-ref) or a placeholder showing the bib
+keys (bib-key — full `mathed_biblio` integration is a follow-up).
+
+**Recursive expansion.** A `\cite(...)` inside an open box's
+body has its own `[N]` numbering, scoped to the body. Pressing
+`Ctrl+1` inside the box of the outer cite pops up the inner
+cite as a second box, drawn over the underlying text below the
+first box. The v1 flat `Vec<u32>` stack supports one level of
+nesting per box; a tree data structure is the Stage 7 follow-up.
+
+**Render-only label, not a copy span.** The label `[N]` is
+spliced into the rendered text as inserted markup, not a
+`CopySpan` entry. Caret positioning that lands on the label is
+mapped to the underlying doc byte (the cite token's start) via
+the `OffsetMap`.
+
+The `TransformOptions::references: Vec<ReferenceEntry>` is the
+single seam between the marker/scanner layer and the transform
+layer: the caller (`doc_to_render` in `mathed_mini::render`)
+populates it from `scan_references(&scan)` and the transform
+splices the labels.
+
+Public API: `ReferenceEntry`, `ReferenceKind::{DocumentRef, Bibliography}`,
+`scan_references`, `cite_label_text` in `mathed_core::markers`; the
+full set of helpers in `mathed_mini::cite_popup`
+(`cite_label_pos`, `resolve_popup_body`, `render_popup_body`,
+`doc_ref_body_markup`).
+
 ## Render pipeline
 
 ```

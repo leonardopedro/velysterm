@@ -106,6 +106,14 @@ pub struct TransformOptions {
     /// dependent `\prob`/`\model`. The transform stays kernel-agnostic: the
     /// caller (KernelBridge) populates this from dispatch errors.
     pub translator_errors: HashMap<usize, String>,
+    /// Cite references (cite_popup_boxes plan, Stage 3). When present, the
+    /// transform replaces each `\cite(...)` token (which is hidden) with
+    /// its visible label `[N]` (doc-ref) or `[N1, N2, ...]` (bib-key).
+    /// `ReferenceEntry::stmt_idx` is the index into `MarkerScan::stmts`,
+    /// so the transform looks up the corresponding `PropertyStmt::range`
+    /// to find the cite token to hide and the byte to splice the label at.
+    /// The label is render-only markup (no `OffsetMap` entry).
+    pub references: Vec<crate::markers::ReferenceEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,7 +204,19 @@ pub fn to_render_text_range(
             })
     };
 
-    // Hidden regions (token + one swallowed trailing space).
+    // Hidden regions (token + one swallowed trailing space). Cite
+    // statements that have a label spliced in DO NOT swallow the
+    // trailing space — the label takes the cite's place, but the
+    // surrounding whitespace (the space between the cite and the next
+    // word) is part of the document and must be preserved.
+    let cite_label_starts: std::collections::HashSet<usize> = opts
+        .references
+        .iter()
+        .filter_map(|e| {
+            let s = scan.stmts.get(e.stmt_idx)?;
+            Some(s.range.start)
+        })
+        .collect();
     let mut hidden: Vec<Range<usize>> = Vec::new();
     let mut shown: Vec<Range<usize>> = Vec::new();
     for tok in &tokens {
@@ -204,7 +224,9 @@ pub fn to_render_text_range(
             shown.push(tok.clone());
         } else {
             let mut end = tok.end;
-            if end < range.end
+            let is_cite = cite_label_starts.contains(&tok.start);
+            if !is_cite
+                && end < range.end
                 && doc_text.as_bytes().get(end) == Some(&b' ')
             {
                 end += 1;
@@ -289,6 +311,43 @@ pub fn to_render_text_range(
             .collect()
     };
 
+    // Cite labels (cite_popup_boxes plan, Stage 3): for each `\cite(...)`
+    // statement with a ReferenceEntry in `opts.references`, splice the
+    // visible label `[N]` (doc-ref) or `[N1, N2, ...]` (bib-key) at the
+    // cite's start byte. The cite statement itself is hidden (it's a
+    // property statement token); the label is render-only markup, not a
+    // `CopySpan` entry. Skip cites whose range is outside `range`.
+    let cite_label_points: Vec<(usize, String)> = {
+        let mut out = Vec::new();
+        for entry in &opts.references {
+            let Some(stmt) = scan.stmts.get(entry.stmt_idx) else {
+                continue;
+            };
+            if stmt.range.start < range.start
+                || stmt.range.end > range.end
+            {
+                continue;
+            }
+            // Don't splice if the cite is revealed (caret/selection on it);
+            // the raw token wins in that case so the user can edit it.
+            let revealed = opts.show_hidden
+                || opts.reveal.iter().any(|r| {
+                    r.start <= stmt.range.end
+                        && stmt.range.start <= r.end
+                });
+            if revealed {
+                continue;
+            }
+            // Bound on the start byte so the splicing loop hits it.
+            bounds.push(stmt.range.start);
+            out.push((
+                stmt.range.start,
+                crate::markers::cite_label_text(entry),
+            ));
+        }
+        out
+    };
+
     bounds.extend(toggles.iter().copied());
     bounds.sort_unstable();
     bounds.dedup();
@@ -339,6 +398,15 @@ pub fn to_render_text_range(
         for (pos, markup) in &annotation_points {
             if *pos == start {
                 out.push_str(markup);
+            }
+        }
+        // Splice any cite label whose insertion point is `start` (at the
+        // cite token's start byte). The cite token is hidden, so the
+        // label appears in its place. The label is render-only markup,
+        // not a `CopySpan` entry.
+        for (pos, label) in &cite_label_points {
+            if *pos == start {
+                out.push_str(label);
             }
         }
         if start == end || hidden_at(start) {
@@ -578,6 +646,18 @@ mod tests {
         to_render_text(text, &s, &segs, opts)
     }
 
+    fn render_with_refs(
+        text: &str,
+        opts: &TransformOptions,
+    ) -> RenderOutput {
+        let s = scan(text);
+        let refs = crate::markers::scan_references(&s);
+        let segs = resolve_segments(&s);
+        let mut opts = opts.clone();
+        opts.references = refs;
+        to_render_text(text, &s, &segs, &opts)
+    }
+
     #[test]
     fn markers_hidden_with_trailing_space() {
         let out = render(
@@ -612,6 +692,34 @@ mod tests {
             },
         );
         assert_eq!(out.text, "\\#1 x \\\\b(\\#1,\\#1)");
+    }
+
+    #[test]
+    fn doc_ref_cite_label_inserted() {
+        let text = "#1 a #2 \\cite(#1,#2)";
+        let out =
+            render_with_refs(text, &TransformOptions::default());
+        // Cite token is hidden; body `a` is rendered; label `[1]`
+        // appears at the cite's start (after `a `).
+        assert_eq!(out.text, "a [1]");
+    }
+
+    #[test]
+    fn bib_key_cite_label_inserted() {
+        let text = "see \\cite(authorA89, authorB94) for details";
+        let out =
+            render_with_refs(text, &TransformOptions::default());
+        assert_eq!(out.text, "see [1, 2] for details");
+    }
+
+    #[test]
+    fn cite_labels_number_sequentially() {
+        let text = "#1 a #2 \\cite(#1,#2) and \\cite(k1) and #3 b #4 \\cite(#3,#4)";
+        let out =
+            render_with_refs(text, &TransformOptions::default());
+        // Cite 1 → [1], cite 2 → [2], cite 3 → [3]. The body of cite 1
+        // (`a`) appears first, then the label, etc.
+        assert_eq!(out.text, "a [1] and [2] and b [3]");
     }
 
     #[test]

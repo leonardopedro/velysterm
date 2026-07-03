@@ -138,6 +138,25 @@ impl PropKind {
         }
     }
 
+    /// Resolve a statement's `PropKind` from its name and arguments.
+    /// Differs from [`PropKind::of`] for the `\cite` family:
+    /// - `\cite(#s, #f)` (the *only* args are marker refs) becomes a
+    ///   `Reference` segment so the doc-text between `#s` and `#f` can
+    ///   be cited and popped up;
+    /// - `\cite(key1, key2, ...)` (any literal args) is a `Cite`
+    ///   (no segment, just a labeled bibliography reference). The
+    ///   marker refs in mixed form (`\cite(#s, #f, "key1", ...)`)
+    ///   are spatial context only and don't make a `Reference` segment.
+    pub fn resolve(name: &str, args: &[Arg]) -> Self {
+        if matches!(name, "cite" | "citation")
+            && !args.is_empty()
+            && args.iter().all(|a| matches!(a, Arg::MarkerRef { .. }))
+        {
+            return Self::Reference;
+        }
+        Self::of(name)
+    }
+
     pub fn is_visual(self) -> bool {
         matches!(self, Self::Bold | Self::Italic | Self::Underline)
     }
@@ -243,7 +262,7 @@ pub fn resolve_segments(scan: &MarkerScan) -> Vec<Segment> {
         };
         segments.push(Segment {
             prop: stmt.name.clone(),
-            kind: PropKind::of(&stmt.name),
+            kind: PropKind::resolve(&stmt.name, &stmt.args),
             start_id: start_id.to_owned(),
             end_id: end_id.to_owned(),
             span,
@@ -317,6 +336,114 @@ pub fn auto_marker_token(text: &str, at: usize) -> Option<String> {
     }
     let n = lowest_free_marker_numbers(&scan(text), 1)[0];
     Some(format!("#{}", auto_marker_id(n)))
+}
+
+/// One `\cite(...)` statement's auto-assigned numbers and target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceEntry {
+    /// Index into [`MarkerScan::stmts`].
+    pub stmt_idx: usize,
+    /// Sequential numbers assigned to this cite, starting at 1 across
+    /// the whole document. A doc-ref cite gets one number; a bib-key
+    /// cite gets one number per key.
+    pub numbers: Vec<u64>,
+    /// Where the cite points.
+    pub kind: ReferenceKind,
+}
+
+/// Target of a `\cite(...)` statement (cite_popup_boxes plan, Stage 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferenceKind {
+    /// `\cite(#s, #f)` — references the document part between `#s` and
+    /// `#f`. `body` is the segment's body span (text between the
+    /// markers), or `None` if `#s`/`#f` are missing or out of order
+    /// (the cite is then dangling and the popup shows a placeholder).
+    DocumentRef {
+        start_id: String,
+        end_id: String,
+        body: Option<Range<usize>>,
+    },
+    /// `\cite(key1, key2, ...)` — references one or more bibliography
+    /// keys (literal args, not marker refs).
+    Bibliography { keys: Vec<String> },
+}
+
+/// Walk all `\cite(...)` statements in document order, assigning each
+/// one (or each key of a bib-key cite) a unique sequential number
+/// starting at 1. Document-ref and bib-key cites share the same
+/// counter so a document with both has a single `[N]` sequence.
+pub fn scan_references(scan: &MarkerScan) -> Vec<ReferenceEntry> {
+    let mut out = Vec::new();
+    let mut n: u64 = 1;
+    for (idx, stmt) in scan.stmts.iter().enumerate() {
+        if stmt.name != "cite" && stmt.name != "citation" {
+            continue;
+        }
+        let kind = match stmt.args.as_slice() {
+            [
+                Arg::MarkerRef { id: s, .. },
+                Arg::MarkerRef { id: e, .. },
+                ..,
+            ] if stmt
+                .args
+                .iter()
+                .all(|a| matches!(a, Arg::MarkerRef { .. })) =>
+            {
+                let body = (|| -> Option<Range<usize>> {
+                    let s_m =
+                        scan.markers.iter().find(|m| &m.id == s)?;
+                    let e_m =
+                        scan.markers.iter().find(|m| &m.id == e)?;
+                    (s_m.range.end <= e_m.range.start)
+                        .then(|| s_m.range.end..e_m.range.start)
+                })();
+                ReferenceKind::DocumentRef {
+                    start_id: s.clone(),
+                    end_id: e.clone(),
+                    body,
+                }
+            }
+            _ => {
+                let keys = stmt
+                    .args
+                    .iter()
+                    .filter_map(|a| match a {
+                        Arg::Literal { text, .. } => {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                ReferenceKind::Bibliography { keys }
+            }
+        };
+        let count = match &kind {
+            ReferenceKind::DocumentRef { .. } => 1,
+            ReferenceKind::Bibliography { keys } => keys.len().max(1),
+        };
+        let numbers: Vec<u64> = (n..n + count as u64).collect();
+        n += count as u64;
+        out.push(ReferenceEntry {
+            stmt_idx: idx,
+            numbers,
+            kind,
+        });
+    }
+    out
+}
+
+/// Format the visible label for a cite: `[N]` for a doc-ref,
+/// `[N1, N2, ...]` for a bib-key cite. Used by the transform when
+/// splicing the label into the rendered text and by frontends when
+/// rendering popup box headers.
+pub fn cite_label_text(entry: &ReferenceEntry) -> String {
+    if entry.numbers.len() == 1 {
+        format!("[{}]", entry.numbers[0])
+    } else {
+        let nums: Vec<String> =
+            entry.numbers.iter().map(|n| n.to_string()).collect();
+        format!("[{}]", nums.join(", "))
+    }
 }
 
 fn try_parse_marker(text: &str, at: usize) -> Option<Marker> {
@@ -484,6 +611,33 @@ mod tests {
     }
 
     #[test]
+    fn cite_with_marker_refs_is_reference_segment() {
+        let text = "#1 x #2 \\cite(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].kind, PropKind::Reference);
+        assert_eq!(segs[0].start_id, "1");
+        assert_eq!(segs[0].end_id, "2");
+        // Body spans from end of #1 (byte 2) to start of #2 (byte 5).
+        assert_eq!(segs[0].span, Some(2..5));
+    }
+
+    #[test]
+    fn cite_with_literal_args_is_no_segment() {
+        let text = "\\cite(authorA89, authorB94)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        assert!(segs.is_empty());
+        assert_eq!(s.stmts.len(), 1);
+        assert_eq!(s.stmts[0].name, "cite");
+        assert_eq!(
+            PropKind::resolve(&s.stmts[0].name, &s.stmts[0].args),
+            PropKind::Cite
+        );
+    }
+
+    #[test]
     fn unbalanced_paren_is_not_a_statement() {
         let s = scan(r"\function(#1,#2");
         assert!(s.stmts.is_empty());
@@ -548,5 +702,83 @@ mod tests {
             auto_marker_token(r"a\\", 3).as_deref(),
             Some("#1i")
         ); // \\# → marker
+    }
+
+    #[test]
+    fn scan_references_numbers_all_cites_sequentially() {
+        // Mixed doc-ref + bib-key cites share a single counter.
+        let text = "#1 a #2 \\cite(#1,#2)\n#3 b #4 \\cite(#3,#4)\n\
+                    \\cite(key1)\n\\cite(key2, key3)\n#5 c #6 \\cite(#5,#6)";
+        let s = scan(text);
+        let refs = scan_references(&s);
+        assert_eq!(refs.len(), 5);
+        let nums: Vec<Vec<u64>> =
+            refs.iter().map(|r| r.numbers.clone()).collect();
+        assert_eq!(
+            nums,
+            vec![vec![1], vec![2], vec![3], vec![4, 5], vec![6]]
+        );
+    }
+
+    #[test]
+    fn scan_references_doc_ref_carries_body_span() {
+        let text = "#1 a #2 \\cite(#1,#2)";
+        let s = scan(text);
+        let refs = scan_references(&s);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].numbers, vec![1]);
+        match &refs[0].kind {
+            ReferenceKind::DocumentRef {
+                start_id,
+                end_id,
+                body,
+            } => {
+                assert_eq!(start_id, "1");
+                assert_eq!(end_id, "2");
+                assert_eq!(
+                    body.as_ref().map(|r| r.clone()),
+                    Some(2..5)
+                );
+            }
+            _ => panic!("expected DocumentRef"),
+        }
+        assert_eq!(cite_label_text(&refs[0]), "[1]");
+    }
+
+    #[test]
+    fn scan_references_bib_ref_carries_keys() {
+        let text = "\\cite(authorA89, authorB94)";
+        let s = scan(text);
+        let refs = scan_references(&s);
+        assert_eq!(refs.len(), 1);
+        match &refs[0].kind {
+            ReferenceKind::Bibliography { keys } => {
+                assert_eq!(
+                    keys,
+                    &vec![
+                        "authorA89".to_string(),
+                        "authorB94".to_string()
+                    ]
+                );
+            }
+            _ => panic!("expected Bibliography"),
+        }
+        assert_eq!(cite_label_text(&refs[0]), "[1, 2]");
+    }
+
+    #[test]
+    fn scan_references_dangling_doc_ref_still_numbered() {
+        // Missing end marker — body is None but the cite still gets a number.
+        let text = "#1 a \\cite(#1,#9)";
+        let s = scan(text);
+        let refs = scan_references(&s);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].numbers, vec![1]);
+        match &refs[0].kind {
+            ReferenceKind::DocumentRef { body, .. } => {
+                assert!(body.is_none());
+            }
+            _ => panic!("expected DocumentRef"),
+        }
     }
 }

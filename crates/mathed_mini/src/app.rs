@@ -90,6 +90,15 @@ struct App {
     bridge: KernelBridge,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
+    /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry is the
+    /// auto-assigned number `N` of a cite currently popped up as a box
+    /// overlay on top of the rendered document. The base document is
+    /// **not** re-rendered when this changes (the box is a render-time
+    /// overlay on top of the cached layout). Pressing `Ctrl+N` pushes `N`
+    /// onto the stack; `ESC` or `Ctrl+N` again pops the topmost entry for
+    /// the same `N`. The deepest entry is the *front* of the stack — the
+    /// one drawn on top of all the others.
+    popup_stack: Vec<u32>,
     /// Caret blink visibility — toggles at [`BLINK_INTERVAL`].
     caret_visible: bool,
     /// When the next caret blink toggle should occur.
@@ -119,6 +128,7 @@ impl App {
             layout_panel: None,
             bridge: KernelBridge::new(),
             kernel_deadline: None,
+            popup_stack: Vec::new(),
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -161,6 +171,67 @@ impl App {
     /// Drop the cached layout so the next redraw recomputes it.
     fn invalidate(&mut self) {
         self.layout = None;
+    }
+
+    /// Draw the cite popup stack (cite_popup_boxes plan, Stage 5).
+    /// Each entry is a number `N`; the box body is the rendered
+    /// referenced content. Boxes are stacked top-to-bottom in stack
+    /// order, anchored below their cite's `[N]` label. The base doc
+    /// is **not** re-laid-out — the boxes are drawn on top of the
+    /// blitted cached image.
+    fn draw_popup_boxes(
+        doc_text: &str,
+        popup_stack: &[u32],
+        buffer: &mut [u32],
+        win_w: usize,
+        win_h: usize,
+        layout: &DocLayout,
+    ) {
+        // Compute the "current scope" text — the base doc, or the
+        // body of the topmost open box when the stack is non-empty
+        // (so a nested Ctrl+N is resolved relative to the parent
+        // box, not the document).
+        let scope = cite_popup_scope_text(doc_text, popup_stack);
+        let mut y_cursor = 0.0;
+        for &target in popup_stack.iter() {
+            let target = target as u64;
+            // Find the target cite in the *base doc* (for screen
+            // positioning), not in the scope — the position is
+            // always relative to the base layout.
+            let Some(label_pos) = crate::cite_popup::cite_label_pos(
+                doc_text, layout, target,
+            ) else {
+                continue;
+            };
+            // The body is resolved in the *scope* text so recursive
+            // expansion uses the right numbering.
+            let body =
+                crate::cite_popup::resolve_popup_body(&scope, target);
+            let body_img = body.as_ref().and_then(|b| {
+                let opts = mathed_core::transform::TransformOptions {
+                    caret: None,
+                    ..Default::default()
+                };
+                crate::cite_popup::render_popup_body(b, &opts)
+            });
+            let (body_ref, body_h) = match &body_img {
+                Some((img, _, _h)) => (Some(img), img.height as f64),
+                None => (None, 60.0),
+            };
+            let top = (label_pos.bottom + y_cursor).round() as usize;
+            let width = label_pos.label_width.max(200.0) as usize;
+            draw_popup_box(
+                buffer,
+                win_w,
+                win_h,
+                label_pos.x.round().max(0.0) as usize,
+                top,
+                width,
+                body_ref,
+            );
+            // Stack: each subsequent box sits below the previous.
+            y_cursor += body_h + 8.0;
+        }
     }
 
     /// Re-run the kernel on the current document and open a polling window so
@@ -334,6 +405,46 @@ impl App {
         self.invalidate();
         self.refresh_kernel();
         self.reset_blink();
+    }
+
+    /// Push a cite onto the popup stack (cite_popup_boxes plan, Stage 4).
+    /// `n` is the user-typed digit (1..=9 for v1). If a cite with that
+    /// auto-assigned number exists in the current scope (the base doc
+    /// or the topmost open box's body), it is pushed onto the stack and
+    /// the cached layout is reused (the box is an overlay, so no
+    /// relayout is needed).
+    fn push_cite_popup(&mut self, n: u8) {
+        if !(1..=9).contains(&n) {
+            return;
+        }
+        let target = n as u32;
+        if cite_number_exists_in_current_scope(self, target) {
+            self.popup_stack.push(target);
+            self.request_redraw();
+        }
+    }
+
+    /// Pop the topmost popup (ESC). Idempotent when the stack is empty.
+    /// If the topmost entry's number matches `n` (when called for
+    /// `Ctrl+N` again), that specific entry is removed; otherwise the
+    /// topmost entry is removed regardless. This makes ESC and
+    /// `Ctrl+N`-again interchangeable.
+    fn pop_cite_popup(&mut self, n: Option<u32>) {
+        let removed = if let Some(target) = n {
+            if let Some(pos) =
+                self.popup_stack.iter().rposition(|&x| x == target)
+            {
+                self.popup_stack.remove(pos);
+                true
+            } else {
+                false
+            }
+        } else {
+            self.popup_stack.pop().is_some()
+        };
+        if removed {
+            self.request_redraw();
+        }
     }
 
     /// Delete the character before the caret (Backspace), or the whole
@@ -560,6 +671,21 @@ impl App {
             {
                 draw_caret(&mut buffer, win_w, win_h, geom);
             }
+            // Cite popup boxes (cite_popup_boxes plan, Stage 5):
+            // drawn *over* the caret so the box is the topmost
+            // visual element. The base doc is not re-laid-out; the
+            // box is a render-time overlay on top of the cached
+            // `layout.image`.
+            if !self.popup_stack.is_empty() {
+                Self::draw_popup_boxes(
+                    self.doc.text(),
+                    &self.popup_stack,
+                    &mut buffer,
+                    win_w,
+                    win_h,
+                    layout,
+                );
+            }
         }
         let _ = buffer.present();
     }
@@ -637,6 +763,115 @@ fn draw_selection(
     }
 }
 
+/// Cite-popup box overlay (cite_popup_boxes plan, Stage 5). Draws a
+/// translucent, framed box on top of the cached doc, with the
+/// rendered body of the cited segment inside. The box frame is a
+/// 2 px opaque dark-blue line; the background is a slightly
+/// translucent near-white (so the doc text behind is still faintly
+/// visible). The box is anchored below the cite's `[N]` label
+/// (drawn in the next line(s) of the doc), and the bottom edge is
+/// clipped to the window.
+fn draw_popup_box(
+    buffer: &mut [u32],
+    win_w: usize,
+    win_h: usize,
+    x: usize,
+    top: usize,
+    width: usize,
+    body: Option<&imaging::RgbaImage>,
+) {
+    const FRAME: u32 = 0x0020_60F0; // same calm blue as the caret
+    const FRAME_THICKNESS: usize = 2;
+    const BG_R: u32 = 0xFF;
+    const BG_G: u32 = 0xFF;
+    const BG_B: u32 = 0xFF;
+    const BG_A: u32 = 0xE6; // ~90% white: doc is dimly visible behind
+    let inv = 255 - BG_A;
+
+    let body_h = body.map(|img| img.height as usize).unwrap_or(0);
+    let body_w = body.map(|img| img.width as usize).unwrap_or(width);
+    let total_h = body_h + FRAME_THICKNESS * 2;
+    let total_w =
+        (width.max(body_w) + FRAME_THICKNESS * 2).min(win_w);
+    let x0 = x.min(win_w.saturating_sub(total_w));
+    let y0 = top.min(win_h.saturating_sub(total_h));
+
+    // Fill the body area with a translucent white wash.
+    for y in y0..(y0 + total_h).min(win_h) {
+        let row = y * win_w;
+        for px in &mut buffer[row + x0..row + x0 + total_w] {
+            let pr = (*px >> 16) & 0xFF;
+            let pg = (*px >> 8) & 0xFF;
+            let pb = *px & 0xFF;
+            let cr = (BG_R * BG_A + pr * inv) / 255;
+            let cg = (BG_G * BG_A + pg * inv) / 255;
+            let cb = (BG_B * BG_A + pb * inv) / 255;
+            *px = (cr << 16) | (cg << 8) | cb;
+        }
+    }
+    // Draw the frame.
+    for t in 0..FRAME_THICKNESS {
+        // Top + bottom edges.
+        for xi in x0..(x0 + total_w).min(win_w) {
+            if y0 + t < win_h {
+                buffer[(y0 + t) * win_w + xi] = FRAME;
+            }
+            if y0 + total_h.saturating_sub(1 + t) < win_h {
+                buffer[(y0 + total_h - 1 - t) * win_w + xi] = FRAME;
+            }
+        }
+        // Left + right edges.
+        for yi in y0..(y0 + total_h).min(win_h) {
+            if x0 + t < win_w {
+                buffer[yi * win_w + x0 + t] = FRAME;
+            }
+            if x0 + total_w.saturating_sub(1 + t) < win_w {
+                buffer[yi * win_w + x0 + total_w - 1 - t] = FRAME;
+            }
+        }
+    }
+    // Blit the body image inside the frame.
+    if let Some(img) = body {
+        let ix0 = x0 + FRAME_THICKNESS;
+        let iy0 = y0 + FRAME_THICKNESS;
+        let copy_w =
+            (img.width as usize).min(win_w.saturating_sub(ix0));
+        let copy_h =
+            (img.height as usize).min(win_h.saturating_sub(iy0));
+        for y in 0..copy_h {
+            let src_row = y * img.width as usize * 4;
+            let dst_row = (iy0 + y) * win_w;
+            for xi in 0..copy_w {
+                let s = src_row + xi * 4;
+                let (r, g, b, a) = (
+                    img.data[s] as u32,
+                    img.data[s + 1] as u32,
+                    img.data[s + 2] as u32,
+                    img.data[s + 3] as u32,
+                );
+                if a == 0 {
+                    continue;
+                }
+                if a == 255 {
+                    buffer[dst_row + ix0 + xi] =
+                        (r << 16) | (g << 8) | b;
+                } else {
+                    let inv = 255 - a;
+                    let px = buffer[dst_row + ix0 + xi];
+                    let pr = (px >> 16) & 0xFF;
+                    let pg = (px >> 8) & 0xFF;
+                    let pb = px & 0xFF;
+                    let cr = (r * a + pr * inv) / 255;
+                    let cg = (g * a + pg * inv) / 255;
+                    let cb = (b * a + pb * inv) / 255;
+                    buffer[dst_row + ix0 + xi] =
+                        (cr << 16) | (cg << 8) | cb;
+                }
+            }
+        }
+    }
+}
+
 /// Ordered selection range from an anchor and caret, or `None` when empty
 /// (anchor absent, or equal to the caret). Pure helper so the selection
 /// maths is unit-testable independent of the winit/softbuffer `App` state.
@@ -653,6 +888,61 @@ fn selection_range(
     } else {
         Some(caret..a)
     }
+}
+
+/// Cite-popup body resolver (cite_popup_boxes plan, Stage 4). Given the
+/// current base-document text and the popup stack, returns the text
+/// scope in which the user-typed `Ctrl+N` should be resolved. For an
+/// empty stack, the scope is the base doc. For a non-empty stack, the
+/// scope is the body of the topmost open popup (so nested cites are
+/// numbered relative to the *current* box, not the document — the
+/// recursive-expansion behavior the user asked for).
+fn cite_popup_scope_text(
+    doc_text: &str,
+    popup_stack: &[u32],
+) -> String {
+    if popup_stack.is_empty() {
+        return doc_text.to_string();
+    }
+    let refs = mathed_core::markers::scan_references(
+        &mathed_core::markers::scan(doc_text),
+    );
+    // Walk from the topmost (deepest) entry to find its body, then scan
+    // the body's own references. For a v1 flat stack, the recursive
+    // expansion only goes one level deep: each new cite is relative to
+    // the body of the *previous* cite. A full tree is Stage 6's
+    // follow-up.
+    let top = *popup_stack.last().unwrap() as u64;
+    for entry in &refs {
+        if !entry.numbers.contains(&top) {
+            continue;
+        }
+        if let mathed_core::markers::ReferenceKind::DocumentRef {
+            body: Some(body),
+            ..
+        } = &entry.kind
+        {
+            return doc_text[body.clone()].to_string();
+        }
+    }
+    doc_text.to_string()
+}
+
+/// `true` if a cite with auto-assigned number `target` exists in the
+/// current popup scope (the base doc, or the topmost open box's body).
+/// `app` is borrowed for the doc text + popup stack only.
+fn cite_number_exists_in_current_scope(
+    app: &App,
+    target: u32,
+) -> bool {
+    let target = target as u64;
+    let scope =
+        cite_popup_scope_text(app.doc.text(), &app.popup_stack);
+    mathed_core::markers::scan_references(
+        &mathed_core::markers::scan(&scope),
+    )
+    .iter()
+    .any(|e| e.numbers.contains(&target))
 }
 
 /// clipped to the window. softbuffer pixels are `0x00RRGGBB`.
@@ -834,7 +1124,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let shift = self.mods.shift_key();
                 match logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Escape) => {
+                        // ESC: if a cite popup is open, pop the
+                        // topmost; otherwise fall through to the
+                        // event-loop exit (cite_popup_boxes plan,
+                        // Stage 4).
+                        if self.popup_stack.is_empty() {
+                            event_loop.exit();
+                        } else {
+                            self.pop_cite_popup(None);
+                            self.push_a11y_update();
+                        }
+                    }
                     Key::Named(NamedKey::Backspace) => {
                         self.backspace();
                         self.request_redraw();
@@ -875,7 +1176,38 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(t) = &text
                             && !t.is_empty()
                         {
-                            if t.as_str() == "#" {
+                            // Ctrl+digit (1..=9) — push a cite popup
+                            // (cite_popup_boxes plan, Stage 4). The
+                            // digit is the auto-assigned number `N` of a
+                            // cite in the current scope (base doc or
+                            // topmost open box's body).
+                            if self.mods.control_key()
+                                && t.len() == 1
+                                && let Some(d) = t
+                                    .chars()
+                                    .next()
+                                    .and_then(|c| c.to_digit(10))
+                                && (1..=9).contains(&d)
+                            {
+                                // Ctrl+N: if the same number is
+                                // already on the stack (at the top
+                                // of any popup), pop the topmost
+                                // matching entry — the "press
+                                // Ctrl+number again to close" the
+                                // user asked for. Otherwise push
+                                // the new entry.
+                                if self
+                                    .popup_stack
+                                    .contains(&(d as u32))
+                                {
+                                    self.pop_cite_popup(Some(
+                                        d as u32,
+                                    ));
+                                } else {
+                                    self.push_cite_popup(d as u8);
+                                }
+                                self.push_a11y_update();
+                            } else if t.as_str() == "#" {
                                 self.insert_hash();
                             } else {
                                 self.insert(t);
@@ -930,7 +1262,7 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::selection_range;
+    use super::{cite_popup_scope_text, selection_range};
 
     #[test]
     fn selection_range_none_when_no_anchor() {
@@ -953,5 +1285,32 @@ mod tests {
     fn selection_range_ordered_backward() {
         // Drag left / shift+arrow left: anchor > caret.
         assert_eq!(selection_range(Some(10), 3), Some(3..10));
+    }
+
+    #[test]
+    fn cite_popup_scope_text_empty_stack_is_doc() {
+        // Empty stack → scope is the base document text.
+        let doc = "#1 a #2 \\cite(#1,#2)";
+        let scope = cite_popup_scope_text(doc, &[]);
+        assert_eq!(scope, doc);
+    }
+
+    #[test]
+    fn cite_popup_scope_text_nested_is_body() {
+        // When the stack has [1], the scope is the body of cite [1]
+        // — the text between #1 and #2 in the document.
+        let doc = "#1 a #2 \\cite(#1,#2)";
+        let scope = cite_popup_scope_text(doc, &[1]);
+        assert_eq!(scope, " a ");
+    }
+
+    #[test]
+    fn cite_popup_scope_text_bib_ref_returns_doc() {
+        // A bib-key cite has no body, so the scope falls back to
+        // the base doc (the user's Ctrl+N inside a bib-key box
+        // resolves against the doc, not a "body").
+        let doc = "\\cite(authorA89)";
+        let scope = cite_popup_scope_text(doc, &[1]);
+        assert_eq!(scope, doc);
     }
 }

@@ -36,10 +36,10 @@ pub use glyphs::{
     build_glyph_index,
 };
 pub use markers::{
-    Arg, Marker, MarkerScan, PropKind, PropertyStmt, Segment,
-    auto_marker_id, auto_marker_token, backslash_escaped,
-    lowest_free_marker_numbers, next_marker_id, resolve_segments,
-    scan,
+    Arg, Marker, MarkerScan, PropKind, PropertyStmt, ReferenceEntry,
+    ReferenceKind, Segment, auto_marker_id, auto_marker_token,
+    backslash_escaped, cite_label_text, lowest_free_marker_numbers,
+    next_marker_id, resolve_segments, scan, scan_references,
 };
 pub use semantics::{
     Definition, KernelStatement, Occurrence, SemanticIndex,

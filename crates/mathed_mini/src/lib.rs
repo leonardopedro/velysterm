@@ -13,6 +13,7 @@
 pub mod a11y;
 #[cfg(feature = "gui")]
 pub mod app;
+pub mod cite_popup;
 pub mod dispatch;
 pub mod kernel_bridge;
 pub mod render;
