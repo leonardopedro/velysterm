@@ -21,6 +21,7 @@ pub mod doc;
 pub mod format;
 pub mod glyphs;
 pub mod markers;
+pub mod rfc1751;
 pub mod search;
 pub mod semantics;
 pub mod transform;
@@ -36,7 +37,9 @@ pub use glyphs::{
 };
 pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, Segment,
-    next_marker_id, resolve_segments, scan,
+    auto_marker_id, auto_marker_token, backslash_escaped,
+    lowest_free_marker_numbers, next_marker_id, resolve_segments,
+    scan,
 };
 pub use semantics::{
     Definition, KernelStatement, Occurrence, SemanticIndex,

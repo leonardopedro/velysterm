@@ -1,4 +1,4 @@
-use velyst::rfc1751::u64_to_rfc1751;
+use mathed_core::rfc1751::u64_to_rfc1751;
 
 fn main() {
     let numbers = vec![0, 1, 1024, 2047, 2048, 1234567890, u64::MAX];

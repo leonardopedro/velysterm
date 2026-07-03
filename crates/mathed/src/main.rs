@@ -36,12 +36,14 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_vello::prelude::*;
 use keymap::{EditorCmd, Mods, Motion};
 use mathed_core::{
-    MathDoc, TransformOptions, next_marker_id, resolve_segments,
-    scan, semantics::SemanticIndex, to_render_text,
-    to_render_text_range,
+    MathDoc, TransformOptions, auto_marker_id, auto_marker_token,
+    lowest_free_marker_numbers, resolve_segments, scan,
+    semantics::SemanticIndex, to_render_text, to_render_text_range,
 };
 use velyst::prelude::*;
-use velyst::typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
+use velyst::typst::syntax::{
+    FileId, RootedPath, Source, VirtualPath, VirtualRoot,
+};
 
 use blocks_view::{BlockView, Blocks, EditorRoot, PRELUDE};
 use glyphs::GlyphIndex;
@@ -397,13 +399,22 @@ fn handle_keyboard(
 
         match cmd {
             EditorCmd::InsertText(s) => {
-                insert_text(
-                    &mut editor,
-                    &mut state,
-                    &s,
-                    &mut scheduler,
-                    now,
-                );
+                if s == "#" {
+                    insert_hash(
+                        &mut editor,
+                        &mut state,
+                        &mut scheduler,
+                        now,
+                    );
+                } else {
+                    insert_text(
+                        &mut editor,
+                        &mut state,
+                        &s,
+                        &mut scheduler,
+                        now,
+                    );
+                }
                 last_change.0 = Some(now);
             }
             EditorCmd::Newline => {
@@ -733,6 +744,31 @@ fn insert_text(
     notify_doc_changed(scheduler, now);
 }
 
+/// Typing an unescaped `#` inserts a fresh auto-named marker (`#3ad`:
+/// lowest free number + its RFC 1751 word) instead of a bare `#`; after
+/// a `\` it inserts the literal `#` (Typst escape). No trailing space —
+/// typing letters right after extends/renames the id. `insert_text` does
+/// the selection deletion first, so the freeness scan runs over the
+/// post-deletion document.
+fn insert_hash(
+    editor: &mut EditorDoc,
+    state: &mut EditorState,
+    scheduler: &mut Scheduler,
+    now: f64,
+) {
+    if let Some(sel) = state.selection() {
+        state.cursor = sel.start;
+        state.anchor = None;
+        editor.doc.delete(sel);
+    }
+    let token = auto_marker_token(editor.doc.text(), state.cursor)
+        .unwrap_or_else(|| "#".to_owned());
+    editor.doc.insert(state.cursor, &token);
+    editor.doc.commit();
+    state.cursor += token.len();
+    notify_doc_changed(scheduler, now);
+}
+
 fn delete_range(
     editor: &mut EditorDoc,
     state: &mut EditorState,
@@ -748,7 +784,9 @@ fn delete_range(
 }
 
 /// Wrap the selection (or caret position) in a fresh marker pair and
-/// attach `prop` to the segment: `#a <sel> #b \prop(#a,#b)`.
+/// attach `prop` to the segment: `#1i <sel> #2o \prop(#1i,#2o)`.
+/// Marker ids are auto-named (lowest free number + RFC 1751 word) so
+/// they are memorable and deterministic.
 fn insert_segment(
     editor: &mut EditorDoc,
     state: &mut EditorState,
@@ -757,8 +795,9 @@ fn insert_segment(
     now: f64,
 ) {
     let sel = state.selection().unwrap_or(state.cursor..state.cursor);
-    let id = next_marker_id(&scan(editor.doc.text()));
-    let (a, b) = (id, id + 1);
+    let s = scan(editor.doc.text());
+    let nums = lowest_free_marker_numbers(&s, 2);
+    let (a, b) = (auto_marker_id(nums[0]), auto_marker_id(nums[1]));
     let open = format!("#{a} ");
     let close = format!(" #{b} \\{prop}(#{a},#{b})");
     editor.doc.replace_many(vec![

@@ -19,6 +19,11 @@
 //! Escapes: `\#` is a literal `#` (as in Typst) and `\\` a literal
 //! backslash; neither starts a token. A `\name` without an immediately
 //! following `(` is left alone (it is a Typst escape sequence).
+//!
+//! Typing an unescaped `#` in the editors auto-inserts a fresh marker
+//! named `<lowest free number><RFC 1751 word>` (e.g. `#3ad` for the
+//! third free slot) — see [`auto_marker_token`]. So a bare `#` never
+//! appears in a document except via `\#`.
 
 use std::ops::Range;
 
@@ -258,6 +263,62 @@ pub fn next_marker_id(scan: &MarkerScan) -> u64 {
         .map_or(1, |m| m + 1)
 }
 
+/// Leading decimal digits of a marker id, as a number. Marker ids always
+/// start with a digit; `None` only on u64 overflow (absurdly long ids),
+/// which then simply doesn't occupy a number.
+fn numeric_prefix(id: &str) -> Option<u64> {
+    let digits =
+        id.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+    digits.parse().ok()
+}
+
+/// The `count` smallest numbers ≥ 1 not used as the numeric prefix of any
+/// marker id (for editor-generated markers; `#3ad` occupies 3 just like `#3`).
+pub fn lowest_free_marker_numbers(
+    scan: &MarkerScan,
+    count: usize,
+) -> Vec<u64> {
+    let used: std::collections::BTreeSet<u64> = scan
+        .markers
+        .iter()
+        .filter_map(|m| numeric_prefix(&m.id))
+        .collect();
+    (1..).filter(|n| !used.contains(n)).take(count).collect()
+}
+
+/// Memorable auto-generated marker id for number `n`: the number followed
+/// by its RFC 1751 word encoding, e.g. 3 → "3ad". The digit prefix keeps
+/// the id inside the marker grammar (can never collide with Typst calls);
+/// the word is deterministic from the number, so knowing either recalls
+/// the other.
+pub fn auto_marker_id(n: u64) -> String {
+    format!("{n}{}", crate::rfc1751::u64_to_rfc1751(n))
+}
+
+/// `true` when a `#` typed at byte offset `at` would be escaped, i.e. is
+/// preceded by an odd run of backslashes (`\#` is a literal `#`).
+pub fn backslash_escaped(text: &str, at: usize) -> bool {
+    text.as_bytes()[..at]
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+/// Token to insert when the user types `#` at `at`: a fresh auto-named
+/// marker (`#3ad`), or `None` when the position is escaped and a literal
+/// `#` should be inserted instead. Call *after* any selection has been
+/// deleted so numbers freed by the deletion are reusable.
+pub fn auto_marker_token(text: &str, at: usize) -> Option<String> {
+    if backslash_escaped(text, at) {
+        return None;
+    }
+    let n = lowest_free_marker_numbers(&scan(text), 1)[0];
+    Some(format!("#{}", auto_marker_id(n)))
+}
+
 fn try_parse_marker(text: &str, at: usize) -> Option<Marker> {
     let bytes = text.as_bytes();
     debug_assert_eq!(bytes[at], b'#');
@@ -444,5 +505,48 @@ mod tests {
         let segs = resolve_segments(&s);
         let span = segs[0].span.clone().unwrap();
         assert_eq!(&text[span], " β ");
+    }
+
+    #[test]
+    fn lowest_free_skips_used_prefixes() {
+        // Plain and auto-named markers both occupy their number.
+        let s = scan("#1 a #3ad b #4am");
+        assert_eq!(lowest_free_marker_numbers(&s, 3), vec![2, 5, 6]);
+        assert_eq!(
+            lowest_free_marker_numbers(&scan("no markers"), 1),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn auto_ids_are_number_plus_word() {
+        assert_eq!(auto_marker_id(1), "1i");
+        assert_eq!(auto_marker_id(2), "2o");
+        assert_eq!(auto_marker_id(3), "3ad");
+    }
+
+    #[test]
+    fn auto_ids_reparse_as_their_number() {
+        // Round-trip: the generated id is a valid marker occupying exactly n.
+        for n in [1u64, 2, 7, 42, 2047, 2048] {
+            let text = format!("#{}", auto_marker_id(n));
+            let s = scan(&text);
+            assert_eq!(s.markers.len(), 1, "{text}");
+            assert_eq!(numeric_prefix(&s.markers[0].id), Some(n));
+        }
+    }
+
+    #[test]
+    fn auto_token_respects_escapes() {
+        assert_eq!(auto_marker_token("", 0).as_deref(), Some("#1i"));
+        assert_eq!(
+            auto_marker_token("#1i x ", 6).as_deref(),
+            Some("#2o")
+        );
+        assert_eq!(auto_marker_token(r"a\", 2), None); // \#  → literal
+        assert_eq!(
+            auto_marker_token(r"a\\", 3).as_deref(),
+            Some("#1i")
+        ); // \\# → marker
     }
 }

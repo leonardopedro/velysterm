@@ -76,17 +76,19 @@ fn terminal_assets_present() {
 }
 
 #[test]
-fn rfc1751_demo_uses_velyst_helper() {
-    // The example must reference `velyst::rfc1751::u64_to_rfc1751`
-    // (i.e. the velyst re-export, not a local re-implementation).
+fn rfc1751_demo_uses_mathed_core_helper() {
+    // The example must reference `mathed_core::rfc1751::u64_to_rfc1751`
+    // (i.e. the mathed_core home, not a local re-implementation).
+    // `rfc1751` moved from `velyst` to `mathed_core` so the Bevy-free
+    // `mathed_mini` frontend can use it.
     let root = repo_root();
     let rs = root.join("examples/velyst_demo/examples/rfc1751_demo.rs");
     assert_exists(&rs);
 
     let rs_text = fs::read_to_string(&rs).expect("read rfc1751_demo.rs");
     assert!(
-        rs_text.contains("velyst::rfc1751::u64_to_rfc1751"),
-        "rfc1751_demo.rs must use the velyst re-exported helper (P9.15.1 API port)",
+        rs_text.contains("mathed_core::rfc1751::u64_to_rfc1751"),
+        "rfc1751_demo.rs must use the mathed_core::rfc1751 helper (auto_marker_names plan, Stage 1)",
     );
 }
 

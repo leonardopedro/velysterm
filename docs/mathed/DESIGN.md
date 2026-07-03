@@ -30,6 +30,38 @@ applied at render time) and semantic (`function`, `def`, `var`, `ref`,
 references, no type checking, but `statement`/`def` leave room for a
 formal layer later).
 
+### Marker naming (auto-named on `#`)
+
+Both frontends (the Bevy `mathed` app and the Bevy-free `mathed_mini`
+winit app) intercept the single typed character `#` and insert a fresh
+**auto-named** marker token `#<n><word>` instead of a bare `#`, where:
+
+- `n` is the **lowest free marker number** in the document (smallest
+  integer ≥ 1 that is not the numeric prefix of any existing marker
+  id — both plain `#1` and generated `#3ad` occupy their number), and
+- `<word>` is the RFC 1751 word encoding of `n` (from
+  `mathed_core::rfc1751::u64_to_rfc1751`), making the id memorable
+  and deterministic from the number.
+
+The digit prefix is required by the marker grammar (digit-start ids
+can never collide with Typst calls like `#set`); the word is a
+mnemonic on top of the digit prefix. The caret lands after the
+inserted token with no trailing space — typing letters right after
+extends/renames the id, and typing `,` / space / `)` naturally
+terminates it. If a selection is active, it is deleted first so the
+freshly freed numbers are reusable on the auto-name scan.
+
+The escape rule mirrors the scanner's: typing `#` after an odd run
+of `\` (`\#`, `\\\#`, …) inserts a literal `#` (Typst escape); after
+an even run (`\\#`) it is treated as a real marker position. Paste
+is untouched so pasted `#1` markers stay verbatim.
+
+The core naming helpers are in `mathed_core::markers`:
+`lowest_free_marker_numbers`, `auto_marker_id`, `backslash_escaped`,
+`auto_marker_token`. Both frontends are thin wrappers around
+`auto_marker_token`; the entire behavior is unit-testable from
+`mathed_core` without an event loop.
+
 ## Render pipeline
 
 ```

@@ -29,7 +29,6 @@ pub mod prelude {
 pub mod asset;
 pub mod func;
 pub mod renderer;
-pub mod rfc1751;
 pub mod world;
 
 /// Plugin for loading and rendering [Typst][typst] content.

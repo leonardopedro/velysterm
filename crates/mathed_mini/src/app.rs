@@ -316,6 +316,26 @@ impl App {
         self.reset_blink();
     }
 
+    /// Typing an unescaped `#` inserts a fresh auto-named marker (`#3ad`:
+    /// lowest free number + its RFC 1751 word) instead of a bare `#`; after
+    /// a `\` it inserts the literal `#` (Typst escape). No trailing space —
+    /// typing letters right after extends/renames the id.
+    fn insert_hash(&mut self) {
+        // Delete first so numbers freed by the deletion are reusable.
+        self.delete_selection();
+        let token = mathed_core::markers::auto_marker_token(
+            self.doc.text(),
+            self.caret,
+        )
+        .unwrap_or_else(|| "#".to_owned());
+        self.doc.insert(self.caret, &token);
+        self.caret += token.len();
+        self.sel_anchor = None;
+        self.invalidate();
+        self.refresh_kernel();
+        self.reset_blink();
+    }
+
     /// Delete the character before the caret (Backspace), or the whole
     /// selection if one is active.
     fn backspace(&mut self) {
@@ -855,7 +875,11 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(t) = &text
                             && !t.is_empty()
                         {
-                            self.insert(t);
+                            if t.as_str() == "#" {
+                                self.insert_hash();
+                            } else {
+                                self.insert(t);
+                            }
                             self.request_redraw();
                             self.push_a11y_update();
                         }
