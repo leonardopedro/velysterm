@@ -55,6 +55,7 @@ impl RectF {
 }
 
 /// One positioned glyph entry in the index.
+#[derive(Debug)]
 pub struct GlyphEntry {
     /// Doc byte offset (mapped through the block's [`OffsetMap`]).
     pub doc_byte: usize,
@@ -89,6 +90,10 @@ pub struct CaretGeom {
     pub x: f32,
     pub top: f32,
     pub height: f32,
+    /// Full character-cell width (a terminal-style block cursor), taken
+    /// from the reference glyph's advance — the character starting at
+    /// the caret when exact, otherwise the preceding character's.
+    pub width: f32,
 }
 
 /// Intermediate record collected during the frame walk.
@@ -107,6 +112,15 @@ struct RawRecord {
 /// `prelude_len` is the byte length of any Typst prelude prepended to the
 /// source before the document body; glyphs whose source bytes fall below it
 /// are skipped. Pass `0` when the source is the document body verbatim.
+///
+/// Glyphs whose (prelude-adjusted) source byte falls at or beyond
+/// `map.render_len` are also skipped — these come from display-only
+/// content appended *after* the body (e.g. a results-panel footer).
+/// Without this bound, `OffsetMap::render_to_doc`'s out-of-range
+/// fallback clamps such bytes to the last real span's doc end, which
+/// usually coincides with the true end of the document — colliding
+/// with genuine end-of-doc caret positions and hijacking the caret to
+/// the footer instead of the document's real last line.
 pub fn build_glyph_index(
     frame: &Frame,
     source: &Source,
@@ -130,22 +144,38 @@ pub fn build_glyph_index(
     {
         let mut current_band: Option<usize> = None;
         for rec in &sorted_by_y {
+            let rec_top = rec.baseline_y - rec.asc;
+            let rec_bottom = rec.baseline_y - rec.desc;
+            // Same visual line iff this glyph's vertical extent
+            // overlaps the current band's — not just "close to its
+            // baseline". A raised/lowered glyph (a math superscript
+            // or subscript, `#super[...]`/`#sub[...]`) sits on the
+            // *same* line as the surrounding text but has a
+            // meaningfully different baseline_y; comparing baselines
+            // directly split it into its own spurious band, sorted
+            // between the real lines around it by top-of-band —
+            // wrecking `band_for_byte`/Up-Down navigation for the
+            // whole line it actually belongs to (confirmed: `$x^2$
+            // gg` put the "2" in its own band between the line above
+            // and the rest of its own line, so Up from "g" landed on
+            // the "2" instead of the line above). Ink on the same
+            // line always stays within that line's own vertical band,
+            // so overlap is the right same-line test regardless of
+            // where exactly the baseline sits.
             if let Some(bi) = current_band
-                && (rec.baseline_y - bands_raw[bi].baseline).abs()
-                    < 0.5
+                && rec_top <= bands_raw[bi].bottom
+                && rec_bottom >= bands_raw[bi].top
             {
-                bands_raw[bi].top =
-                    bands_raw[bi].top.min(rec.baseline_y - rec.asc);
-                bands_raw[bi].bottom = bands_raw[bi]
-                    .bottom
-                    .max(rec.baseline_y - rec.desc);
+                bands_raw[bi].top = bands_raw[bi].top.min(rec_top);
+                bands_raw[bi].bottom =
+                    bands_raw[bi].bottom.max(rec_bottom);
                 band_idx.push(bi as u32);
                 continue;
             }
             let bi = bands_raw.len();
             bands_raw.push(LineBand {
-                top: rec.baseline_y - rec.asc,
-                bottom: rec.baseline_y - rec.desc,
+                top: rec_top,
+                bottom: rec_bottom,
                 baseline: rec.baseline_y,
             });
             band_idx.push(bi as u32);
@@ -178,6 +208,9 @@ pub fn build_glyph_index(
             continue;
         }
         let body_byte = rec.source_byte - prelude_len;
+        if body_byte >= map.render_len {
+            continue;
+        }
         let doc_byte = map.render_to_doc(body_byte);
         let old_band = band_idx[i] as usize;
         let new_band = remap[old_band];
@@ -194,6 +227,40 @@ pub fn build_glyph_index(
                 .unwrap_or(std::cmp::Ordering::Equal),
         )
     });
+
+    // Typst collapses a soft-wrapped line's trailing whitespace to zero
+    // advance (correct for layout — no visible trailing space at the end
+    // of a line — but a zero-width entry is unusable as a caret target:
+    // `caret_for_byte` would draw a zero-width block cursor there, and
+    // `byte_for_point`'s hit-test range `[e.x, e.x + e.advance)` is empty
+    // when advance is 0, so no click x can ever land inside it — the
+    // byte becomes reachable only through the "not exact" fallback,
+    // which can resolve to the wrong band entirely). Patch zero-advance
+    // entries to a representative non-zero width — the median advance
+    // among the rest of the document's glyphs — so a caret landing on
+    // one of these bytes still draws and hit-tests normally.
+    let fallback_advance = {
+        let mut advances: Vec<f32> = entries
+            .iter()
+            .map(|e| e.advance)
+            .filter(|&a| a > 0.0)
+            .collect();
+        if advances.is_empty() {
+            0.0
+        } else {
+            advances.sort_by(|a, b| {
+                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            advances[advances.len() / 2]
+        }
+    };
+    if fallback_advance > 0.0 {
+        for e in &mut entries {
+            if e.advance <= 0.0 {
+                e.advance = fallback_advance;
+            }
+        }
+    }
 
     GlyphIndex { entries, bands }
 }
@@ -276,6 +343,7 @@ impl GlyphIndex {
             x,
             top: band.top,
             height: band.bottom - band.top,
+            width: entry.advance,
         })
     }
 

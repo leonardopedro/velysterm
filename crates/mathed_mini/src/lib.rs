@@ -27,10 +27,9 @@ pub use dispatch::{
 };
 pub use kernel_bridge::{KernelBridge, KernelResult};
 pub use render::{
-    DEFAULT_WIDTH_PT, DocLayout, RenderError, active_translator_span,
+    DEFAULT_WIDTH_PT, DocLayout, RenderError, active_reveal_span,
     doc_to_markup, doc_to_render, doc_to_render_with, layout_doc,
-    layout_doc_with, layout_doc_with_footer, render_doc,
-    render_markup, render_world,
+    layout_doc_with, render_doc, render_markup, render_world,
 };
 pub use translate::{BUILTIN_TRANSLATOR, TranslateError, Translator};
 pub use world::MiniWorld;

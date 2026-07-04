@@ -20,7 +20,7 @@ use mathed_core::markers::{resolve_segments, scan};
 use mathed_core::semantics::SemanticIndex;
 use winit::application::ApplicationHandler;
 use winit::event::{
-    ElementState, KeyEvent, MouseButton, WindowEvent,
+    ElementState, Ime, KeyEvent, MouseButton, WindowEvent,
 };
 use winit::event_loop::{
     ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy,
@@ -31,6 +31,12 @@ use winit::window::{Window, WindowId};
 /// Caret blink interval (matches terminal convention ~530ms).
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
+/// Sentinel x (frame points) far to the left/right of any realistic page
+/// width, used to hit-test "start/end of this visual row" with
+/// `GlyphIndex::byte_for_point` (`move_home`/`move_end`).
+const FAR_LEFT: f32 = -1.0e7;
+const FAR_RIGHT: f32 = 1.0e7;
+
 use crate::a11y::build_tree_update;
 use crate::kernel_bridge::KernelBridge;
 use crate::references_panel::{
@@ -39,7 +45,7 @@ use crate::references_panel::{
     update_references_panel as update_references_panel_data,
 };
 use crate::render::{
-    DocLayout, active_translator_span, layout_doc_with_footer,
+    DEFAULT_WIDTH_PT, DocLayout, active_reveal_span, layout_doc_with,
 };
 use mathed_core::transform::TransformOptions;
 
@@ -83,14 +89,6 @@ struct App {
     mouse_down: bool,
     /// Current keyboard modifiers (Shift/Ctrl) — updated on ModifiersChanged.
     mods: ModifiersState,
-    /// Previous "Ctrl+Shift both held" state. The marker overlay
-    /// toggles on the transition from "not both" to "both"
-    /// (the user said "click Ctrl+Shift" to show, click again to
-    /// hide — pure modifier combo, no third key). The previous
-    /// state is needed to detect the rising edge; without it
-    /// the overlay would re-toggle on every modifier event
-    /// (release + re-press of either key would flip it again).
-    prev_mods_both: bool,
     /// Cached laid-out page; `None` until first render or after invalidation.
     layout: Option<DocLayout>,
     /// Width (px) the cached layout was laid out at.
@@ -99,6 +97,36 @@ struct App {
     /// was built, if any. A caret move that changes this expands/collapses a
     /// panel, so the layout must be rebuilt (other moves reuse the cache).
     layout_panel: Option<std::ops::Range<usize>>,
+    /// Doc byte offsets (`Marker::range.start`) of every marker touched by
+    /// the caret/selection when the cached layout was built — mirrors the
+    /// Bevy `mathed` frontend's `RevealState`: a marker is hidden or not,
+    /// but always reachable through the cursor, so extending a selection
+    /// (or just resting the caret) over one reveals it as literal text,
+    /// same as any other hidden token. Only a *change* in this set forces
+    /// a relayout (`redraw`) — most caret moves don't cross a marker, so
+    /// they stay cheap, matching the panel-expansion caching above.
+    layout_reveal_markers: Vec<usize>,
+    /// Doc byte offsets (each run's start) of every collapsible space run
+    /// (2+ consecutive spaces) touched by the caret/selection when the
+    /// cached layout was built — same cache-key pattern as
+    /// `layout_reveal_markers`, for `TransformOptions::reveal`'s other
+    /// job: showing every space in a run individually (Markdown-style
+    /// collapse-to-one everywhere else) while the caret is on it.
+    layout_reveal_spaces: Vec<usize>,
+    /// Doc byte offsets (each span's start) of every `$...$` math span
+    /// touched by the caret/selection when the cached layout was built —
+    /// same cache-key pattern as `layout_reveal_markers`: a math span
+    /// renders as typeset math while the caret/selection is elsewhere,
+    /// and as literal raw source (delimiters included) the moment it
+    /// touches the span.
+    layout_reveal_math: Vec<usize>,
+    /// Goal column (frame x, points) for Up/Down (foot/terminal-style:
+    /// moving through a short or blank line and continuing to move
+    /// vertically should not forget the original column). Set by
+    /// `move_up`/`move_down` and cleared by every other caret-changing
+    /// action in `caret_changed` — a horizontal move or an edit is what
+    /// resets the goal.
+    pref_x: Option<f32>,
     /// Probability kernel bridge (P3 #11): computes `\prob` results off-thread.
     bridge: KernelBridge,
     /// While set, keep polling the kernel worker for async results.
@@ -112,12 +140,11 @@ struct App {
     /// the same `N`. The deepest entry is the *front* of the stack — the
     /// one drawn on top of all the others.
     popup_stack: Vec<u32>,
-    /// Marker overlay toggle (marker_overlay_and_references_panel plan,
-    /// Stage 5). When `true`, every `#id` marker gets a small framed
-    /// label drawn on top of the rendered text at the marker's byte
-    /// position. Z-order is painter's algorithm: labels are drawn in
-    /// document order ascending, so the last marker in the doc is on
-    /// top of all the others. Toggled with `Ctrl+Shift+M`.
+    /// "Show every hidden marker" toggle (Ctrl+M). Drives
+    /// `TransformOptions::show_hidden` in `redraw`, matching the Bevy
+    /// `mathed` frontend: every `#id` marker renders as literal text
+    /// through the normal document layout, not a separate overlay, so
+    /// it's pixel-identical to the rest of the text.
     show_marker_overlay: bool,
     /// References panel (marker_overlay_and_references_panel plan,
     /// Stage 5). `None` when closed; `Some(data)` when open. The panel
@@ -141,6 +168,11 @@ struct App {
     adapter: Option<accesskit_winit::Adapter>,
     /// Event loop proxy for dispatching AccessKit events.
     proxy: EventLoopProxy<UserEvent>,
+    /// In-progress IME composition text (CJK/composed input), if any —
+    /// the OS's `Ime::Preedit` text, not yet committed to the document.
+    /// Drawn as an underlined overlay at the caret; `Ime::Commit` clears
+    /// this and inserts the finished text into `doc` instead.
+    ime_preedit: Option<String>,
 }
 
 impl App {
@@ -155,10 +187,13 @@ impl App {
             sel_anchor: None,
             mouse_down: false,
             mods: ModifiersState::empty(),
-            prev_mods_both: false,
             layout: None,
             layout_width: 0,
             layout_panel: None,
+            layout_reveal_markers: Vec::new(),
+            layout_reveal_spaces: Vec::new(),
+            layout_reveal_math: Vec::new(),
+            pref_x: None,
             bridge: KernelBridge::new(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
@@ -170,6 +205,7 @@ impl App {
             cursor_pos: None,
             adapter: None,
             proxy,
+            ime_preedit: None,
         }
     }
 
@@ -204,38 +240,30 @@ impl App {
     }
 
     /// Hook called from every caret-move/edit path: resets the
-    /// caret blink, updates the references panel, and requests a
-    /// redraw. The replacement for the
-    /// `reset_blink(); request_redraw();` pattern.
+    /// caret blink, clears the Up/Down goal column (`pref_x` — only
+    /// `move_up`/`move_down` re-arm it, right after this call),
+    /// updates the references panel, and requests a redraw. The
+    /// replacement for the `reset_blink(); request_redraw();` pattern.
     fn caret_changed(&mut self) {
         self.reset_blink();
+        self.pref_x = None;
         self.update_references_panel();
         self.request_redraw();
     }
 
-    /// Toggle the marker overlay on/off. Triggered by the
-    /// rising edge of "Ctrl+Shift both held" in
-    /// `WindowEvent::ModifiersChanged` — the user said "click
-    /// Ctrl+Shift" with no third key, so this is called from
-    /// there rather than from a keypress handler.
+    /// Toggle "show every hidden marker" on/off. Triggered by Ctrl+M
+    /// (`handle_ctrl_shortcut`) — previously the rising edge of
+    /// "Ctrl+Shift both held", changed because Ctrl+Shift is already
+    /// claimed system-wide on deepin (switches keyboard layout), so it
+    /// never reached the app. Drives `TransformOptions::show_hidden`
+    /// in `redraw` (matching the Bevy `mathed` frontend's own
+    /// `show_hidden`), so it changes what the document's own layout
+    /// renders — invalidate the cached layout so the next redraw
+    /// picks that up.
     fn toggle_marker_overlay(&mut self) {
         self.show_marker_overlay = !self.show_marker_overlay;
+        self.invalidate();
         self.request_redraw();
-    }
-
-    /// `true` when the modifier state has just transitioned
-    /// into "Ctrl+Shift both held" — the rising edge that
-    /// toggles the marker overlay. `prev_both` is the
-    /// `App::prev_mods_both` snapshot from the previous
-    /// `ModifiersChanged` event. Pure helper so the edge
-    /// detection is unit-testable independent of winit.
-    fn marker_overlay_rising_edge(
-        new_state: ModifiersState,
-        prev_both: bool,
-    ) -> bool {
-        let new_both =
-            new_state.control_key() && new_state.shift_key();
-        new_both && !prev_both
     }
 
     /// Toggle the references panel on/off (Ctrl+0). On open, build
@@ -321,10 +349,8 @@ impl App {
             let body =
                 crate::cite_popup::resolve_popup_body(&scope, target);
             let body_img = body.as_ref().and_then(|b| {
-                let opts = mathed_core::transform::TransformOptions {
-                    caret: None,
-                    ..Default::default()
-                };
+                let opts =
+                    mathed_core::transform::TransformOptions::default();
                 crate::cite_popup::render_popup_body(b, &opts)
             });
             let (body_ref, body_h) = match &body_img {
@@ -406,7 +432,7 @@ impl App {
                 .byte_for_point(mathed_core::glyphs::V2::new(
                     x as f32, y as f32,
                 ))
-                .map(|(b, _)| b)
+                .map(|hit| resolve_hit(hit, self.doc.text()))
         };
         let Some(byte) = byte else {
             return;
@@ -483,6 +509,11 @@ impl App {
                 self.request_redraw();
                 true
             }
+            "m" | "M" => {
+                self.toggle_marker_overlay();
+                self.push_a11y_update();
+                true
+            }
             _ => false,
         }
     }
@@ -497,6 +528,31 @@ impl App {
         self.invalidate();
         self.refresh_kernel();
         self.caret_changed();
+    }
+
+    /// Handle an OS IME event (CJK/composed input). `Preedit` holds
+    /// in-progress composition text that hasn't been committed yet — it
+    /// is only ever drawn as an overlay (see `redraw`'s preedit block),
+    /// never written into `doc`, so composing and then cancelling
+    /// (e.g. Escape) never touches the document. `Commit` is the
+    /// finished text and is inserted exactly like typed/pasted text.
+    fn handle_ime(&mut self, event: Ime) {
+        match event {
+            Ime::Enabled => {}
+            Ime::Preedit(text, _cursor) => {
+                self.ime_preedit =
+                    if text.is_empty() { None } else { Some(text) };
+                self.request_redraw();
+            }
+            Ime::Commit(text) => {
+                self.ime_preedit = None;
+                self.insert(&text);
+            }
+            Ime::Disabled => {
+                self.ime_preedit = None;
+                self.request_redraw();
+            }
+        }
     }
 
     /// Typing an unescaped `#` inserts a fresh auto-named marker (`#3ad`:
@@ -622,25 +678,55 @@ impl App {
         self.caret_changed();
     }
 
-    /// Move to the start of the current line.
+    /// Move to the start of the current *visual* line (band) — consistent
+    /// with `move_up`/`move_down`'s band-based model (foot/terminal-style:
+    /// Home goes to column 0 of the current row, not the start of the
+    /// raw-text line, which can differ once a long line word-wraps across
+    /// several rows). Falls back to a raw-text search when there is no
+    /// cached layout yet.
     fn move_home(&mut self, extend: bool) {
         if extend {
             self.ensure_anchor();
         } else {
             self.sel_anchor = None;
         }
-        let text = self.doc.text();
-        self.caret =
-            text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+        if let Some(layout) = &self.layout
+            && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
+        {
+            let band = &layout.glyphs.bands[bi];
+            let mid_y = (band.top + band.bottom) * 0.5;
+            if let Some(hit) = layout.glyphs.byte_for_point(
+                mathed_core::glyphs::V2::new(FAR_LEFT, mid_y),
+            ) {
+                self.caret = resolve_hit(hit, self.doc.text());
+            }
+        } else {
+            let text = self.doc.text();
+            self.caret =
+                text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+        }
         self.caret_changed();
     }
 
-    /// Move to the end of the current line.
+    /// Move to the end of the current visual line (band). See `move_home`.
     fn move_end(&mut self, extend: bool) {
         if extend {
             self.ensure_anchor();
         } else {
             self.sel_anchor = None;
+        }
+        if let Some(layout) = &self.layout
+            && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
+        {
+            let band = &layout.glyphs.bands[bi];
+            let mid_y = (band.top + band.bottom) * 0.5;
+            if let Some(hit) = layout.glyphs.byte_for_point(
+                mathed_core::glyphs::V2::new(FAR_RIGHT, mid_y),
+            ) {
+                self.caret = resolve_hit(hit, self.doc.text());
+            }
+            self.caret_changed();
+            return;
         }
         let text = self.doc.text();
         self.caret = text[self.caret..]
@@ -649,58 +735,73 @@ impl App {
         self.caret_changed();
     }
 
-    /// Move the caret up one visual line (no relayout). Sticks to the
-    /// caret's current x; falls back to the line start when there is
-    /// no layout or the target is off-page.
+    /// Move the caret up one visual line (no relayout). Sticks to a
+    /// remembered goal column (`pref_x`) that persists across
+    /// consecutive vertical moves — so moving through a shorter or
+    /// blank line and continuing to move up doesn't forget the
+    /// original column (foot/terminal-style; `caret_changed` clears
+    /// the goal on any other action). Falls back to the line start
+    /// when there is no layout or the target is off-page.
     fn move_up(&mut self, extend: bool) {
         if extend {
             self.ensure_anchor();
         } else {
             self.sel_anchor = None;
         }
+        let mut goal_x = self.pref_x;
         if let Some(layout) = &self.layout
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
             && bi > 0
         {
             let target_band = &layout.glyphs.bands[bi - 1];
             let mid_y = (target_band.top + target_band.bottom) * 0.5;
-            let x = layout
-                .glyphs
-                .caret_for_byte(self.caret)
-                .map_or(0.0, |g| g.x);
-            if let Some((b, _)) = layout.glyphs.byte_for_point(
+            let x = goal_x.unwrap_or_else(|| {
+                layout
+                    .glyphs
+                    .caret_for_byte(self.caret)
+                    .map_or(0.0, |g| g.x)
+            });
+            goal_x = Some(x);
+            if let Some(hit) = layout.glyphs.byte_for_point(
                 mathed_core::glyphs::V2::new(x, mid_y),
             ) {
-                self.caret = b;
+                self.caret = resolve_hit(hit, self.doc.text());
             }
         }
         self.caret_changed();
+        self.pref_x = goal_x;
     }
 
-    /// Move the caret down one visual line (no relayout).
+    /// Move the caret down one visual line (no relayout). See
+    /// `move_up` for the goal-column behavior.
     fn move_down(&mut self, extend: bool) {
         if extend {
             self.ensure_anchor();
         } else {
             self.sel_anchor = None;
         }
+        let mut goal_x = self.pref_x;
         if let Some(layout) = &self.layout
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
             && bi + 1 < layout.glyphs.bands.len()
         {
             let target_band = &layout.glyphs.bands[bi + 1];
             let mid_y = (target_band.top + target_band.bottom) * 0.5;
-            let x = layout
-                .glyphs
-                .caret_for_byte(self.caret)
-                .map_or(0.0, |g| g.x);
-            if let Some((b, _)) = layout.glyphs.byte_for_point(
+            let x = goal_x.unwrap_or_else(|| {
+                layout
+                    .glyphs
+                    .caret_for_byte(self.caret)
+                    .map_or(0.0, |g| g.x)
+            });
+            goal_x = Some(x);
+            if let Some(hit) = layout.glyphs.byte_for_point(
                 mathed_core::glyphs::V2::new(x, mid_y),
             ) {
-                self.caret = b;
+                self.caret = resolve_hit(hit, self.doc.text());
             }
         }
         self.caret_changed();
+        self.pref_x = goal_x;
     }
 
     /// Lay out the current document (if the cache is stale) and present it.
@@ -716,17 +817,61 @@ impl App {
             return;
         };
 
-        // Recompute the cached layout when invalidated, the width changed, or
-        // the caret crossed a translator-panel boundary (foot-style: edits,
-        // resizes and panel toggles pay; ordinary caret moves do not).
-        let panel =
-            active_translator_span(self.doc.text(), self.caret);
+        // The caret/selection always reaches a hidden marker (foot/Bevy-
+        // mathed style: a marker is hidden or not, but always reachable
+        // through the cursor) — a selection reveals every marker it spans,
+        // and with no selection the bare caret still reveals one it's
+        // sitting exactly on. Mirrors `mathed`'s (Bevy) `block_reveal`.
+        let sel_reveal: Vec<std::ops::Range<usize>> =
+            match self.selection() {
+                Some(s) => vec![s],
+                None => vec![self.caret..self.caret],
+            };
+        let touched_markers =
+            touched_marker_starts(self.doc.text(), &sel_reveal);
+        // Same idea for collapsible space runs (2+ spaces): Markdown/
+        // Typst-style collapse-to-one everywhere else, but every space
+        // shown while the caret/selection touches that run.
+        let touched_spaces =
+            touched_space_run_starts(self.doc.text(), &sel_reveal);
+        // Same idea for `$...$` math spans: typeset while the caret/
+        // selection is elsewhere, raw source the moment it's touched.
+        let touched_math =
+            touched_math_span_starts(self.doc.text(), &sel_reveal);
+
+        // Recompute the cached layout when invalidated, the width changed,
+        // the caret crossed a reveal-span boundary, or the set of markers,
+        // space runs or math spans the caret/selection touches changed
+        // (foot-style: edits, resizes and reveal toggles pay; ordinary
+        // caret moves that don't cross one do not).
+        let panel = active_reveal_span(self.doc.text(), self.caret);
         if self.layout.is_none()
             || self.layout_width != size.width
             || self.layout_panel != panel
+            || self.layout_reveal_markers != touched_markers
+            || self.layout_reveal_spaces != touched_spaces
+            || self.layout_reveal_math != touched_math
         {
             let opts = TransformOptions {
-                caret: Some(self.caret),
+                // Caret anywhere over a special-rendered part (translator
+                // panel, `\prob`/`\model` annotation, `\cite` label, ...)
+                // expands its own content instead of the collapsed
+                // summary — see `active_reveal_span`. Deliberately
+                // `expand`, not `reveal`: on its own it must not also
+                // reveal the marker tokens (`#3`/`#4`, ...) delimiting the
+                // segment, which stay hidden unless the caret/selection
+                // directly touches them (`reveal`, below) or Ctrl+M
+                // (`show_hidden`) is on.
+                expand: panel.clone().into_iter().collect(),
+                reveal: sel_reveal,
+                // Ctrl+M (`mathed`'s/Bevy's own `show_hidden`, matched
+                // here — see `toggle_marker_overlay`): reveals every
+                // hidden marker as literal text through the *same*
+                // transform pass and Typst layout as the rest of the
+                // document, not a separate overlay render — guaranteed
+                // to look identical to surrounding text because it is
+                // the surrounding text.
+                show_hidden: self.show_marker_overlay,
                 annotations: self.bridge.result_annotations(),
                 translator_errors: self
                     .bridge
@@ -734,17 +879,30 @@ impl App {
                     .clone(),
                 ..Default::default()
             };
-            let footer =
-                self.bridge.result_panel_markup().unwrap_or_default();
-            self.layout = layout_doc_with_footer(
+            // Keep the previous (stale) layout on failure rather than
+            // going blank — a Typst eval error (e.g. a bare, unescaped
+            // `#` slipping through some future edge case) shouldn't
+            // freeze the whole editor with nothing on screen and no
+            // caret to navigate with; it degrades to "stale content
+            // until the next successful layout" instead. The retry
+            // itself is driven by `self.layout.is_none()` staying
+            // false here (unlike `invalidate()`, which still sets it
+            // to `None` on every edit) — so if the *cause* was a
+            // width/panel/reveal change with no edit, this exact
+            // relayout won't be retried until something else changes;
+            // an edit (which always invalidates) always retries.
+            if let Ok(built) = layout_doc_with(
                 self.doc.text(),
                 size.width as f64,
                 &opts,
-                &footer,
-            )
-            .ok();
+            ) {
+                self.layout = Some(built);
+            }
             self.layout_width = size.width;
             self.layout_panel = panel;
+            self.layout_reveal_markers = touched_markers;
+            self.layout_reveal_spaces = touched_spaces;
+            self.layout_reveal_math = touched_math;
         }
 
         // Compute the selection up-front (owned) so it doesn't alias the
@@ -765,8 +923,8 @@ impl App {
         // open, the doc area is shrunk to `doc_h = win_h - panel_h`
         // and the panel takes the bottom `panel_h` rows. The
         // cached layout is reused (no relayout on toggle); the
-        // blit just truncates at `doc_h` and the marker overlay /
-        // popup boxes clip their bottom edge at the same boundary.
+        // blit just truncates at `doc_h` and the popup boxes clip
+        // their bottom edge at the same boundary.
         let panel_h: usize = if self.references_panel.is_some() {
             // Recompute the height each frame: the body images
             // are filled in lazily, so the height grows until all
@@ -783,50 +941,59 @@ impl App {
             0
         };
         let doc_h = win_h.saturating_sub(panel_h);
-        let panel_clip: Option<f64> = if panel_h > 0 {
-            Some(doc_h as f64)
-        } else {
-            None
-        };
 
         let Ok(mut buffer) = surface.buffer_mut() else {
             return;
         };
-        buffer.fill(0x00FF_FFFF); // white page
+        buffer.fill(0x0000_0000); // black page
 
         if let Some(layout) = &self.layout {
-            blit_over_white(&mut buffer, win_w, doc_h, &layout.image);
+            blit_over_bg(&mut buffer, win_w, doc_h, &layout.image);
             if let Some(sel) = sel {
                 let rects = layout.glyphs.rects_for_range(sel);
                 draw_selection(&mut buffer, win_w, doc_h, &rects);
             }
-            if self.caret_visible
-                && let Some(geom) =
-                    layout.glyphs.caret_for_byte(self.caret)
+            if let Some(geom) = layout.glyphs.caret_for_byte(self.caret)
                 && (geom.top as usize) < doc_h
             {
-                draw_caret(&mut buffer, win_w, doc_h, geom);
-            }
-            // Marker overlay (marker_overlay_and_references_panel
-            // plan, Stage 5): drawn on top of the doc text, clipped
-            // at the doc/panel boundary. Painter's algorithm — the
-            // labels are drawn in document order ascending, so the
-            // last marker in the doc covers any earlier one it
-            // overlaps.
-            if self.show_marker_overlay {
-                let labels =
-                    crate::marker_overlay::collect_marker_labels(
-                        self.doc.text(),
-                        layout,
-                        panel_clip,
-                    );
-                crate::marker_overlay::draw_marker_overlay(
-                    &mut buffer,
-                    win_w,
-                    doc_h,
-                    &labels,
-                    panel_clip,
+                if self.caret_visible {
+                    draw_caret(&mut buffer, win_w, doc_h, geom);
+                }
+                // Tell the OS where to anchor its IME candidate window
+                // (e.g. a pinyin candidate box) — independent of caret
+                // blink, and needed even before any composition starts
+                // (winit: "you should also start performing IME related
+                // requests like set_ime_cursor_area" right after Enabled).
+                window.set_ime_cursor_area(
+                    winit::dpi::PhysicalPosition::new(
+                        geom.x as i32,
+                        geom.top as i32,
+                    ),
+                    winit::dpi::PhysicalSize::new(
+                        geom.width.max(1.0) as u32,
+                        geom.height.max(1.0) as u32,
+                    ),
                 );
+                // In-progress IME composition text: rendered through
+                // Typst (for correct CJK/complex-script glyphs — the
+                // ASCII-only bitmap font used for marker labels can't
+                // show it) as underlined text, composited at the caret,
+                // never written into `doc`.
+                if let Some(preedit) = &self.ime_preedit
+                    && let Ok(img) = crate::render::render_preedit(
+                        preedit,
+                        DEFAULT_WIDTH_PT,
+                    )
+                {
+                    blit_over_bg_clipped(
+                        &mut buffer,
+                        win_w,
+                        doc_h,
+                        geom.x.round() as usize,
+                        geom.top.round() as usize,
+                        &img,
+                    );
+                }
             }
             // Cite popup boxes (cite_popup_boxes plan, Stage 5):
             // drawn *over* the marker overlay and caret so the box
@@ -880,26 +1047,107 @@ fn next_char_boundary(text: &str, at: usize) -> usize {
         .map_or(text.len(), |(i, _)| at + i)
 }
 
-/// Draw a 1–2px vertical caret bar at the glyph geometry (frame pt == px at
-/// scale 1, image blitted at the window origin), clipped to the window.
+/// Doc byte offsets (`Marker::range.start`) of every marker touched by any
+/// range in `reveal` — used to detect when the caret/selection's marker-
+/// reveal state has actually changed (so `redraw` only relays out then,
+/// not on every caret move). "Touched" matches the same inclusive rule
+/// `TransformOptions::reveal` itself uses: a marker right at the edge of
+/// a point/selection still counts.
+fn touched_marker_starts(
+    doc_text: &str,
+    reveal: &[std::ops::Range<usize>],
+) -> Vec<usize> {
+    let s = scan(doc_text);
+    s.markers
+        .iter()
+        .filter(|m| {
+            reveal.iter().any(|r| {
+                r.start <= m.range.end && m.range.start <= r.end
+            })
+        })
+        .map(|m| m.range.start)
+        .collect()
+}
+
+/// Doc byte offsets (each run's start) of every collapsible space run
+/// touched by any range in `reveal` — same cache-invalidation role as
+/// `touched_marker_starts`, for the space-run reveal
+/// (`mathed_core::transform::space_run_ranges`).
+fn touched_space_run_starts(
+    doc_text: &str,
+    reveal: &[std::ops::Range<usize>],
+) -> Vec<usize> {
+    mathed_core::transform::space_run_ranges(doc_text, &(0..doc_text.len()))
+        .into_iter()
+        .filter(|run| {
+            reveal
+                .iter()
+                .any(|r| r.start <= run.end && run.start <= r.end)
+        })
+        .map(|run| run.start)
+        .collect()
+}
+
+/// Doc byte offsets (each span's start) of every `$...$` math span
+/// touched by any range in `reveal` — same cache-invalidation role as
+/// `touched_marker_starts`/`touched_space_run_starts`, for the math-span
+/// reveal (`mathed_core::transform::math_span_ranges`).
+fn touched_math_span_starts(
+    doc_text: &str,
+    reveal: &[std::ops::Range<usize>],
+) -> Vec<usize> {
+    mathed_core::transform::math_span_ranges(doc_text)
+        .into_iter()
+        .filter(|span| {
+            reveal
+                .iter()
+                .any(|r| r.start <= span.end && span.start <= r.end)
+        })
+        .map(|span| span.start)
+        .collect()
+}
+
+/// Resolve a `GlyphIndex::byte_for_point` hit to the doc byte to place the
+/// caret at. `byte_for_point` reports which half of the hit glyph the
+/// point fell in via `after`, but `GlyphIndex` only tracks visual advance,
+/// not how many doc bytes that glyph is — so the caller (here) advances
+/// past it using `doc_text`. The one exception: never advance past a
+/// `\n` — it (or the invisible NBSP anchor pinned at one, for a blank
+/// line) marks the true end of a visual row, so hitting the right half
+/// of a row's last glyph must land right before it, not on the next row.
+fn resolve_hit(hit: (usize, bool), doc_text: &str) -> usize {
+    let (byte, after) = hit;
+    if !after || doc_text.as_bytes().get(byte) == Some(&b'\n') {
+        return byte;
+    }
+    next_char_boundary(doc_text, byte)
+}
+
+/// Draw a terminal-style block caret: a full character-cell-wide box,
+/// inverted (XOR) rather than a solid fill, at the glyph geometry
+/// (frame pt == px at scale 1, image blitted at the window origin),
+/// clipped to the window. Since the page is white-on-black, inverting
+/// turns the background solid white — the same color as the
+/// characters — and shows any glyph under the caret in black, exactly
+/// like a terminal block cursor.
 fn draw_caret(
     buffer: &mut [u32],
     win_w: usize,
     win_h: usize,
     geom: CaretGeom,
 ) {
-    const CARET: u32 = 0x0020_60F0; // a calm blue
     let x = geom.x.round().max(0.0) as usize;
     let top = geom.top.round().max(0.0) as usize;
     let bottom = (geom.top + geom.height).round().max(0.0) as usize;
     if x >= win_w {
         return;
     }
-    let x_end = (x + 2).min(win_w); // 2px wide for visibility
+    let width = geom.width.round().max(1.0) as usize;
+    let x_end = (x + width).min(win_w);
     for y in top..bottom.min(win_h) {
         let row = y * win_w;
         for px in &mut buffer[row + x..row + x_end] {
-            *px = CARET;
+            *px ^= 0x00FF_FFFF;
         }
     }
 }
@@ -956,7 +1204,7 @@ fn draw_popup_box(
     width: usize,
     body: Option<&imaging::RgbaImage>,
 ) {
-    const FRAME: u32 = 0x0020_60F0; // same calm blue as the caret
+    const FRAME: u32 = 0x0020_60F0; // a calm blue
     const FRAME_THICKNESS: usize = 2;
     const BG_R: u32 = 0xFF;
     const BG_G: u32 = 0xFF;
@@ -1123,8 +1371,11 @@ fn cite_number_exists_in_current_scope(
 
 /// clipped to `max_h` rows. softbuffer pixels are `0x00RRGGBB`.
 /// `max_h` is the row cap (typically `win_h`; smaller when the
-/// references panel is open and the doc area is shrunk).
-fn blit_over_white(
+/// references panel is open and the doc area is shrunk). The page is
+/// composited over black (the editor's dark theme); the doc's own
+/// glyphs are white by default (see `THEME_PRELUDE` in `render.rs`),
+/// so this is a plain alpha-over-black blend, not an invert.
+fn blit_over_bg(
     buffer: &mut [u32],
     win_w: usize,
     max_h: usize,
@@ -1146,12 +1397,54 @@ fn blit_over_white(
                 img.data[s + 2] as u32,
                 img.data[s + 3] as u32,
             );
-            // over white: out = src*a + 255*(255-a), per channel, /255.
-            let inv = 255 - a;
-            let cr = (r * a + 255 * inv) / 255;
-            let cg = (g * a + 255 * inv) / 255;
-            let cb = (b * a + 255 * inv) / 255;
+            // over black: out = src*a + 0*(255-a), per channel, /255.
+            let cr = (r * a) / 255;
+            let cg = (g * a) / 255;
+            let cb = (b * a) / 255;
             buffer[dst_row + x] = (cr << 16) | (cg << 8) | cb;
+        }
+    }
+}
+
+/// Like [`blit_over_bg`] but composited at an arbitrary `(x0, y0)` offset,
+/// alpha-blending over whatever is already in the buffer (rather than
+/// assuming a plain black background) — used for overlays drawn on top
+/// of already-rendered content, e.g. the IME preedit box.
+fn blit_over_bg_clipped(
+    buffer: &mut [u32],
+    win_w: usize,
+    max_h: usize,
+    x0: usize,
+    y0: usize,
+    img: &imaging::RgbaImage,
+) {
+    let iw = img.width as usize;
+    let ih = img.height as usize;
+    let copy_w = iw.min(win_w.saturating_sub(x0));
+    let copy_h = ih.min(max_h.saturating_sub(y0));
+
+    for y in 0..copy_h {
+        let src_row = y * iw * 4;
+        let dst_row = (y0 + y) * win_w;
+        for x in 0..copy_w {
+            let s = src_row + x * 4;
+            let (r, g, b, a) = (
+                img.data[s] as u32,
+                img.data[s + 1] as u32,
+                img.data[s + 2] as u32,
+                img.data[s + 3] as u32,
+            );
+            if a == 0 {
+                continue;
+            }
+            let px = buffer[dst_row + x0 + x];
+            let (pr, pg, pb) =
+                ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+            let inv = 255 - a;
+            let cr = (r * a + pr * inv) / 255;
+            let cg = (g * a + pg * inv) / 255;
+            let cb = (b * a + pb * inv) / 255;
+            buffer[dst_row + x0 + x] = (cr << 16) | (cg << 8) | cb;
         }
     }
 }
@@ -1201,6 +1494,13 @@ impl ApplicationHandler<UserEvent> for App {
 
         self.window = Some(window.clone());
         window.set_visible(true);
+        // IME (CJK/composed input): enable so the OS delivers
+        // `WindowEvent::Ime` preedit/commit events instead of raw key
+        // events for composed characters. Design borrowed from Bevy
+        // 0.19's `EditableText` widget (IME support, cosmic-text
+        // backed) without depending on Bevy or cosmic-text — winit
+        // already exposes the same OS IME protocol natively.
+        window.set_ime_allowed(true);
 
         // Compute results for the initial document.
         self.refresh_kernel();
@@ -1257,26 +1557,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => self.request_redraw(),
             WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::Ime(ime) => self.handle_ime(ime),
             WindowEvent::ModifiersChanged(m) => {
-                // Marker overlay toggle (marker_overlay_and_references_panel
-                // plan, Stage 5) on the rising edge of "Ctrl+Shift
-                // both held" — the user asked for "click Ctrl+Shift"
-                // (no third key). The previous state is remembered
-                // in `prev_mods_both` so the toggle only fires on
-                // the transition, not on every modifier event
-                // (releasing one of the two keys and re-pressing
-                // it would otherwise re-toggle).
-                let new_state = m.state();
-                if Self::marker_overlay_rising_edge(
-                    new_state,
-                    self.prev_mods_both,
-                ) {
-                    self.toggle_marker_overlay();
-                    self.push_a11y_update();
-                }
-                self.prev_mods_both =
-                    new_state.control_key() && new_state.shift_key();
-                self.mods = new_state;
+                self.mods = m.state();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = Some((position.x, position.y));
@@ -1468,7 +1751,329 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{cite_popup_scope_text, selection_range};
+    use super::{
+        FAR_LEFT, FAR_RIGHT, cite_popup_scope_text, draw_caret,
+        resolve_hit, selection_range, touched_marker_starts,
+        touched_math_span_starts, touched_space_run_starts,
+    };
+    use crate::render::{
+        DocLayout, active_reveal_span, layout_doc, layout_doc_with,
+    };
+    use mathed_core::glyphs::{CaretGeom, V2};
+    use mathed_core::transform::TransformOptions;
+
+    #[test]
+    fn touched_marker_starts_finds_markers_the_selection_spans() {
+        let doc = "#1 f(x) #2 tail";
+        // A selection spanning both markers (byte 0 through the tail).
+        assert_eq!(
+            touched_marker_starts(doc, &[0..doc.len()]),
+            vec![0, 8]
+        );
+        // A point exactly on the second marker's own start still
+        // touches it (foot-style inclusive edge).
+        assert_eq!(touched_marker_starts(doc, &[8..8]), vec![8]);
+        // A point elsewhere, touching neither.
+        assert!(touched_marker_starts(doc, &[4..4]).is_empty());
+    }
+
+    #[test]
+    fn touched_space_run_starts_finds_runs_the_caret_touches() {
+        // "one" (0-2) + 4 spaces (3-6) + "two" (7-9) + 2 spaces (10-11)
+        // + "three" (12-16): runs start at byte 3 and byte 10.
+        let doc = "one    two  three";
+        assert_eq!(
+            touched_space_run_starts(doc, &[5..5]),
+            vec![3],
+            "a point inside the first run touches only that run"
+        );
+        assert_eq!(
+            touched_space_run_starts(doc, &[0..doc.len()]),
+            vec![3, 10],
+            "a selection spanning both runs touches both"
+        );
+        assert!(
+            touched_space_run_starts(doc, &[1..1]).is_empty(),
+            "a point elsewhere (inside a word) touches no run"
+        );
+    }
+
+    #[test]
+    fn touched_math_span_starts_finds_spans_the_caret_touches() {
+        // "$a+b$" (0-4) + " and " (5-9) + "$c+d$" (10-14): spans start
+        // at byte 0 and byte 10.
+        let doc = "$a+b$ and $c+d$";
+        assert_eq!(
+            touched_math_span_starts(doc, &[2..2]),
+            vec![0],
+            "a point inside the first span touches only that span"
+        );
+        assert_eq!(
+            touched_math_span_starts(doc, &[0..doc.len()]),
+            vec![0, 10],
+            "a selection spanning both spans touches both"
+        );
+        assert!(
+            touched_math_span_starts(doc, &[7..7]).is_empty(),
+            "a point elsewhere (in \"and\") touches no span"
+        );
+    }
+
+    /// Faithfully mirrors `App::redraw`'s relayout-gating logic and
+    /// `App::move_down`'s hit-testing, without needing a real `App`
+    /// (which can't be constructed headless — it needs a winit event
+    /// loop). Used by the test below to drive a full Down-arrow
+    /// sequence exactly the way the real app would.
+    struct SimState {
+        caret: usize,
+        pref_x: Option<f32>,
+        layout: Option<DocLayout>,
+        layout_panel: Option<std::ops::Range<usize>>,
+        layout_reveal_markers: Vec<usize>,
+        layout_reveal_spaces: Vec<usize>,
+        layout_reveal_math: Vec<usize>,
+    }
+
+    fn sim_redraw(doc: &str, width: f64, st: &mut SimState) {
+        let sel_reveal = vec![st.caret..st.caret];
+        let touched_markers = touched_marker_starts(doc, &sel_reveal);
+        let touched_spaces = touched_space_run_starts(doc, &sel_reveal);
+        let touched_math = touched_math_span_starts(doc, &sel_reveal);
+        let panel = active_reveal_span(doc, st.caret);
+        if st.layout.is_none()
+            || st.layout_panel != panel
+            || st.layout_reveal_markers != touched_markers
+            || st.layout_reveal_spaces != touched_spaces
+            || st.layout_reveal_math != touched_math
+        {
+            let opts = TransformOptions {
+                expand: panel.clone().into_iter().collect(),
+                reveal: sel_reveal,
+                ..Default::default()
+            };
+            if let Ok(built) = layout_doc_with(doc, width, &opts) {
+                st.layout = Some(built);
+            }
+            st.layout_panel = panel;
+            st.layout_reveal_markers = touched_markers;
+            st.layout_reveal_spaces = touched_spaces;
+            st.layout_reveal_math = touched_math;
+        }
+    }
+
+    fn sim_move_down(doc: &str, st: &mut SimState) -> bool {
+        let Some(layout) = &st.layout else { return false };
+        let Some(bi) = layout.glyphs.band_for_byte(st.caret) else {
+            return false;
+        };
+        if bi + 1 >= layout.glyphs.bands.len() {
+            return false;
+        }
+        let target = &layout.glyphs.bands[bi + 1];
+        let mid_y = (target.top + target.bottom) * 0.5;
+        let x = st.pref_x.unwrap_or_else(|| {
+            layout.glyphs.caret_for_byte(st.caret).map_or(0.0, |g| g.x)
+        });
+        if let Some(hit) = layout.glyphs.byte_for_point(V2::new(x, mid_y)) {
+            st.caret = resolve_hit(hit, doc);
+        }
+        st.pref_x = Some(x);
+        true
+    }
+
+    #[test]
+    fn down_arrow_enters_traverses_and_exits_a_collapsed_translator() {
+        // End-to-end reproduction of the repeatedly-reported bug:
+        // pressing Down near a translator used to skip clean over it
+        // without ever expanding, because the collapsed title's
+        // glyphs (an unpinned render-only splice) resolved to one
+        // byte short of where `active_reveal_span` checks — see
+        // `collapsed_translator_title_maps_back_to_the_marker_not_the_
+        // text_before_it` (mathed_core::transform) for the root
+        // cause.
+        let doc = "line one here\n#3 #let translate(body) = {\n  let x = (1, 2, 3)\n  x\n} #4 \\translator(#3,#4, name: \"ho\")\nline after here";
+        let mut st = SimState {
+            caret: 0,
+            pref_x: None,
+            layout: None,
+            layout_panel: None,
+            layout_reveal_markers: Vec::new(),
+            layout_reveal_spaces: Vec::new(),
+            layout_reveal_math: Vec::new(),
+        };
+        let mut saw_expanded_band_count = false;
+        let mut reached_line_after = false;
+        for _ in 0..10 {
+            sim_redraw(doc, 300.0, &mut st);
+            if let Some(layout) = &st.layout
+                && layout.glyphs.bands.len() >= 5
+            {
+                // The code (4 lines) plus the surrounding prose lines
+                // only adds up to this many bands if the translator
+                // actually expanded — collapsed, it's a single title
+                // line and the whole document never exceeds 3 bands.
+                saw_expanded_band_count = true;
+            }
+            if doc[st.caret..].starts_with("line after here") {
+                reached_line_after = true;
+                break;
+            }
+            if !sim_move_down(doc, &mut st) {
+                break;
+            }
+        }
+        assert!(
+            saw_expanded_band_count,
+            "Down arrow should have expanded the translator into its \
+             multiple code lines at some point"
+        );
+        assert!(
+            reached_line_after,
+            "Down arrow should eventually reach the text after the \
+             translator, caret ended at byte {} ({:?})",
+            st.caret,
+            &doc[st.caret..]
+        );
+    }
+
+    #[test]
+    fn selection_over_a_marker_reveals_it_as_real_content() {
+        // A hidden marker has no glyph entry at all; once the selection
+        // (or caret) touches it, it must render as literal, selectable
+        // text, matching the Bevy `mathed` frontend's `block_reveal`
+        // (a marker is hidden or not, but always reachable through the
+        // cursor).
+        let doc = "#1 f(x) #2 tail";
+        let hidden = layout_doc(doc, 400.0).expect("layout");
+        assert!(
+            hidden.glyphs.entries.iter().all(|e| e.doc_byte != 0),
+            "marker should have no entry while hidden"
+        );
+        let opts = TransformOptions {
+            reveal: vec![0..doc.len()],
+            ..Default::default()
+        };
+        let revealed =
+            layout_doc_with(doc, 400.0, &opts).expect("layout");
+        assert!(
+            revealed.glyphs.entries.iter().any(|e| e.doc_byte == 0),
+            "marker should be a real, selectable glyph once revealed"
+        );
+    }
+
+    #[test]
+    fn show_hidden_reveals_every_marker_through_the_normal_layout() {
+        // Ctrl+M (`show_marker_overlay` → `TransformOptions::show_hidden`)
+        // must reveal *every* marker in the document, not just ones the
+        // caret/selection touches — and via the exact same layout pass
+        // as the rest of the text, not a separate overlay render.
+        let doc = "#1 f(x) #2 tail #3 more #4";
+        let opts = TransformOptions {
+            show_hidden: true,
+            ..Default::default()
+        };
+        let layout = layout_doc_with(doc, 400.0, &opts).expect("layout");
+        for marker_byte in [0usize, 8, 16, 24] {
+            assert!(
+                layout
+                    .glyphs
+                    .entries
+                    .iter()
+                    .any(|e| e.doc_byte == marker_byte),
+                "marker at byte {marker_byte} should be a real glyph \
+                 when show_hidden is on"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_hit_passes_through_on_left_half() {
+        assert_eq!(resolve_hit((3, false), "hello"), 3);
+    }
+
+    #[test]
+    fn resolve_hit_advances_one_char_on_right_half() {
+        // Hitting the right half of 'e' (byte 1) in "hello" lands the
+        // caret after it, at byte 2.
+        assert_eq!(resolve_hit((1, true), "hello"), 2);
+    }
+
+    #[test]
+    fn resolve_hit_does_not_cross_a_newline() {
+        // Byte 5 in "hello\nworld" *is* the '\n' itself — hitting its
+        // right half must not jump onto the next row.
+        let text = "hello\nworld";
+        assert_eq!(resolve_hit((5, true), text), 5);
+    }
+
+    #[test]
+    fn home_and_end_use_the_current_band_not_the_raw_line() {
+        // Two hard lines ("one" / "two"); Home/End on line 2 must stay
+        // within "two", never reaching back into "one".
+        let layout =
+            layout_doc("one\ntwo", 400.0).expect("layout should succeed");
+        let band = layout.glyphs.band_for_byte(5).expect("band for 'w'"); // byte 5 = 'w' of "two"
+        assert_eq!(band, 1, "'two' should be the second band");
+        let bounds = &layout.glyphs.bands[band];
+        let mid_y = (bounds.top + bounds.bottom) * 0.5;
+
+        let home_hit = layout
+            .glyphs
+            .byte_for_point(V2::new(FAR_LEFT, mid_y))
+            .expect("home hit-test");
+        assert_eq!(resolve_hit(home_hit, "one\ntwo"), 4); // 't' of "two"
+
+        let end_hit = layout
+            .glyphs
+            .byte_for_point(V2::new(FAR_RIGHT, mid_y))
+            .expect("end hit-test");
+        assert_eq!(resolve_hit(end_hit, "one\ntwo"), 7); // end of doc
+    }
+
+    #[test]
+    fn end_on_a_blank_line_stays_on_it() {
+        // End on the blank line between "a" and "b" must resolve to the
+        // blank line's own doc byte (2), not advance into "b".
+        let layout =
+            layout_doc("a\n\nb", 400.0).expect("layout should succeed");
+        let band = layout.glyphs.band_for_byte(2).expect("blank band");
+        assert_eq!(band, 1);
+        let bounds = &layout.glyphs.bands[band];
+        let mid_y = (bounds.top + bounds.bottom) * 0.5;
+        let end_hit = layout
+            .glyphs
+            .byte_for_point(V2::new(FAR_RIGHT, mid_y))
+            .expect("end hit-test on blank band");
+        assert_eq!(resolve_hit(end_hit, "a\n\nb"), 2);
+    }
+
+    #[test]
+    fn draw_caret_is_full_width_and_inverted() {
+        // A 3-wide, 2-tall buffer; the middle pixel white (a glyph),
+        // the rest black (background) — as blit_over_bg would leave
+        // them for white-on-black text.
+        let win_w = 3;
+        let win_h = 2;
+        let mut buffer = vec![0x0000_0000u32; win_w * win_h];
+        buffer[1] = 0x00FF_FFFF; // (1, 0) is a glyph pixel
+
+        let geom = CaretGeom {
+            x: 0.0,
+            top: 0.0,
+            height: 2.0,
+            width: 2.0, // full character-cell width, not a thin bar
+        };
+        draw_caret(&mut buffer, win_w, win_h, geom);
+
+        // Column 0..2 inverted on both rows: black -> white, and the
+        // one white glyph pixel -> black (the terminal "cutout" look).
+        assert_eq!(buffer[0], 0x00FF_FFFF); // was black
+        assert_eq!(buffer[1], 0x0000_0000); // was white (glyph)
+        assert_eq!(buffer[2], 0x0000_0000); // outside the caret, untouched
+        assert_eq!(buffer[3], 0x00FF_FFFF); // row 1, col 0: was black
+        assert_eq!(buffer[4], 0x00FF_FFFF); // row 1, col 1: was black
+        assert_eq!(buffer[5], 0x0000_0000); // outside the caret, untouched
+    }
 
     #[test]
     fn selection_range_none_when_no_anchor() {
@@ -1520,34 +2125,4 @@ mod tests {
         assert_eq!(scope, doc);
     }
 
-    #[test]
-    fn marker_overlay_rising_edge_only_on_transition() {
-        use winit::keyboard::ModifiersState;
-        // No modifiers held → no toggle, regardless of prev.
-        assert!(!super::App::marker_overlay_rising_edge(
-            ModifiersState::empty(),
-            false,
-        ));
-        assert!(!super::App::marker_overlay_rising_edge(
-            ModifiersState::empty(),
-            true,
-        ));
-        // Only Ctrl held → no toggle.
-        assert!(!super::App::marker_overlay_rising_edge(
-            ModifiersState::CONTROL,
-            false,
-        ));
-        // Only Shift held → no toggle.
-        assert!(!super::App::marker_overlay_rising_edge(
-            ModifiersState::SHIFT,
-            false,
-        ));
-        // Ctrl+Shift both held, prev was empty → rising edge
-        // → toggle.
-        let both = ModifiersState::CONTROL | ModifiersState::SHIFT;
-        assert!(super::App::marker_overlay_rising_edge(both, false));
-        // Ctrl+Shift both held, prev was both → already in
-        // state, no re-toggle.
-        assert!(!super::App::marker_overlay_rising_edge(both, true));
-    }
 }

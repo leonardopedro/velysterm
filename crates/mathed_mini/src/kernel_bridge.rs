@@ -32,7 +32,7 @@ use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src,
     statement_to_event_json, statement_to_model_spec,
 };
-use crate::translate::{TranslateError, Translator, typst_str_lit};
+use crate::translate::{TranslateError, Translator};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
 
 /// A computed result for a `\prob` / `\event` statement.
@@ -121,39 +121,6 @@ impl KernelBridge {
     /// so the expanded translator panel shows the error in red below the code.
     pub fn translator_errors(&self) -> &HashMap<usize, String> {
         &self.translator_errors
-    }
-
-    /// Typst markup for a results panel (a `#raw` block listing each prob's
-    /// value or error), or `None` when there are no results yet. A frontend
-    /// appends this below the document to show the computed probabilities.
-    pub fn result_panel_markup(&self) -> Option<String> {
-        if self.results.is_empty() {
-            return None;
-        }
-        let mut keys: Vec<usize> =
-            self.results.keys().copied().collect();
-        keys.sort_unstable();
-        let mut lines = Vec::with_capacity(keys.len());
-        for k in keys {
-            let label = self
-                .prob_names
-                .get(&k)
-                .and_then(|n| n.clone())
-                .unwrap_or_else(|| "prob".to_string());
-            let line = match &self.results[&k] {
-                KernelResult::Value(p) => format!("{label} = {p:.4}"),
-                KernelResult::Error {
-                    code_name, message, ..
-                } => {
-                    format!("{label}: {code_name} — {message}")
-                }
-            };
-            lines.push(line);
-        }
-        Some(format!(
-            "#raw(block: true, {})",
-            typst_str_lit(&lines.join("\n"))
-        ))
     }
 
     /// Re-scan `doc_text` and submit changed `\model`/`\prob` statements to the
@@ -665,13 +632,10 @@ mod tests {
             }
             other => panic!("expected a Value result, got {other:?}"),
         }
-        // The results panel reflects the computed value.
-        let panel = bridge
-            .result_panel_markup()
-            .expect("panel markup once a result exists");
-        assert!(panel.contains("1.0000"), "panel: {panel}");
-        assert!(panel.contains("#raw"), "panel: {panel}");
-        // The inline annotation carries the value too, keyed by prob offset.
+        // The inline annotation carries the value, keyed by prob offset —
+        // the only place a computed result is shown, right next to the
+        // `\prob` it belongs to (this is a WYSIWYG editor: no separate,
+        // non-document results display).
         let ann = bridge.result_annotations();
         let markup = ann.get(&key).expect("annotation for the prob");
         assert!(markup.contains("1.0000"), "annotation: {markup}");

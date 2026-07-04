@@ -4,10 +4,14 @@
 //! kinds that are *hidden at render time* (unless the caret is inside
 //! them, mirroring the terminal example's marker hiding):
 //!
-//! - **Markers**: `#` followed by an id starting with a digit, e.g. `#1`,
-//!   `#2`, `#3fx`. Digit-start ids cannot collide with Typst code calls
-//!   (`#set`, `#strong`, ...) because Typst identifiers never start with
-//!   a digit. A marker is a zero-width *anchor* in the rendered output.
+//! - **Markers**: `#` followed by an alphanumeric id, e.g. `#1`, `#2`,
+//!   `#ad`, `#3fx`. A marker is a zero-width *anchor* in the rendered
+//!   output. Typing an unescaped `#` always auto-inserts a fresh one
+//!   (see below) rather than a bare `#`, so a marker id shaped like a
+//!   Typst call (`#set`, `#strong`, ...) can only arrive via paste —
+//!   and even then, `mathed_core::transform`'s plain-text path escapes
+//!   any `#` that isn't recognized as a marker, so it can never reach
+//!   Typst as unintended code.
 //! - **Property statements**: `\name(arg, arg, ...)`, e.g.
 //!   `\function(#1,#2)` or `\bold(#3,#4)`. A statement whose first two
 //!   arguments are marker references defines a *segment*: the span of
@@ -21,9 +25,9 @@
 //! following `(` is left alone (it is a Typst escape sequence).
 //!
 //! Typing an unescaped `#` in the editors auto-inserts a fresh marker
-//! named `<lowest free number><RFC 1751 word>` (e.g. `#3ad` for the
-//! third free slot) — see [`auto_marker_token`]. So a bare `#` never
-//! appears in a document except via `\#`.
+//! named after the RFC 1751 memorable word for the lowest free slot
+//! (e.g. `#ad` for the third free slot) — see [`auto_marker_token`].
+//! So a bare `#` never appears in a document except via `\#`.
 
 use std::ops::Range;
 
@@ -282,36 +286,31 @@ pub fn next_marker_id(scan: &MarkerScan) -> u64 {
         .map_or(1, |m| m + 1)
 }
 
-/// Leading decimal digits of a marker id, as a number. Marker ids always
-/// start with a digit; `None` only on u64 overflow (absurdly long ids),
-/// which then simply doesn't occupy a number.
-fn numeric_prefix(id: &str) -> Option<u64> {
-    let digits =
-        id.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
-    digits.parse().ok()
-}
-
-/// The `count` smallest numbers ≥ 1 not used as the numeric prefix of any
-/// marker id (for editor-generated markers; `#3ad` occupies 3 just like `#3`).
+/// The `count` smallest numbers ≥ 1 whose RFC 1751 word (see
+/// [`auto_marker_id`]) is not already used as *any* existing marker's id
+/// string in the document. Auto-generated ids are pure words now (no digit
+/// prefix, so a document-level "number" isn't embedded in the text
+/// anymore) — uniqueness is just "is this exact id string already taken,"
+/// checked against the word each candidate number would produce.
 pub fn lowest_free_marker_numbers(
     scan: &MarkerScan,
     count: usize,
 ) -> Vec<u64> {
-    let used: std::collections::BTreeSet<u64> = scan
-        .markers
-        .iter()
-        .filter_map(|m| numeric_prefix(&m.id))
-        .collect();
-    (1..).filter(|n| !used.contains(n)).take(count).collect()
+    let used: std::collections::HashSet<&str> =
+        scan.markers.iter().map(|m| m.id.as_str()).collect();
+    (1..)
+        .filter(|&n| !used.contains(auto_marker_id(n).as_str()))
+        .take(count)
+        .collect()
 }
 
-/// Memorable auto-generated marker id for number `n`: the number followed
-/// by its RFC 1751 word encoding, e.g. 3 → "3ad". The digit prefix keeps
-/// the id inside the marker grammar (can never collide with Typst calls);
-/// the word is deterministic from the number, so knowing either recalls
-/// the other.
+/// Memorable auto-generated marker id for number `n`: its RFC 1751 word
+/// encoding alone, e.g. 3 → "ad" (no digit — see
+/// [`lowest_free_marker_numbers`] for how collisions are avoided without
+/// one). The word is deterministic from the number, so knowing either
+/// recalls the other.
 pub fn auto_marker_id(n: u64) -> String {
-    format!("{n}{}", crate::rfc1751::u64_to_rfc1751(n))
+    crate::rfc1751::u64_to_rfc1751(n)
 }
 
 /// `true` when a `#` typed at byte offset `at` would be escaped, i.e. is
@@ -327,9 +326,9 @@ pub fn backslash_escaped(text: &str, at: usize) -> bool {
 }
 
 /// Token to insert when the user types `#` at `at`: a fresh auto-named
-/// marker (`#3ad`), or `None` when the position is escaped and a literal
+/// marker (`#ad`), or `None` when the position is escaped and a literal
 /// `#` should be inserted instead. Call *after* any selection has been
-/// deleted so numbers freed by the deletion are reusable.
+/// deleted so words freed by the deletion are reusable.
 pub fn auto_marker_token(text: &str, at: usize) -> Option<String> {
     if backslash_escaped(text, at) {
         return None;
@@ -530,7 +529,7 @@ fn try_parse_marker(text: &str, at: usize) -> Option<Marker> {
     let bytes = text.as_bytes();
     debug_assert_eq!(bytes[at], b'#');
     let mut j = at + 1;
-    if j >= bytes.len() || !bytes[j].is_ascii_digit() {
+    if j >= bytes.len() || !bytes[j].is_ascii_alphanumeric() {
         return None;
     }
     while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
@@ -650,10 +649,21 @@ mod tests {
     }
 
     #[test]
-    fn typst_code_is_not_a_marker() {
+    fn hash_word_is_a_marker_even_if_shaped_like_a_typst_call() {
+        // The digit-first requirement was relaxed (auto-generated
+        // marker ids are now pure RFC 1751 words, e.g. "#ad") — a `#`
+        // followed by any alphanumeric run is a marker, whether it
+        // happens to look like a Typst call or not. Users never
+        // hand-type "#set"/"#strong" directly (typing `#` always
+        // auto-inserts a marker instead), and if one arrives via
+        // paste it's still safe: as a recognized marker it's
+        // hidden/escaped like any other, never reaching Typst as
+        // code either way.
         let s = scan("#set text(12pt) #strong[hi] #1ok");
-        assert_eq!(s.markers.len(), 1);
-        assert_eq!(s.markers[0].id, "1ok");
+        assert_eq!(s.markers.len(), 3);
+        assert_eq!(s.markers[0].id, "set");
+        assert_eq!(s.markers[1].id, "strong");
+        assert_eq!(s.markers[2].id, "1ok");
         assert!(s.stmts.is_empty());
     }
 
@@ -742,10 +752,14 @@ mod tests {
     }
 
     #[test]
-    fn lowest_free_skips_used_prefixes() {
-        // Plain and auto-named markers both occupy their number.
-        let s = scan("#1 a #3ad b #4am");
-        assert_eq!(lowest_free_marker_numbers(&s, 3), vec![2, 5, 6]);
+    fn lowest_free_skips_used_words() {
+        // Markers already using the words for 1 and 3 (built from
+        // `auto_marker_id` itself, so this doesn't hardcode RFC 1751
+        // table entries).
+        let text =
+            format!("#{} a #{} b", auto_marker_id(1), auto_marker_id(3));
+        let s = scan(&text);
+        assert_eq!(lowest_free_marker_numbers(&s, 3), vec![2, 4, 5]);
         assert_eq!(
             lowest_free_marker_numbers(&scan("no markers"), 1),
             vec![1]
@@ -753,34 +767,35 @@ mod tests {
     }
 
     #[test]
-    fn auto_ids_are_number_plus_word() {
-        assert_eq!(auto_marker_id(1), "1i");
-        assert_eq!(auto_marker_id(2), "2o");
-        assert_eq!(auto_marker_id(3), "3ad");
+    fn auto_ids_are_words_with_no_leading_number() {
+        assert_eq!(auto_marker_id(1), "i");
+        assert_eq!(auto_marker_id(2), "o");
+        assert_eq!(auto_marker_id(3), "ad");
     }
 
     #[test]
-    fn auto_ids_reparse_as_their_number() {
-        // Round-trip: the generated id is a valid marker occupying exactly n.
+    fn auto_ids_reparse_as_a_single_marker() {
+        // Round-trip: the generated id is a valid, standalone marker.
         for n in [1u64, 2, 7, 42, 2047, 2048] {
-            let text = format!("#{}", auto_marker_id(n));
+            let id = auto_marker_id(n);
+            let text = format!("#{id}");
             let s = scan(&text);
             assert_eq!(s.markers.len(), 1, "{text}");
-            assert_eq!(numeric_prefix(&s.markers[0].id), Some(n));
+            assert_eq!(s.markers[0].id, id);
         }
     }
 
     #[test]
     fn auto_token_respects_escapes() {
-        assert_eq!(auto_marker_token("", 0).as_deref(), Some("#1i"));
+        assert_eq!(auto_marker_token("", 0).as_deref(), Some("#i"));
         assert_eq!(
-            auto_marker_token("#1i x ", 6).as_deref(),
-            Some("#2o")
+            auto_marker_token("#i x ", 5).as_deref(),
+            Some("#o")
         );
         assert_eq!(auto_marker_token(r"a\", 2), None); // \#  → literal
         assert_eq!(
             auto_marker_token(r"a\\", 3).as_deref(),
-            Some("#1i")
+            Some("#i")
         ); // \\# → marker
     }
 

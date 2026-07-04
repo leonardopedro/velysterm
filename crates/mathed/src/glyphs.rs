@@ -84,22 +84,33 @@ pub fn build_glyph_index(
     {
         let mut current_band: Option<usize> = None;
         for rec in &sorted_by_y {
+            let rec_top = rec.baseline_y - rec.asc;
+            let rec_bottom = rec.baseline_y - rec.desc;
+            // Same visual line iff this glyph's vertical extent
+            // overlaps the current band's — not just "close to its
+            // baseline". A raised/lowered glyph (a math superscript
+            // or subscript, `#super[...]`/`#sub[...]`) sits on the
+            // *same* line as the surrounding text but has a
+            // meaningfully different baseline_y; comparing baselines
+            // directly split it into its own spurious band (see
+            // `mathed_core::glyphs::build_glyph_index`, which shares
+            // this algorithm and had the same bug — confirmed there:
+            // `$x^2$ gg` put the "2" in its own band, breaking Up/Down
+            // navigation for the rest of that line).
             if let Some(bi) = current_band
-                && (rec.baseline_y - bands_raw[bi].baseline).abs()
-                    < 0.5
+                && rec_top <= bands_raw[bi].bottom
+                && rec_bottom >= bands_raw[bi].top
             {
-                bands_raw[bi].top =
-                    bands_raw[bi].top.min(rec.baseline_y - rec.asc);
-                bands_raw[bi].bottom = bands_raw[bi]
-                    .bottom
-                    .max(rec.baseline_y - rec.desc);
+                bands_raw[bi].top = bands_raw[bi].top.min(rec_top);
+                bands_raw[bi].bottom =
+                    bands_raw[bi].bottom.max(rec_bottom);
                 band_idx.push(bi as u32);
                 continue;
             }
             let bi = bands_raw.len();
             bands_raw.push(LineBand {
-                top: rec.baseline_y - rec.asc,
-                bottom: rec.baseline_y - rec.desc,
+                top: rec_top,
+                bottom: rec_bottom,
                 baseline: rec.baseline_y,
             });
             band_idx.push(bi as u32);
