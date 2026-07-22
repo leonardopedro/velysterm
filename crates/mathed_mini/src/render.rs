@@ -11,6 +11,8 @@ use mathed_core::transform::{
 use typst::layout::{Abs, Axes, Frame, Region, Size};
 
 use crate::world::MiniWorld;
+use mathed_core::blocks::Block;
+use mathed_core::markers::{MarkerScan, Segment};
 
 /// Default page width in points for the minimal editor.
 pub const DEFAULT_WIDTH_PT: f64 = 600.0;
@@ -257,6 +259,74 @@ pub fn render_markup(
     width_pt: f64,
 ) -> Result<RgbaImage, RenderError> {
     render_world(&MiniWorld::new(markup), width_pt)
+}
+
+/// Lay out a single block's range into its own cached [`DocLayout`] — the
+/// per-block counterpart to [`layout_doc_inner`]. No footer (the footer is
+/// a separate, always-last virtual block; see [`layout_footer`]).
+pub fn layout_block(
+    doc_text: &str,
+    scan: &mathed_core::markers::MarkerScan,
+    segments: &[mathed_core::markers::Segment],
+    block: &mathed_core::blocks::Block,
+    width_pt: f64,
+    opts: &TransformOptions,
+) -> Result<DocLayout, RenderError> {
+    let render = mathed_core::transform::to_render_text_range(
+        doc_text,
+        scan,
+        segments,
+        block.range.clone(),
+        opts,
+    );
+    let markup = format!("{THEME_PRELUDE}{}", render.text);
+    let world = MiniWorld::new(markup);
+    let frame = layout_world(&world, width_pt)?;
+    let glyphs = build_glyph_index(
+        &frame,
+        world.main_source(),
+        &render.map,
+        THEME_PRELUDE.len(),
+    );
+    let image = rasterize(&frame)?;
+    let (width, height) = (image.width, image.height);
+    Ok(DocLayout { image, glyphs, width, height })
+}
+
+/// Lay out the results-panel footer markup as its own `DocLayout` (no
+/// glyph-index caret mapping needed — the footer is display-only).
+pub fn layout_footer(
+    footer_markup: &str,
+    width_pt: f64,
+) -> Result<DocLayout, RenderError> {
+    let markup = format!("{THEME_PRELUDE}{footer_markup}");
+    let world = MiniWorld::new(markup);
+    let frame = layout_world(&world, width_pt)?;
+    let image = rasterize(&frame)?;
+    let (width, height) = (image.width, image.height);
+    Ok(DocLayout {
+        image,
+        glyphs: GlyphIndex::default(),
+        width,
+        height,
+    })
+}
+
+/// Intersect each reveal range with `block_range`, dropping ranges that
+/// don't overlap at all. Mirrors the Bevy frontend's per-block
+/// `block_reveal` computation in `crates/mathed/src/main.rs::sync_blocks`.
+pub fn clamp_reveal_to_block(
+    reveal: &[std::ops::Range<usize>],
+    block_range: &std::ops::Range<usize>,
+) -> Vec<std::ops::Range<usize>> {
+    reveal
+        .iter()
+        .filter_map(|r| {
+            let start = r.start.max(block_range.start);
+            let end = r.end.min(block_range.end);
+            (start <= end).then_some(start..end)
+        })
+        .collect()
 }
 
 /// Render an in-progress IME composition string (CJK/composed input) as
@@ -1042,6 +1112,60 @@ mod tests {
             band.top,
             band.bottom
         );
+    }
+
+    #[test]
+    fn layout_block_matches_single_block_whole_doc_layout() {
+        let text = "hello world";
+        let scan = super::scan(text);
+        let segments = resolve_segments(&scan);
+        let mut index = mathed_core::blocks::BlockIndex::default();
+        index.update(text);
+        assert_eq!(index.blocks.len(), 1);
+        let block = &index.blocks[0];
+        let block_layout = layout_block(
+            text,
+            &scan,
+            &segments,
+            block,
+            400.0,
+            &TransformOptions::default(),
+        )
+        .expect("layout_block should succeed");
+        let doc_layout =
+            layout_doc(text, 400.0).expect("layout_doc should succeed");
+        // Same width, same height, same glyph entry count.
+        assert_eq!(
+            block_layout.width, doc_layout.width,
+            "block layout width must match whole-doc layout"
+        );
+        assert_eq!(
+            block_layout.height, doc_layout.height,
+            "block layout height must match whole-doc layout"
+        );
+        assert_eq!(
+            block_layout.glyphs.entries.len(),
+            doc_layout.glyphs.entries.len(),
+            "block layout glyph count must match whole-doc layout"
+        );
+    }
+
+    #[test]
+    fn clamp_reveal_to_block_cases() {
+        let block_range = 10..20;
+        // No overlap → empty.
+        let no_overlap = clamp_reveal_to_block(&[0..5], &block_range);
+        assert!(no_overlap.is_empty());
+        // Full containment → unchanged.
+        let full = clamp_reveal_to_block(&[12..15], &block_range);
+        assert_eq!(full, vec![12..15]);
+        // Partial overlap → clamped.
+        let partial = clamp_reveal_to_block(&[15..25], &block_range);
+        assert_eq!(partial, vec![15..20]);
+        // Multiple ranges → only overlapping ones kept.
+        let multi =
+            clamp_reveal_to_block(&[0..5, 12..15, 15..25, 25..30], &block_range);
+        assert_eq!(multi, vec![12..15, 15..20]);
     }
 
     #[test]

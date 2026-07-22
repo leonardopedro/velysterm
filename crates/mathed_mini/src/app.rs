@@ -14,6 +14,9 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
+use mathed_core::blocks::{BlockId, BlockIndex};
 use mathed_core::MathDoc;
 use mathed_core::glyphs::{CaretGeom, RectF};
 use mathed_core::markers::{resolve_segments, scan};
@@ -45,7 +48,7 @@ use crate::references_panel::{
     update_references_panel as update_references_panel_data,
 };
 use crate::render::{
-    DEFAULT_WIDTH_PT, DocLayout, active_reveal_span, layout_doc_with,
+    DEFAULT_WIDTH_PT, DocLayout, active_reveal_span,
 };
 use mathed_core::transform::TransformOptions;
 
@@ -89,37 +92,37 @@ struct App {
     mouse_down: bool,
     /// Current keyboard modifiers (Shift/Ctrl) — updated on ModifiersChanged.
     mods: ModifiersState,
-    /// Cached laid-out page; `None` until first render or after invalidation.
-    layout: Option<DocLayout>,
-    /// Width (px) the cached layout was laid out at.
+    /// Block index (splits doc text into blocks on blank lines/headings).
+    block_index: BlockIndex,
+    /// Cached per-block laid-out pages; a missing entry will be rebuilt on
+    /// the next redraw.
+    block_layouts: HashMap<BlockId, DocLayout>,
+    /// Screen Y (top, px) of each block, in document order. Recomputed at
+    /// the end of every `redraw()`; consulted by click hit-testing and
+    /// cross-block Up/Down navigation between redraws.
+    block_offsets: Vec<(BlockId, f32)>,
+    /// Cached footer (results-panel) layout.
+    footer_layout: Option<DocLayout>,
+    /// The footer markup the cached `footer_layout` was built from —
+    /// compared each redraw to detect kernel-result changes without
+    /// re-diffing the doc.
+    footer_markup_cache: String,
+    /// Cached window width (px). When the window is resized,
+    /// every cached layout is evicted and rebuilt.
     layout_width: u32,
-    /// Translator panel (P3 #10) the caret was inside when the cached layout
-    /// was built, if any. A caret move that changes this expands/collapses a
-    /// panel, so the layout must be rebuilt (other moves reuse the cache).
-    layout_panel: Option<std::ops::Range<usize>>,
-    /// Doc byte offsets (`Marker::range.start`) of every marker touched by
-    /// the caret/selection when the cached layout was built — mirrors the
-    /// Bevy `mathed` frontend's `RevealState`: a marker is hidden or not,
-    /// but always reachable through the cursor, so extending a selection
-    /// (or just resting the caret) over one reveals it as literal text,
-    /// same as any other hidden token. Only a *change* in this set forces
-    /// a relayout (`redraw`) — most caret moves don't cross a marker, so
-    /// they stay cheap, matching the panel-expansion caching above.
-    layout_reveal_markers: Vec<usize>,
-    /// Doc byte offsets (each run's start) of every collapsible space run
-    /// (2+ consecutive spaces) touched by the caret/selection when the
-    /// cached layout was built — same cache-key pattern as
-    /// `layout_reveal_markers`, for `TransformOptions::reveal`'s other
-    /// job: showing every space in a run individually (Markdown-style
-    /// collapse-to-one everywhere else) while the caret is on it.
-    layout_reveal_spaces: Vec<usize>,
-    /// Doc byte offsets (each span's start) of every `$...$` math span
-    /// touched by the caret/selection when the cached layout was built —
-    /// same cache-key pattern as `layout_reveal_markers`: a math span
-    /// renders as typeset math while the caret/selection is elsewhere,
-    /// and as literal raw source (delimiters included) the moment it
-    /// touches the span.
-    layout_reveal_math: Vec<usize>,
+    /// Which block currently holds the active reveal span, if any —
+    /// replaces `layout_panel`. A change here means the caret crossed
+    /// into/out of a specially-rendered part, so the old and new block
+    /// must be evicted and rebuilt.
+    reveal_block: Option<BlockId>,
+    /// (block-based caching — per-block reveal is handled by
+    /// `block_layouts` eviction on reveal-block changes and per-block
+    /// `TransformOptions` in `redraw`.)
+    ///
+    /// The fields `layout_reveal_markers`, `layout_reveal_spaces`,
+    /// `layout_reveal_math` were used by the old monolithic `DocLayout`
+    /// caching and are removed in the block-incremental rewrite (C7).
+    /// All reveal/expand state is now per-block inside `redraw()`.
     /// Goal column (frame x, points) for Up/Down (foot/terminal-style:
     /// moving through a short or blank line and continuing to move
     /// vertically should not forget the original column). Set by
@@ -187,12 +190,13 @@ impl App {
             sel_anchor: None,
             mouse_down: false,
             mods: ModifiersState::empty(),
-            layout: None,
+            block_index: BlockIndex::default(),
+            block_layouts: HashMap::new(),
+            block_offsets: Vec::new(),
+            footer_layout: None,
+            footer_markup_cache: String::new(),
+            reveal_block: None,
             layout_width: 0,
-            layout_panel: None,
-            layout_reveal_markers: Vec::new(),
-            layout_reveal_spaces: Vec::new(),
-            layout_reveal_math: Vec::new(),
             pref_x: None,
             bridge: KernelBridge::new(),
             kernel_deadline: None,
@@ -262,7 +266,7 @@ impl App {
     /// picks that up.
     fn toggle_marker_overlay(&mut self) {
         self.show_marker_overlay = !self.show_marker_overlay;
-        self.invalidate();
+        self.invalidate_annotations();
         self.request_redraw();
     }
 
@@ -280,7 +284,7 @@ impl App {
             ));
             // Force a redraw with the panel open; the height will
             // be recomputed on the first frame.
-            self.invalidate();
+            self.invalidate_doc();
         }
         self.request_redraw();
     }
@@ -309,9 +313,21 @@ impl App {
         adapter.update_if_active(|| update);
     }
 
-    /// Drop the cached layout so the next redraw recomputes it.
-    fn invalidate(&mut self) {
-        self.layout = None;
+    /// Called after every text edit. Cheap: only diffs block ranges/hashes
+    /// (no Typst work here — that stays lazy, in `redraw()`). Blocks whose
+    /// content didn't change keep their cached DocLayout.
+    fn invalidate_doc(&mut self) {
+        let damage = self.block_index.update(self.doc.text());
+        for id in damage.removed.iter().chain(damage.dirty.iter()) {
+            self.block_layouts.remove(id);
+        }
+    }
+
+    /// Called when kernel results change (annotations / translator errors),
+    /// not the document text itself. Clears every cached block layout
+    /// (simple and cheap enough for the rare occasions it matters).
+    fn invalidate_annotations(&mut self) {
+        self.block_layouts.clear();
     }
 
     /// Draw the cite popup stack (cite_popup_boxes plan, Stage 5).
@@ -326,7 +342,9 @@ impl App {
         buffer: &mut [u32],
         win_w: usize,
         win_h: usize,
-        layout: &DocLayout,
+        block_layouts: &HashMap<BlockId, DocLayout>,
+        block_index: &BlockIndex,
+        block_offsets: &[(BlockId, f32)],
     ) {
         // Compute the "current scope" text — the base doc, or the
         // body of the topmost open box when the stack is non-empty
@@ -336,11 +354,34 @@ impl App {
         let mut y_cursor = 0.0;
         for &target in popup_stack.iter() {
             let target = target as u64;
-            // Find the target cite in the *base doc* (for screen
-            // positioning), not in the scope — the position is
-            // always relative to the base layout.
+            // Find the block containing this cite's label, then use
+            // that block's layout for screen positioning.
+            let scan = mathed_core::markers::scan(doc_text);
+            let refs = mathed_core::markers::scan_references(&scan);
+            let entry = match refs.iter().find(|e| e.numbers.contains(&target)) {
+                Some(e) => e,
+                None => continue,
+            };
+            let stmt = match scan.stmts.get(entry.stmt_idx) {
+                Some(s) => s,
+                None => continue,
+            };
+            let cite_byte = stmt.range.start;
+            let (block_layout, _top) = {
+                let bid = block_offsets
+                    .iter()
+                    .find(|(id, _)| {
+                        block_index.blocks.iter().any(|b| b.id == *id && b.range.start <= cite_byte && cite_byte <= b.range.end)
+                    })
+                    .or_else(|| block_offsets.first())
+                    .map(|(id, top)| (*id, *top));
+                match bid.and_then(|(id, top)| block_layouts.get(&id).map(|l| (l, top))) {
+                    Some(pair) => pair,
+                    None => continue,
+                }
+            };
             let Some(label_pos) = crate::cite_popup::cite_label_pos(
-                doc_text, layout, target,
+                doc_text, block_layout, target,
             ) else {
                 continue;
             };
@@ -402,7 +443,7 @@ impl App {
         self.doc.delete(range.clone());
         self.caret = range.start;
         self.sel_anchor = None;
-        self.invalidate();
+        self.invalidate_doc();
         self.refresh_kernel();
         self.caret_changed();
         true
@@ -424,7 +465,26 @@ impl App {
             return;
         };
         let byte = {
-            let Some(layout) = &self.layout else {
+            let bid = self
+                .block_offsets
+                .iter()
+                .rev()
+                .find(|(_, top)| *top <= y as f32)
+                .map(|(id, _)| *id)
+                .or_else(|| {
+                    self.block_index
+                        .blocks
+                        .first()
+                        .map(|b| b.id)
+                })
+                .or_else(|| {
+                    self.block_index
+                        .blocks
+                        .last()
+                        .map(|b| b.id)
+                });
+            let Some(bid) = bid else { return; };
+            let Some(layout) = self.block_layouts.get(&bid) else {
                 return;
             };
             layout
@@ -525,7 +585,7 @@ impl App {
         self.doc.insert(self.caret, s);
         self.caret += s.len();
         self.sel_anchor = None;
-        self.invalidate();
+        self.invalidate_doc();
         self.refresh_kernel();
         self.caret_changed();
     }
@@ -570,7 +630,7 @@ impl App {
         self.doc.insert(self.caret, &token);
         self.caret += token.len();
         self.sel_anchor = None;
-        self.invalidate();
+        self.invalidate_doc();
         self.refresh_kernel();
         self.caret_changed();
     }
@@ -627,7 +687,7 @@ impl App {
         let prev = prev_char_boundary(self.doc.text(), self.caret);
         self.doc.delete(prev..self.caret);
         self.caret = prev;
-        self.invalidate();
+        self.invalidate_doc();
         self.refresh_kernel();
         self.caret_changed();
     }
@@ -644,7 +704,7 @@ impl App {
         }
         let next = next_char_boundary(text, self.caret);
         self.doc.delete(self.caret..next);
-        self.invalidate();
+        self.invalidate_doc();
         self.refresh_kernel();
         self.caret_changed();
     }
@@ -690,7 +750,7 @@ impl App {
         } else {
             self.sel_anchor = None;
         }
-        if let Some(layout) = &self.layout
+        if let Some((_, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
         {
             let band = &layout.glyphs.bands[bi];
@@ -715,7 +775,7 @@ impl App {
         } else {
             self.sel_anchor = None;
         }
-        if let Some(layout) = &self.layout
+        if let Some((_, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
         {
             let band = &layout.glyphs.bands[bi];
@@ -749,23 +809,38 @@ impl App {
             self.sel_anchor = None;
         }
         let mut goal_x = self.pref_x;
-        if let Some(layout) = &self.layout
+        if let Some((block_id, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
-            && bi > 0
         {
-            let target_band = &layout.glyphs.bands[bi - 1];
-            let mid_y = (target_band.top + target_band.bottom) * 0.5;
-            let x = goal_x.unwrap_or_else(|| {
-                layout
-                    .glyphs
-                    .caret_for_byte(self.caret)
-                    .map_or(0.0, |g| g.x)
-            });
-            goal_x = Some(x);
-            if let Some(hit) = layout.glyphs.byte_for_point(
-                mathed_core::glyphs::V2::new(x, mid_y),
-            ) {
-                self.caret = resolve_hit(hit, self.doc.text());
+            if bi > 0 {
+                let target_band = &layout.glyphs.bands[bi - 1];
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
+                let x = goal_x.unwrap_or_else(|| {
+                    layout
+                        .glyphs
+                        .caret_for_byte(self.caret)
+                        .map_or(0.0, |g| g.x)
+                });
+                goal_x = Some(x);
+                if let Some(hit) = layout.glyphs.byte_for_point(
+                    mathed_core::glyphs::V2::new(x, mid_y),
+                ) {
+                    self.caret = resolve_hit(hit, self.doc.text());
+                }
+            } else if let Some(prev) = self.block_before(block_id)
+                && let Some(prev_layout) = self.block_layouts.get(&prev)
+                && let Some(last_bi) = prev_layout.glyphs.bands.len().checked_sub(1)
+            {
+                // Cross-block: move to the last band of the previous block.
+                let target_band = &prev_layout.glyphs.bands[last_bi];
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
+                let x = goal_x.unwrap_or(0.0);
+                goal_x = Some(x);
+                if let Some(hit) = prev_layout.glyphs.byte_for_point(
+                    mathed_core::glyphs::V2::new(x, mid_y),
+                ) {
+                    self.caret = resolve_hit(hit, self.doc.text());
+                }
             }
         }
         self.caret_changed();
@@ -781,27 +856,73 @@ impl App {
             self.sel_anchor = None;
         }
         let mut goal_x = self.pref_x;
-        if let Some(layout) = &self.layout
+        if let Some((block_id, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
-            && bi + 1 < layout.glyphs.bands.len()
         {
-            let target_band = &layout.glyphs.bands[bi + 1];
-            let mid_y = (target_band.top + target_band.bottom) * 0.5;
-            let x = goal_x.unwrap_or_else(|| {
-                layout
-                    .glyphs
-                    .caret_for_byte(self.caret)
-                    .map_or(0.0, |g| g.x)
-            });
-            goal_x = Some(x);
-            if let Some(hit) = layout.glyphs.byte_for_point(
-                mathed_core::glyphs::V2::new(x, mid_y),
-            ) {
-                self.caret = resolve_hit(hit, self.doc.text());
+            if bi + 1 < layout.glyphs.bands.len() {
+                let target_band = &layout.glyphs.bands[bi + 1];
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
+                let x = goal_x.unwrap_or_else(|| {
+                    layout
+                        .glyphs
+                        .caret_for_byte(self.caret)
+                        .map_or(0.0, |g| g.x)
+                });
+                goal_x = Some(x);
+                if let Some(hit) = layout.glyphs.byte_for_point(
+                    mathed_core::glyphs::V2::new(x, mid_y),
+                ) {
+                    self.caret = resolve_hit(hit, self.doc.text());
+                }
+            } else if let Some(next) = self.block_after(block_id)
+                && let Some(next_layout) = self.block_layouts.get(&next)
+                && !next_layout.glyphs.bands.is_empty()
+            {
+                // Cross-block: move to the first band of the next block.
+                let target_band = &next_layout.glyphs.bands[0];
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
+                let x = goal_x.unwrap_or(0.0);
+                goal_x = Some(x);
+                if let Some(hit) = next_layout.glyphs.byte_for_point(
+                    mathed_core::glyphs::V2::new(x, mid_y),
+                ) {
+                    self.caret = resolve_hit(hit, self.doc.text());
+                }
             }
         }
         self.caret_changed();
         self.pref_x = goal_x;
+    }
+
+    /// The block containing `doc_byte`, plus its cached screen Y offset (from
+    /// the last `redraw()`'s `block_offsets`). `None` if the byte falls
+    /// outside every known block (e.g. an empty document) or the offset table
+    /// is stale.
+    fn block_for_byte(&self, doc_byte: usize) -> Option<(BlockId, f32)> {
+        let block = self.block_index.blocks.iter().find(|b| {
+            b.range.start <= doc_byte && doc_byte <= b.range.end
+        })?;
+        let y = self.block_offsets.iter().find(|(id, _)| *id == block.id)?.1;
+        Some((block.id, y))
+    }
+
+    /// Like `block_for_byte` but also returns the block's cached layout.
+    fn block_for_byte_with_layout(&self, doc_byte: usize) -> Option<(BlockId, &DocLayout)> {
+        let block = self.block_index.blocks.iter().find(|b| {
+            b.range.start <= doc_byte && doc_byte <= b.range.end
+        })?;
+        let layout = self.block_layouts.get(&block.id)?;
+        Some((block.id, layout))
+    }
+
+    fn block_before(&self, id: BlockId) -> Option<BlockId> {
+        let idx = self.block_index.blocks.iter().position(|b| b.id == id)?;
+        idx.checked_sub(1).map(|i| self.block_index.blocks[i].id)
+    }
+
+    fn block_after(&self, id: BlockId) -> Option<BlockId> {
+        let idx = self.block_index.blocks.iter().position(|b| b.id == id)?;
+        self.block_index.blocks.get(idx + 1).map(|b| b.id)
     }
 
     /// Lay out the current document (if the cache is stale) and present it.
@@ -817,97 +938,78 @@ impl App {
             return;
         };
 
-        // The caret/selection always reaches a hidden marker (foot/Bevy-
-        // mathed style: a marker is hidden or not, but always reachable
-        // through the cursor) — a selection reveals every marker it spans,
-        // and with no selection the bare caret still reveals one it's
-        // sitting exactly on. Mirrors `mathed`'s (Bevy) `block_reveal`.
-        let sel_reveal: Vec<std::ops::Range<usize>> =
-            match self.selection() {
-                Some(s) => vec![s],
-                None => vec![self.caret..self.caret],
-            };
-        let touched_markers =
-            touched_marker_starts(self.doc.text(), &sel_reveal);
-        // Same idea for collapsible space runs (2+ spaces): Markdown/
-        // Typst-style collapse-to-one everywhere else, but every space
-        // shown while the caret/selection touches that run.
-        let touched_spaces =
-            touched_space_run_starts(self.doc.text(), &sel_reveal);
-        // Same idea for `$...$` math spans: typeset while the caret/
-        // selection is elsewhere, raw source the moment it's touched.
-        let touched_math =
-            touched_math_span_starts(self.doc.text(), &sel_reveal);
+        // Resize invalidates everything (wrapping depends on width).
+        if self.layout_width != size.width {
+            self.block_layouts.clear();
+            self.footer_layout = None;
+            self.layout_width = size.width;
+        }
 
-        // Recompute the cached layout when invalidated, the width changed,
-        // the caret crossed a reveal-span boundary, or the set of markers,
-        // space runs or math spans the caret/selection touches changed
-        // (foot-style: edits, resizes and reveal toggles pay; ordinary
-        // caret moves that don't cross one do not).
-        let panel = active_reveal_span(self.doc.text(), self.caret);
-        if self.layout.is_none()
-            || self.layout_width != size.width
-            || self.layout_panel != panel
-            || self.layout_reveal_markers != touched_markers
-            || self.layout_reveal_spaces != touched_spaces
-            || self.layout_reveal_math != touched_math
-        {
+        let text = self.doc.text().to_string();
+        let reveal_span = active_reveal_span(&text, self.caret);
+        let reveal_block_now = reveal_span.as_ref().and_then(|r| {
+            self.block_index.blocks.iter().find(|b| {
+                b.range.start <= r.start && r.end <= b.range.end
+            }).map(|b| b.id)
+        });
+        if self.reveal_block != reveal_block_now {
+            if let Some(old) = self.reveal_block {
+                self.block_layouts.remove(&old);
+            }
+            if let Some(new) = reveal_block_now {
+                self.block_layouts.remove(&new);
+            }
+            self.reveal_block = reveal_block_now;
+        }
+
+        let scan = scan(&text);
+        let segments = resolve_segments(&scan);
+        let annotations = self.bridge.result_annotations();
+        let translator_errors = self.bridge.translator_errors().clone();
+        let reveal_ranges: Vec<std::ops::Range<usize>> =
+            reveal_span.clone().into_iter().collect();
+
+        for block in self.block_index.blocks.clone() {
+            if self.block_layouts.contains_key(&block.id) {
+                continue;
+            }
+            let block_reveal =
+                crate::render::clamp_reveal_to_block(&reveal_ranges, &block.range);
             let opts = TransformOptions {
-                // Caret anywhere over a special-rendered part (translator
-                // panel, `\prob`/`\model` annotation, `\cite` label, ...)
-                // expands its own content instead of the collapsed
-                // summary — see `active_reveal_span`. Deliberately
-                // `expand`, not `reveal`: on its own it must not also
-                // reveal the marker tokens (`#3`/`#4`, ...) delimiting the
-                // segment, which stay hidden unless the caret/selection
-                // directly touches them (`reveal`, below) or Ctrl+M
-                // (`show_hidden`) is on.
-                expand: panel.clone().into_iter().collect(),
-                reveal: sel_reveal,
-                // Ctrl+M (`mathed`'s/Bevy's own `show_hidden`, matched
-                // here — see `toggle_marker_overlay`): reveals every
-                // hidden marker as literal text through the *same*
-                // transform pass and Typst layout as the rest of the
-                // document, not a separate overlay render — guaranteed
-                // to look identical to surrounding text because it is
-                // the surrounding text.
-                show_hidden: self.show_marker_overlay,
-                annotations: self.bridge.result_annotations(),
-                translator_errors: self
-                    .bridge
-                    .translator_errors()
-                    .clone(),
+                reveal: block_reveal,
+                annotations: annotations.clone(),
+                translator_errors: translator_errors.clone(),
                 ..Default::default()
             };
-            // Keep the previous (stale) layout on failure rather than
-            // going blank — a Typst eval error (e.g. a bare, unescaped
-            // `#` slipping through some future edge case) shouldn't
-            // freeze the whole editor with nothing on screen and no
-            // caret to navigate with; it degrades to "stale content
-            // until the next successful layout" instead. The retry
-            // itself is driven by `self.layout.is_none()` staying
-            // false here (unlike `invalidate()`, which still sets it
-            // to `None` on every edit) — so if the *cause* was a
-            // width/panel/reveal change with no edit, this exact
-            // relayout won't be retried until something else changes;
-            // an edit (which always invalidates) always retries.
-            if let Ok(built) = layout_doc_with(
-                self.doc.text(),
-                size.width as f64,
-                &opts,
+            if let Ok(layout) = crate::render::layout_block(
+                &text, &scan, &segments, &block, size.width as f64, &opts,
             ) {
-                self.layout = Some(built);
+                self.block_layouts.insert(block.id, layout);
             }
-            self.layout_width = size.width;
-            self.layout_panel = panel;
-            self.layout_reveal_markers = touched_markers;
-            self.layout_reveal_spaces = touched_spaces;
-            self.layout_reveal_math = touched_math;
+        }
+
+        let footer_markup = self.bridge.result_panel_markup().unwrap_or_default();
+        if self.footer_layout.is_none() || footer_markup != self.footer_markup_cache {
+            self.footer_layout =
+                crate::render::layout_footer(&footer_markup, size.width as f64).ok();
+            self.footer_markup_cache = footer_markup;
         }
 
         // Compute the selection up-front (owned) so it doesn't alias the
         // mutable `surface` borrow below.
         let sel = self.selection();
+
+        // Compute caret info before the mutable `surface` borrow.
+        let caret_info: Option<(f32, f32, f32, f32)> =
+            if self.caret_visible {
+                self.block_for_byte(self.caret).and_then(|(block_id, y)| {
+                    let layout = self.block_layouts.get(&block_id)?;
+                    let geom = layout.glyphs.caret_for_byte(self.caret)?;
+                    Some((geom.x, geom.top + y, geom.height, geom.width))
+                })
+            } else {
+                None
+            };
 
         let Some(surface) = self.surface.as_mut() else {
             return;
@@ -918,17 +1020,8 @@ impl App {
         let (win_w, win_h) =
             (size.width as usize, size.height as usize);
 
-        // The references panel (marker_overlay_and_references_panel
-        // plan, Stage 5) is drawn below the doc area. While it is
-        // open, the doc area is shrunk to `doc_h = win_h - panel_h`
-        // and the panel takes the bottom `panel_h` rows. The
-        // cached layout is reused (no relayout on toggle); the
-        // blit just truncates at `doc_h` and the popup boxes clip
-        // their bottom edge at the same boundary.
+        // References panel — compute doc area height.
         let panel_h: usize = if self.references_panel.is_some() {
-            // Recompute the height each frame: the body images
-            // are filled in lazily, so the height grows until all
-            // bodies are rendered.
             if let Some(panel) = self.references_panel.as_ref() {
                 let h = references_panel_height(panel, win_h);
                 self.references_panel_height = h;
@@ -947,76 +1040,96 @@ impl App {
         };
         buffer.fill(0x0000_0000); // black page
 
-        if let Some(layout) = &self.layout {
-            blit_over_bg(&mut buffer, win_w, doc_h, &layout.image);
-            if let Some(sel) = sel {
-                let rects = layout.glyphs.rects_for_range(sel);
-                draw_selection(&mut buffer, win_w, doc_h, &rects);
+        // Compositing loop: walk blocks in document order.
+        const BLOCK_GAP_PX: f32 = 20.0;
+        self.block_offsets.clear();
+        let mut y_cursor: f32 = 0.0;
+
+        for block in &self.block_index.blocks {
+            let Some(layout) = self.block_layouts.get(&block.id) else {
+                y_cursor += BLOCK_GAP_PX;
+                continue;
+            };
+            self.block_offsets.push((block.id, y_cursor));
+            let top = y_cursor.round() as usize;
+            if top >= doc_h {
+                break;
             }
-            if let Some(geom) = layout.glyphs.caret_for_byte(self.caret)
-                && (geom.top as usize) < doc_h
+            blit_over_bg_at(&mut buffer, win_w, doc_h, top, &layout.image);
+
+            if let Some(sel) = &sel {
+                let cs = sel.start.max(block.range.start);
+                let ce = sel.end.min(block.range.end);
+                if cs < ce {
+                    let rects = layout.glyphs.rects_for_range(cs..ce);
+                    draw_selection_at(&mut buffer, win_w, doc_h, top, &rects);
+                }
+            }
+
+            y_cursor += layout.height as f32 + BLOCK_GAP_PX;
+        }
+
+        // Caret: draw at the pre-computed position.
+        if let Some((x, top, height, width)) = caret_info
+            && top < doc_h as f32
+        {
+            let geom = CaretGeom {
+                x,
+                top,
+                height,
+                width,
+            };
+            draw_caret(&mut buffer, win_w, doc_h, geom);
+            window.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(
+                    x as i32,
+                    top as i32,
+                ),
+                winit::dpi::PhysicalSize::new(
+                    1.max(1) as u32,
+                    height.max(1.0) as u32,
+                ),
+            );
+            if let Some(preedit) = &self.ime_preedit
+                && let Ok(img) = crate::render::render_preedit(
+                    preedit,
+                    DEFAULT_WIDTH_PT,
+                )
             {
-                if self.caret_visible {
-                    draw_caret(&mut buffer, win_w, doc_h, geom);
-                }
-                // Tell the OS where to anchor its IME candidate window
-                // (e.g. a pinyin candidate box) — independent of caret
-                // blink, and needed even before any composition starts
-                // (winit: "you should also start performing IME related
-                // requests like set_ime_cursor_area" right after Enabled).
-                window.set_ime_cursor_area(
-                    winit::dpi::PhysicalPosition::new(
-                        geom.x as i32,
-                        geom.top as i32,
-                    ),
-                    winit::dpi::PhysicalSize::new(
-                        geom.width.max(1.0) as u32,
-                        geom.height.max(1.0) as u32,
-                    ),
-                );
-                // In-progress IME composition text: rendered through
-                // Typst (for correct CJK/complex-script glyphs — the
-                // ASCII-only bitmap font used for marker labels can't
-                // show it) as underlined text, composited at the caret,
-                // never written into `doc`.
-                if let Some(preedit) = &self.ime_preedit
-                    && let Ok(img) = crate::render::render_preedit(
-                        preedit,
-                        DEFAULT_WIDTH_PT,
-                    )
-                {
-                    blit_over_bg_clipped(
-                        &mut buffer,
-                        win_w,
-                        doc_h,
-                        geom.x.round() as usize,
-                        geom.top.round() as usize,
-                        &img,
-                    );
-                }
-            }
-            // Cite popup boxes (cite_popup_boxes plan, Stage 5):
-            // drawn *over* the marker overlay and caret so the box
-            // is the topmost visual element. The base doc is not
-            // re-laid-out; the box is a render-time overlay on top
-            // of the cached `layout.image`. Boxes anchored to
-            // cites below the doc area are skipped (the
-            // `doc_h` clip replaces the win_h clip).
-            if !self.popup_stack.is_empty() {
-                Self::draw_popup_boxes(
-                    self.doc.text(),
-                    &self.popup_stack,
+                blit_over_bg_clipped(
                     &mut buffer,
                     win_w,
                     doc_h,
-                    layout,
+                    x.round() as usize,
+                    top.round() as usize,
+                    &img,
                 );
             }
         }
-        // References panel — drawn in the bottom strip when open.
-        // `self.references_panel` is a different field from
-        // `self.surface`, so the mutable borrow is independent of
-        // the surface borrow above (splitting borrows).
+
+        // Popup boxes.
+        if !self.popup_stack.is_empty() {
+            Self::draw_popup_boxes(
+                self.doc.text(),
+                &self.popup_stack,
+                &mut buffer,
+                win_w,
+                doc_h,
+                &self.block_layouts,
+                &self.block_index,
+                &self.block_offsets,
+            );
+        }
+
+        // Footer.
+        if let Some(footer) = &self.footer_layout {
+            let top = y_cursor.round() as usize;
+            if top < doc_h {
+                blit_over_bg_at(&mut buffer, win_w, doc_h, top, &footer.image);
+            }
+        }
+
+        // References panel.
         if panel_h > 0
             && let Some(panel) = self.references_panel.as_mut()
         {
@@ -1449,6 +1562,76 @@ fn blit_over_bg_clipped(
     }
 }
 
+/// Like [`blit_over_bg`] but composited at an arbitrary `y0` offset,
+/// assuming a black background (used for block-by-block compositing).
+fn blit_over_bg_at(
+    buffer: &mut [u32],
+    win_w: usize,
+    max_h: usize,
+    y0: usize,
+    img: &imaging::RgbaImage,
+) {
+    let iw = img.width as usize;
+    let ih = img.height as usize;
+    let copy_w = iw.min(win_w);
+    let copy_h = ih.min(max_h.saturating_sub(y0));
+
+    for y in 0..copy_h {
+        let src_row = y * iw * 4;
+        let dst_row = (y0 + y) * win_w;
+        for x in 0..copy_w {
+            let s = src_row + x * 4;
+            let (r, g, b, a) = (
+                img.data[s] as u32,
+                img.data[s + 1] as u32,
+                img.data[s + 2] as u32,
+                img.data[s + 3] as u32,
+            );
+            let cr = (r * a) / 255;
+            let cg = (g * a) / 255;
+            let cb = (b * a) / 255;
+            buffer[dst_row + x] = (cr << 16) | (cg << 8) | cb;
+        }
+    }
+}
+
+/// Like [`draw_selection`] but composited at a `y0` offset for block-based
+/// rendering.
+fn draw_selection_at(
+    buffer: &mut [u32],
+    win_w: usize,
+    max_h: usize,
+    y0: usize,
+    rects: &[RectF],
+) {
+    const SEL_RGB: (u32, u32, u32) = (0x33, 0x66, 0xFF);
+    const SEL_A: u32 = 0x66;
+    let inv = 255 - SEL_A;
+    for r in rects {
+        let x0 = r.x0.round().max(0.0) as usize;
+        let y0 = (r.y0.round().max(0.0) as usize).saturating_add(y0);
+        let x1 = (r.x1.round() as usize).min(win_w);
+        let y1 = (r.y1.round() as usize)
+            .saturating_add(y0)
+            .min(max_h);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        for y in y0..y1 {
+            let row = y * win_w;
+            for px in &mut buffer[row + x0..row + x1] {
+                let pr = (*px >> 16) & 0xFF;
+                let pg = (*px >> 8) & 0xFF;
+                let pb = *px & 0xFF;
+                let cr = (SEL_RGB.0 * SEL_A + pr * inv) / 255;
+                let cg = (SEL_RGB.1 * SEL_A + pg * inv) / 255;
+                let cb = (SEL_RGB.2 * SEL_A + pb * inv) / 255;
+                *px = (cr << 16) | (cg << 8) | cb;
+            }
+        }
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -1514,7 +1697,7 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = self.kernel_deadline {
             if self.bridge.poll() {
                 // New results: rebuild the layout (footer changed) and redraw.
-                self.invalidate();
+                self.invalidate_annotations();
                 self.request_redraw();
             }
             if Instant::now() >= deadline {
@@ -2119,10 +2302,28 @@ mod tests {
     fn cite_popup_scope_text_bib_ref_returns_doc() {
         // A bib-key cite has no body, so the scope falls back to
         // the base doc (the user's Ctrl+N inside a bib-key box
-        // resolves against the doc, not a "body").
+        // resolves against the "body").
         let doc = "\\cite(authorA89)";
         let scope = cite_popup_scope_text(doc, &[1]);
         assert_eq!(scope, doc);
     }
 
+    #[test]
+    fn editing_one_block_does_not_touch_another_blocks_cached_layout() {
+        // Two independent blocks (blank-line separated).
+        let text = "alpha beta\n\ngamma delta";
+        let mut index = mathed_core::blocks::BlockIndex::default();
+        let damage = index.update(text);
+        assert_eq!(index.blocks.len(), 2);
+        assert_eq!(damage.dirty.len(), 2);
+
+        // "Edit" only the second block.
+        let text2 = "alpha beta\n\ngamma delta extra";
+        let damage2 = index.update(text2);
+        assert_eq!(index.blocks.len(), 2);
+        let first_id = index.blocks[0].id;
+        let second_id = index.blocks[1].id;
+        assert!(!damage2.dirty.contains(&first_id));
+        assert!(damage2.dirty.contains(&second_id));
+    }
 }

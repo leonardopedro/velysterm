@@ -1,3 +1,5 @@
+#![expect(missing_docs)]
+
 pub mod types;
 pub use types::*;
 

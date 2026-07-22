@@ -2001,4 +2001,335 @@ mod tests {
         assert_eq!(full.text, ranged.text);
         assert_eq!(full.map, ranged.map);
     }
+
+    // ── Pinned regression tests from CHANGELOG ──────────────
+
+    #[test]
+    fn escape_byte_maps_to_same_doc_byte_as_escaped_char() {
+        // Regression: `emit_escaped` splices an extra escape byte before
+        // every literal `\` or `#` in revealed statement text. Typst
+        // treats `\\` as one "Escape" node and attributes the resulting
+        // glyph's source span to that escape byte. The escape byte's
+        // render position must map back to the *same* doc byte as the
+        // literal character, not to an unrelated position.
+        let text = "#1 x #2 \\function(#1,#2)";
+        let opts = TransformOptions {
+            reveal: vec![0..text.len()],
+            ..Default::default()
+        };
+        let out = render(text, &opts);
+        // The `\` at byte 14 maps to render position 14 (it's at the start
+        // of `\function(...)` which begins after the reveal-span tag).
+        let backslash_render = out.map.doc_to_render(14);
+        let backslash_doc = out.map.render_to_doc(backslash_render);
+        // The escape byte's render position must round-trip to the same
+        // doc byte as the backslash itself.
+        assert_eq!(
+            backslash_doc, 14,
+            "escape byte at doc 14 should map back to doc 14, got {backslash_doc}"
+        );
+    }
+
+    #[test]
+    fn unmatched_dollar_does_not_crash_layout() {
+        // A bare `$` (currency sign, or in-progress formula missing
+        // its closing `$`) must be escaped so Typst doesn't try to
+        // parse it as a math toggle.
+        let out = render("cost is $5 today", &TransformOptions::default());
+        assert!(out.text.contains("\\$"), "unmatched $ should be escaped");
+        // No bare `$` (one not preceded by `\`) may reach Typst.
+        let mut chars = out.text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '$' {
+                panic!("bare $ must not reach Typst: {:?}", out.text);
+            }
+            if c == '\\' {
+                chars.next(); // skip the escaped char
+            }
+        }
+    }
+
+    #[test]
+    fn bare_hash_not_a_marker_is_escaped() {
+        let out = render("issue #! is open", &TransformOptions::default());
+        assert!(out.text.contains("\\#"), "bare # should be escaped");
+    }
+
+    #[test]
+    fn underscore_in_markup_is_escaped() {
+        // Typst's `_` emphasis delimiter must be escaped when it appears
+        // as a literal character in revealed content.
+        let out = render("x_y", &TransformOptions::default());
+        assert_eq!(out.text, "x\\_y");
+    }
+
+    #[test]
+    fn asterisk_in_markup_is_escaped() {
+        let out = render("5 * 3", &TransformOptions::default());
+        assert_eq!(out.text, "5 \\* 3");
+    }
+
+    #[test]
+    fn backtick_in_markup_is_escaped() {
+        let out = render("use `code`", &TransformOptions::default());
+        assert_eq!(out.text, "use \\`code\\`");
+    }
+
+    #[test]
+    fn offset_map_round_trips_at_span_boundaries() {
+        // Every CopySpan boundary must be exact in both directions.
+        let text = "#1 f(x) #2 ok";
+        let out = render(text, &TransformOptions::default());
+        for span in &out.map.spans {
+            let d = span.doc_start;
+            let r = span.render_start;
+            assert_eq!(
+                out.map.doc_to_render(d),
+                r,
+                "doc_to_render({d}) should be {r}, got {}",
+                out.map.doc_to_render(d)
+            );
+            assert_eq!(
+                out.map.render_to_doc(r),
+                d,
+                "render_to_doc({r}) should be {d}, got {}",
+                out.map.render_to_doc(r)
+            );
+            // End boundary: last byte of the span.
+            if span.len > 0 {
+                let d_end = span.doc_start + span.len - 1;
+                let r_end = span.render_start + span.len - 1;
+                assert_eq!(out.map.doc_to_render(d_end), r_end);
+                assert_eq!(out.map.render_to_doc(r_end), d_end);
+            }
+        }
+    }
+
+    #[test]
+    fn offset_map_render_len_matches_output() {
+        let text = "#1 $x^2$ #2 \\bold(#1,#2) more text";
+        let out = render(text, &TransformOptions::default());
+        assert_eq!(out.map.render_len, out.text.len());
+        assert_eq!(out.map.doc_len, text.len());
+    }
+
+    #[test]
+    fn offset_map_bounds_are_valid() {
+        let text = "#1 f(x) #2 ok\n\n#3 g(y) #4 \\function(#3,#4)";
+        let out = render(text, &TransformOptions::default());
+        // Any doc position in [0, doc_len) maps to a valid render position.
+        for d in [0, 1, text.len() / 2, text.len() - 1, text.len()] {
+            let r = out.map.doc_to_render(d);
+            assert!(
+                r <= out.map.render_len,
+                "doc_to_render({d}) = {r} > render_len {}",
+                out.map.render_len
+            );
+        }
+        // Any render position in [0, render_len) maps to a valid doc position.
+        for r in [0, 1, out.text.len() / 2, out.text.len() - 1, out.text.len()] {
+            let d = out.map.render_to_doc(r);
+            assert!(
+                d <= out.map.doc_len,
+                "render_to_doc({r}) = {d} > doc_len {}",
+                out.map.doc_len
+            );
+        }
+    }
+
+    #[test]
+    fn offset_map_inside_spans_map_exactly() {
+        // For positions strictly inside a CopySpan, the round-trip
+        // must be identity (no snapping to boundaries).
+        let text = "#1 f(x) #2 ok";
+        let out = render(text, &TransformOptions::default());
+        for span in &out.map.spans {
+            if span.len < 2 {
+                continue;
+            }
+            let mid_d = span.doc_start + span.len / 2;
+            let mid_r = span.render_start + span.len / 2;
+            assert_eq!(out.map.doc_to_render(mid_d), mid_r);
+            assert_eq!(out.map.render_to_doc(mid_r), mid_d);
+        }
+    }
+
+    #[test]
+    fn reveal_shows_escaped_markers_in_text() {
+        let text = "#1 hello #2";
+        let out = render(
+            text,
+            &TransformOptions {
+                reveal: vec![0..text.len()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.text, "\\#1 hello \\#2");
+    }
+
+    #[test]
+    fn space_run_collapsed_by_default() {
+        let text = "a    b"; // 4 spaces
+        let out = render(text, &TransformOptions::default());
+        assert_eq!(out.text, "a b");
+    }
+
+    #[test]
+    fn space_run_revealed_when_touched() {
+        let text = "a    b";
+        let out = render(
+            text,
+            &TransformOptions {
+                reveal: vec![2..2], // point inside the space run
+                ..Default::default()
+            },
+        );
+        // The space run expands: first space real, extras become NBSP.
+        assert!(out.text.contains("a "));
+        assert!(out.text.contains('\u{00A0}'));
+    }
+
+    #[test]
+    fn newline_becomes_linebreak() {
+        let text = "line one\nline two";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains("#linebreak()"), "got: {}", out.text);
+    }
+
+    #[test]
+    fn blank_line_has_nbsp_anchor() {
+        let text = "line one\n\nline two";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains('\u{00A0}'), "got: {}", out.text);
+    }
+
+    #[test]
+    fn math_reveals_when_touched() {
+        let text = "x $a+b$ y";
+        // Outside math: typeset math — Typst renders `$a+b$` as math,
+        // so the raw source delimiters are present in the output.
+        let hidden = render(text, &TransformOptions::default());
+        assert!(hidden.text.contains("$a+b$"), "math should be typeset");
+        // Touching the math span reveals raw source — the `$` delimiters
+        // are escaped so Typst shows them literally, not as a math toggle.
+        let revealed = render(
+            text,
+            &TransformOptions {
+                reveal: vec![3..3], // inside the math
+                ..Default::default()
+            },
+        );
+        assert!(
+            !revealed.text.contains("$a+b$"),
+            "raw math should be escaped when touched: {}",
+            revealed.text
+        );
+        assert!(
+            revealed.text.contains("\\$a+b\\$"),
+            "raw math should be shown escaped when touched: {}",
+            revealed.text
+        );
+    }
+
+    // ── Property-based OffsetMap round-trip test ─────────────
+
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
+
+    fn doc_text_strategy() -> impl Strategy<Value = String> {
+        // Generate text that exercises markers, math, escapes, newlines,
+        // punctuation, and plain prose — the full transform pipeline.
+        let token = prop_oneof![
+            // Plain prose chunks.
+            string_regex("[a-zA-Z]{1,6}").unwrap(),
+            // Markers.
+            string_regex("#[a-zA-Z0-9]{1,4}").unwrap(),
+            // Escaped chars.
+            prop_oneof![
+                Just("\\#".into()),
+                Just("\\$".into()),
+                Just("\\\\".into()),
+                Just("\\_".into()),
+                Just("\\*".into()),
+                Just("\\`".into()),
+            ],
+            // Math.
+            string_regex("\\$[a-zA-Z0-9_^()+\\-\\*]{1,8}\\$").unwrap(),
+            // Operators and punctuation liable to cause issues.
+            prop_oneof![
+                Just("_".into()),
+                Just("*".into()),
+                Just("`".into()),
+                Just("!".into()),
+                Just(".".into()),
+                Just(",".into()),
+                Just(" ".into()),
+                Just("  ".into()),
+                Just("   ".into()),
+                Just("\n".into()),
+            ],
+        ];
+        proptest::collection::vec(token, 1..12).prop_map(|v| v.concat())
+    }
+
+    proptest! {
+        #[test]
+        fn offset_map_roundtrip_consistency(doc_text in doc_text_strategy()) {
+            // Run the transform pipeline.
+            let s = scan(&doc_text);
+            let segs = resolve_segments(&s);
+            let out = to_render_text(&doc_text, &s, &segs, &TransformOptions::default());
+
+            // Core invariants.
+            prop_assert_eq!(out.map.doc_len, doc_text.len(),
+                "doc_len mismatch");
+            prop_assert_eq!(out.map.render_len, out.text.len(),
+                "render_len mismatch");
+
+            // For every doc byte position, doc_to_render gives a valid render position.
+            for d in 0..=doc_text.len() {
+                let r = out.map.doc_to_render(d);
+                prop_assert!(r <= out.map.render_len,
+                    "doc_to_render {} = {} > render_len {}", d, r, out.map.render_len);
+            }
+
+            // For every render byte position, render_to_doc gives a valid doc position.
+            for r in 0..=out.text.len() {
+                let d = out.map.render_to_doc(r);
+                prop_assert!(d <= out.map.doc_len,
+                    "render_to_doc {} = {} > doc_len {}", r, d, out.map.doc_len);
+            }
+
+            // Round-trip: for positions that fall inside a CopySpan, the
+            // round-trip must be exact. We check each span's interior.
+            for span in &out.map.spans {
+                if span.len == 0 {
+                    // Zero-length spans (escape-byte pins) have no actual
+                    // content; skip boundary checks since the real content
+                    // is at the following span for the same doc byte.
+                    continue;
+                }
+                // Start boundary: exact.
+                let r_start = out.map.doc_to_render(span.doc_start);
+                prop_assert_eq!(r_start, span.render_start,
+                    "boundary doc_to_render {}", span.doc_start);
+                let d_start = out.map.render_to_doc(span.render_start);
+                prop_assert_eq!(d_start, span.doc_start,
+                    "boundary render_to_doc {}", span.render_start);
+
+                if span.len > 1 {
+                    // Midpoint of the span: round-trip must be exact.
+                    let offset = span.len / 2;
+                    let d_mid = span.doc_start + offset;
+                    let r_mid = span.render_start + offset;
+                    let r_rt = out.map.doc_to_render(d_mid);
+                    prop_assert_eq!(r_rt, r_mid,
+                        "midpoint doc_to_render {}", d_mid);
+                    let d_rt = out.map.render_to_doc(r_mid);
+                    prop_assert_eq!(d_rt, d_mid,
+                        "midpoint render_to_doc {}", r_mid);
+                }
+            }
+        }
+    }
 }

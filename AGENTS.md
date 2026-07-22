@@ -21,8 +21,13 @@ codes, typed repair hints.
     snapshot, list_codes`. Every failure carries a `Diagnostic` with hints;
     unknown op → UK-1001 + `ReplaceValue` listing valid ops.
 - `crates/mathed_core/` — Loro doc model. `markers.rs` has the `PropKind` enum
-  (`Model, Prior, Event, Prob` are kernel-bearing); `semantics.rs build_index`
-  collects `KernelStatement`s into `SemanticIndex.kernel_statements`.
+  (`Model, Prior, Solver, Event, Prob` are kernel-bearing; `Bibliography, Cite`
+  are biblio-bearing); `semantics.rs build_index` collects `KernelStatement`s
+  into `SemanticIndex.kernel_statements` and `BiblioStatement`s into
+  `SemanticIndex.biblio_statements`.
+  Also exports `glyphs` (Bevy-free `GlyphIndex`, `CaretGeom`,
+  `build_glyph_index`, `caret_for_byte`, `byte_for_point`, `band_for_byte`) and
+  `accessibility` (`AccessNode`, `build_access_nodes` — toolkit-neutral a11y).
 - `crates/mathed/` — the Bevy editor. `kernel_sys.rs` is the bridge
   (`KernelBridge` resource + `dispatch_kernel_requests`/`apply_kernel_results`
   systems); `draw_overlay` renders `= 0.42` (green) or `UK-2003` + hint (red)
@@ -35,11 +40,11 @@ codes, typed repair hints.
   recomputed only on edit/resize, caret moves re-blit). Caret navigation:
   Left/Right/Home/End/Backspace/Delete/Up/Down. See
   `docs/mathed/MINI_FRONTEND_PLAN.md`.
-- `crates/mathed_core/` — also exports `glyphs` (Bevy-free `GlyphIndex`,
-  `CaretGeom`, `build_glyph_index`, `caret_for_byte`, `byte_for_point`,
-  `band_for_byte` — ported from `mathed::glyphs`) and `accessibility`
-  (`AccessNode`, `build_access_nodes` — toolkit-neutral a11y for the optional
-  `mathed_a11y` AccessKit bridge).
+- `crates/mathed_biblio/` — hayagriva citation backend. Resolves `\cite` keys
+  from bibliography sources and populates `SemanticIndex.biblio_statements`.
+- `crates/delta_algebra/` / `crates/delta_sirk/` — orphaned GPU (wgpu)
+  experiments. Archived; excluded from default workspace tests. Build with
+  an explicit `-p` flag.
 
 ## Conventions
 
@@ -53,7 +58,8 @@ codes, typed repair hints.
 
 ## Verify
 
-- `cargo test -p kernel_client -p mathed_core -p mathed_mini` (CPU, fast).
+- `cargo test -p mathed_core -p mathed_mini -p mathed -p mathed_biblio` (CPU,
+  fast; excludes GPU experiments and kernel_client which needs unfer path-dep).
 - `printf '{"id":"1","op":"version","params":{}}\n' | cargo run -p kernel_client
   --bin unfer_agent` → `{"id":"1","ok":true,...}`.
 - `cargo build -p mathed_mini --features gui` (winit + softbuffer link check).

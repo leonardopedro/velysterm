@@ -18,19 +18,26 @@ pub enum KernelRequest {
         t: f64,
     },
     Probability {
-        /// Session to query (the `\model` block).
+        /// Session to query (the `\\model` block).
         model_id: BlockId,
-        /// Result key, echoed back in the response (the `\prob` block).
+        /// Result key, echoed back in the response (the `\\prob` block).
         block_id: BlockId,
         event_json: String,
     },
     Condition {
-        /// Session to mutate (the `\model` block).
+        /// Session to mutate (the `\\model` block).
         model_id: BlockId,
         /// Result key, echoed back in the response.
         block_id: BlockId,
         event_json: String,
     },
+    CloseModel {
+        block_id: BlockId,
+    },
+    CloseModelById {
+        model_id: BlockId,
+    },
+    Shutdown,
 }
 
 pub struct KernelClient {
@@ -73,7 +80,10 @@ impl Default for KernelClient {
 
 impl Drop for KernelClient {
     fn drop(&mut self) {
-        // Worker exits when the sender is dropped (all senders gone).
-        let _ = self.worker_handle.take();
+        // Send shutdown signal so the worker exits cleanly.
+        let _ = self.tx.send(KernelRequest::Shutdown);
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
     }
 }

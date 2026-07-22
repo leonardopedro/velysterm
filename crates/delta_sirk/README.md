@@ -127,10 +127,11 @@ Expected output:
 
 ```
 test tests::test_qho_shifted_vacuum_energy ... ok
-test tests::test_output_shape ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
+
+> ⚠️ **Note**: Only 1 test currently passes; others require GPU and are feature-gated.
 
 ### Minimal Example
 

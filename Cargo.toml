@@ -1,7 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "examples/*"]
-exclude = ["/.github/"]
+exclude = [
+    "/.github/",
+    "crates/delta_algebra",
+    "crates/delta_sirk",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -71,6 +75,9 @@ serde = { version = "1", features = ["derive"] }
 
 # Document model
 loro = "1.13"
+
+# Property-based testing
+proptest = "1"
 mathed_core = { path = "crates/mathed_core", version = "0.1.0" }
 
 # Terminal

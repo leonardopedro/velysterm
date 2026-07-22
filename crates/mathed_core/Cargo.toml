@@ -12,5 +12,8 @@ thiserror = { workspace = true }
 typst = { workspace = true }
 unicode-math-class = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true

@@ -18,6 +18,7 @@
 //! blocks are re-transformed and re-evaluated.
 
 mod blocks_view;
+mod cite_refs;
 mod glyphs;
 mod kernel_sys;
 mod keymap;
@@ -123,9 +124,22 @@ fn main() {
         .init_resource::<Searching>()
         .init_resource::<LastChange>()
         .init_resource::<kernel_sys::KernelBridge>()
+        .init_resource::<cite_refs::CitePopupStack>()
+        .init_resource::<cite_refs::ReferencesPanelOpen>()
+        .init_resource::<ImePreedit>()
         .add_systems(Startup, setup)
-        .add_systems(PreUpdate, (handle_keyboard, handle_mouse))
-        .add_systems(Update, (sync_blocks, popup::sync_popup_ui))
+        .add_systems(
+            PreUpdate,
+            (handle_keyboard, handle_mouse, handle_ime),
+        )
+        .add_systems(
+            Update,
+            (
+                sync_blocks,
+                popup::sync_popup_ui,
+                cite_refs::sync_cite_refs_ui,
+            ),
+        )
         .add_systems(
             Update,
             (
@@ -193,6 +207,14 @@ impl EditorState {
         Some(a.min(self.cursor)..a.max(self.cursor))
     }
 }
+
+/// In-progress IME composition text (CJK/composed input), if any — the
+/// OS `Ime::Preedit` string, not yet committed to the document. Shown as
+/// an underlined overlay at the caret; `Ime::Commit` clears it and
+/// inserts the finished text into the doc (G1 IME support, mirroring
+/// `mathed_mini`'s `ime_preedit`).
+#[derive(Resource, Default)]
+pub struct ImePreedit(pub Option<String>);
 
 /// Tracks the previous reveal key for detecting cursor/selection changes.
 #[derive(Resource, Default)]
@@ -262,6 +284,8 @@ fn handle_keyboard(
     mut scheduler: ResMut<Scheduler>,
     mut searching: ResMut<Searching>,
     mut popup_state: ResMut<popup::PopupState>,
+    mut cite_stack: ResMut<cite_refs::CitePopupStack>,
+    mut cite_panel: ResMut<cite_refs::ReferencesPanelOpen>,
     semantics: Res<SemanticIndexWrapper>,
     mut last_change: ResMut<LastChange>,
     mut clipboard: Local<Option<arboard::Clipboard>>,
@@ -309,6 +333,8 @@ fn handle_keyboard(
                     popup_state.kind = None;
                     popup_state.items.clear();
                     popup_state.input.clear();
+                    cite_stack.0.clear();
+                    cite_panel.0 = false;
                     continue;
                 }
                 Key::Backspace => {
@@ -647,6 +673,36 @@ fn handle_keyboard(
                 popup_state.items.clear();
                 popup_state.input.clear();
             }
+            EditorCmd::CitePopup(n) => {
+                match n {
+                    Some(d) => {
+                        // Toggle: if already on the stack, pop it;
+                        // otherwise push (only if the cite exists).
+                        let doc = editor.doc.text();
+                        let refs = mathed_core::markers::scan_references(
+                            &mathed_core::markers::scan(doc),
+                        );
+                        let exists = refs
+                            .iter()
+                            .any(|e| e.numbers.contains(&(d as u64)));
+                        if exists {
+                            if let Some(pos) = cite_stack
+                                .0
+                                .iter()
+                                .rposition(|&x| x == d as u32)
+                            {
+                                cite_stack.0.remove(pos);
+                            } else {
+                                cite_stack.0.push(d as u32);
+                            }
+                        }
+                    }
+                    None => cite_stack.0.clear(),
+                }
+            }
+            EditorCmd::ReferencesPanel => {
+                cite_panel.0 = !cite_panel.0;
+            }
             EditorCmd::GotoDefinition => {
                 let cursor = state.cursor;
                 if let Some(occ) =
@@ -697,6 +753,52 @@ fn handle_keyboard(
                     popup_state.items.clear();
                     popup_state.selected = 0;
                 }
+            }
+        }
+    }
+}
+
+/// Handle IME composition events (G1): `Preedit` updates the in-progress
+/// composition overlay; `Commit` finalizes it by inserting the composed
+/// text into the document (exactly like a normal keystroke). Mirrors
+/// `mathed_mini`'s `ime_preedit` handling.
+fn handle_ime(
+    mut ime_evr: MessageReader<bevy::window::WindowEvent>,
+    mut ime: ResMut<ImePreedit>,
+    mut editor: ResMut<EditorDoc>,
+    mut state: ResMut<EditorState>,
+    mut scheduler: ResMut<Scheduler>,
+    mut last_change: ResMut<LastChange>,
+) {
+    let now = last_change.0.unwrap_or(0.0);
+    for ev in ime_evr.read() {
+        let bevy::window::WindowEvent::Ime(ime_ev) = ev else {
+            continue;
+        };
+        match ime_ev {
+            bevy::window::Ime::Enabled { .. } => {}
+            bevy::window::Ime::Preedit { value, .. } => {
+                ime.0 = if value.is_empty() {
+                    None
+                } else {
+                    Some(value.clone())
+                };
+            }
+            bevy::window::Ime::Commit { value, .. } => {
+                ime.0 = None;
+                if !value.is_empty() {
+                    insert_text(
+                        &mut editor,
+                        &mut state,
+                        value.as_str(),
+                        &mut scheduler,
+                        now,
+                    );
+                    last_change.0 = Some(now);
+                }
+            }
+            bevy::window::Ime::Disabled { .. } => {
+                ime.0 = None;
             }
         }
     }
@@ -1183,6 +1285,7 @@ fn draw_overlay(
     blink: Res<CaretBlink>,
     semantics: Res<SemanticIndexWrapper>,
     kernel_bridge: Res<kernel_sys::KernelBridge>,
+    searching: Res<Searching>,
     block_q: Query<(&ComputedNode, &GlobalTransform, &GlyphIndex)>,
     root_q: Query<
         (&ComputedNode, &GlobalTransform),
@@ -1341,12 +1444,49 @@ fn draw_overlay(
         }
     }
 
+    // Search-match rects: every query match (yellow fill) plus the
+    // currently-selected one (fill + stroke). The matches are byte ranges
+    // maintained by `Searching`; only built while a search is active.
+    let mut search_rects: Vec<bevy_vello::vello::kurbo::Rect> = Vec::new();
+    let mut search_current_rect: Option<bevy_vello::vello::kurbo::Rect> = None;
+    if searching.active {
+        let matches = &searching.state.matches;
+        for (i, m) in matches.iter().enumerate() {
+            for block in blocks.index.blocks.iter() {
+                let cs = m.start.max(block.range.start);
+                let ce = m.end.min(block.range.end);
+                if cs >= ce {
+                    continue;
+                }
+                let Some(&entity) = blocks.entities.get(&block.id) else {
+                    continue;
+                };
+                let Ok((cn, tf, gi)) = block_q.get(entity) else {
+                    continue;
+                };
+                let block_origin = node_origin(tf, cn);
+                let offset = block_origin - root_origin;
+                for mut r in gi.rects_for_range(cs..ce) {
+                    r.x0 += offset.x as f64;
+                    r.x1 += offset.x as f64;
+                    r.y0 += offset.y as f64;
+                    r.y1 += offset.y as f64;
+                    if searching.state.current == Some(i) {
+                        search_current_rect = Some(r);
+                    } else {
+                        search_rects.push(r);
+                    }
+                }
+            }
+        }
+    }
+
     let input = overlay::OverlayInput {
         caret,
         caret_visible: blink.visible,
         selection: &sel_rects,
-        search_matches: &[],
-        search_current: None,
+        search_matches: &search_rects,
+        search_current: search_current_rect,
         unresolved: &unresolved_rects,
         def_sites: &def_rects,
         prob_ok: &prob_ok_rects,

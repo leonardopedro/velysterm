@@ -32,8 +32,9 @@ use std::time::Instant;
 
 use prob_kernel::{Session, SessionBlob};
 use unfer_protocol::{
-    AgentRequest, AgentResponse, Code, Diagnostic, EventPredicate,
-    HintKind, ModelSpec, PriorSpec, RepairHint, Severity, codes,
+    AgentRequest, AgentResponse, BeliefPropagationOptsSpec, Code,
+    Diagnostic, EventPredicate, HintKind, HmcOptsSpec, ModelSpec,
+    PriorSpec, RepairHint, Severity, codes,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,6 +50,9 @@ const VALID_OPS: &[&str] = &[
     "restore_session",
     "poll_events",
     "list_codes",
+    "close_model",
+    "bayesian_update",
+    "belief_propagation",
 ];
 
 fn unknown_op_diag(op: &str) -> Diagnostic {
@@ -78,6 +82,8 @@ struct AgentState {
     sessions: HashMap<u64, Session>,
     /// Per-model event queue; bounded to EVENT_QUEUE_CAPACITY.
     events: HashMap<u64, VecDeque<serde_json::Value>>,
+    /// Per-model count of events dropped due to queue overflow.
+    events_dropped: HashMap<u64, u64>,
     next_id: u64,
 }
 
@@ -86,6 +92,7 @@ impl AgentState {
         Self {
             sessions: HashMap::new(),
             events: HashMap::new(),
+            events_dropped: HashMap::new(),
             next_id: 1,
         }
     }
@@ -94,6 +101,7 @@ impl AgentState {
         let q = self.events.entry(model_id).or_default();
         if q.len() >= EVENT_QUEUE_CAPACITY {
             q.pop_front();
+            *self.events_dropped.entry(model_id).or_default() += 1;
         }
         q.push_back(event);
     }
@@ -332,7 +340,12 @@ impl AgentState {
                     return AgentResponse::err(&req.id, bad_handle_diag(model_id));
                 }
                 let events = self.drain_events(model_id);
-                AgentResponse::ok(&req.id, serde_json::json!({ "events": events }))
+                let dropped = self.events_dropped.remove(&model_id).unwrap_or(0);
+                let mut resp = serde_json::json!({ "events": events });
+                if dropped > 0 {
+                    resp["events_dropped"] = serde_json::json!(dropped);
+                }
+                AgentResponse::ok(&req.id, resp)
             }
             "save_session" => {
                 let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
@@ -376,6 +389,117 @@ impl AgentState {
                         AgentResponse::ok(&req.id, serde_json::json!({ "model_id": id }))
                     }
                     Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                }
+            }
+            "close_model" => {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
+                    Some(id) => id,
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing or non-integer 'model_id' field"),
+                    ),
+                };
+                if self.sessions.remove(&model_id).is_some() {
+                    self.events.remove(&model_id);
+                    self.events_dropped.remove(&model_id);
+                    AgentResponse::ok(&req.id, serde_json::json!({ "ok": true }))
+                } else {
+                    AgentResponse::err(&req.id, bad_handle_diag(model_id))
+                }
+            }
+            "bayesian_update" => {
+                let (model_id, observations) = match parse_model_and_param::<Vec<Vec<f64>>>(
+                    &req.params, "observations"
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let hmc_opts: HmcOptsSpec = match req.params.get("hmc_opts") {
+                    Some(v) => match serde_json::from_value(v.clone()) {
+                        Ok(o) => o,
+                        Err(e) => return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag(&format!("invalid hmc_opts: {e}")),
+                        ),
+                    },
+                    None => HmcOptsSpec::default(),
+                };
+                match self.sessions.get(&model_id) {
+                    Some(session) => {
+                        match session.bayesian_update(&observations, &hmc_opts) {
+                            Ok(report) => {
+                                self.push_event(
+                                    model_id,
+                                    serde_json::json!({
+                                        "type": "bayesian_updated",
+                                        "log_posterior": report.log_posterior,
+                                        "mean_likelihood": report.mean_likelihood,
+                                        "n_observations": report.n_observations,
+                                        "solve_ms": report.solve_ms,
+                                    }),
+                                );
+                                AgentResponse::ok(
+                                    &req.id,
+                                    serde_json::to_value(report).unwrap(),
+                                )
+                            }
+                            Err(e) => AgentResponse::err(
+                                &req.id,
+                                e.to_diagnostic(),
+                            ),
+                        }
+                    }
+                    None => AgentResponse::err(
+                        &req.id,
+                        bad_handle_diag(model_id),
+                    ),
+                }
+            }
+            "belief_propagation" => {
+                let (model_id, observations) = match parse_model_and_param::<Vec<Vec<f64>>>(
+                    &req.params, "observations"
+                ) {
+                    Ok(v) => v,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let opts: BeliefPropagationOptsSpec = match req.params.get("opts") {
+                    Some(v) => match serde_json::from_value(v.clone()) {
+                        Ok(o) => o,
+                        Err(e) => return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag(&format!("invalid opts: {e}")),
+                        ),
+                    },
+                    None => BeliefPropagationOptsSpec::default(),
+                };
+                match self.sessions.get(&model_id) {
+                    Some(session) => {
+                        match session.belief_propagation(&observations, &opts) {
+                            Ok(report) => {
+                                self.push_event(
+                                    model_id,
+                                    serde_json::json!({
+                                        "type": "belief_propagated",
+                                        "log_posterior": report.log_posterior,
+                                        "n_observations": report.n_observations,
+                                        "solve_ms": report.solve_ms,
+                                    }),
+                                );
+                                AgentResponse::ok(
+                                    &req.id,
+                                    serde_json::to_value(report).unwrap(),
+                                )
+                            }
+                            Err(e) => AgentResponse::err(
+                                &req.id,
+                                e.to_diagnostic(),
+                            ),
+                        }
+                    }
+                    None => AgentResponse::err(
+                        &req.id,
+                        bad_handle_diag(model_id),
+                    ),
                 }
             }
             _ => {
@@ -619,5 +743,198 @@ mod tests {
         let p = prob_resp.result.unwrap()["probability"].as_f64().unwrap();
         // Vacuum-started state at t=0 should be entirely in the vacuum sector.
         assert!((p - 1.0).abs() < 1e-6, "expected p≈1.0, got {p}");
+    }
+
+    #[test]
+    fn bayesian_update_non_qfm_returns_internal() {
+        let mut state = AgentState::new();
+        let create = AgentRequest::new(
+            "30",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        );
+        let create_resp = state.handle(&create);
+        assert!(create_resp.ok, "{:?}", create_resp.error);
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+
+        let req = AgentRequest::new(
+            "31",
+            "bayesian_update",
+            serde_json::json!({
+                "model_id": model_id,
+                "observations": [[1.0, 0.0]],
+            }),
+        );
+        let resp = state.handle(&req);
+        assert!(!resp.ok, "expected error for non-QFM model");
+        // Should be an internal error — QFM required.
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::INTERNAL);
+    }
+
+    #[test]
+    fn belief_propagation_non_qfm_returns_internal() {
+        let mut state = AgentState::new();
+        let create = AgentRequest::new(
+            "40",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        );
+        let create_resp = state.handle(&create);
+        assert!(create_resp.ok, "{:?}", create_resp.error);
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+
+        let req = AgentRequest::new(
+            "41",
+            "belief_propagation",
+            serde_json::json!({
+                "model_id": model_id,
+                "observations": [[1.0, 0.0]],
+            }),
+        );
+        let resp = state.handle(&req);
+        assert!(!resp.ok, "expected error for non-QFM model");
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::INTERNAL);
+    }
+
+    #[test]
+    fn bayesian_update_bad_handle() {
+        let mut state = AgentState::new();
+        let req = AgentRequest::new(
+            "50",
+            "bayesian_update",
+            serde_json::json!({
+                "model_id": 999,
+                "observations": [[1.0, 0.0]],
+            }),
+        );
+        let resp = state.handle(&req);
+        assert!(!resp.ok);
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::BAD_HANDLE);
+    }
+
+    #[test]
+    fn belief_propagation_bad_handle() {
+        let mut state = AgentState::new();
+        let req = AgentRequest::new(
+            "51",
+            "belief_propagation",
+            serde_json::json!({
+                "model_id": 999,
+                "observations": [[1.0, 0.0]],
+            }),
+        );
+        let resp = state.handle(&req);
+        assert!(!resp.ok);
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::BAD_HANDLE);
+    }
+
+    #[test]
+    fn bayesian_update_missing_observations() {
+        let mut state = AgentState::new();
+        let req = AgentRequest::new(
+            "60",
+            "bayesian_update",
+            serde_json::json!({"model_id": 1}),
+        );
+        let resp = state.handle(&req);
+        assert!(!resp.ok);
+    }
+
+    #[test]
+    fn close_model_existing_agent() {
+        let mut state = AgentState::new();
+        let create = AgentRequest::new(
+            "70",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        );
+        let create_resp = state.handle(&create);
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+
+        let close = state.handle(&AgentRequest::new(
+            "71", "close_model",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert!(close.ok, "close_model should succeed for existing model");
+
+        // Subsequent op → BAD_HANDLE.
+        let evolve = state.handle(&AgentRequest::new(
+            "72", "evolve",
+            serde_json::json!({"model_id": model_id, "t": 0.1}),
+        ));
+        assert!(!evolve.ok);
+        assert_eq!(evolve.error.unwrap().code, Code::BAD_HANDLE);
+    }
+
+    #[test]
+    fn close_model_nonexistent_agent() {
+        let mut state = AgentState::new();
+        let close = state.handle(&AgentRequest::new(
+            "80", "close_model",
+            serde_json::json!({"model_id": 999}),
+        ));
+        assert!(!close.ok);
+        assert_eq!(close.error.unwrap().code, Code::BAD_HANDLE);
+    }
+
+    #[test]
+    fn event_overflow_increments_counter() {
+        let mut state = AgentState::new();
+        let create = AgentRequest::new(
+            "90",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        );
+        let create_resp = state.handle(&create);
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+
+        // Push more events than the capacity to trigger overflow.
+        let max = EVENT_QUEUE_CAPACITY;
+        for i in 0..max + 10 {
+            state.push_event(
+                model_id,
+                serde_json::json!({"type": "evolved", "seq": i}),
+            );
+        }
+        // 10 events were dropped.
+        assert_eq!(state.events_dropped.get(&model_id), Some(&10));
+
+        // poll_events returns events_dropped field.
+        let poll = state.handle(&AgentRequest::new(
+            "91", "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert!(poll.ok);
+        let result = poll.result.unwrap();
+        assert_eq!(result["events"].as_array().unwrap().len(), max);
+        assert_eq!(result["events_dropped"].as_u64(), Some(10));
+
+        // After poll, the counter is cleared.
+        let poll2 = state.handle(&AgentRequest::new(
+            "92", "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert!(poll2.ok);
+        assert!(poll2.result.unwrap().get("events_dropped").is_none());
     }
 }

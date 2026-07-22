@@ -115,6 +115,41 @@ impl KernelBridge {
             .collect()
     }
 
+    /// Typst markup for the results panel footer, summarizing kernel status.
+    /// Returns `None` when there are no results to show.
+    pub fn result_panel_markup(&self) -> Option<String> {
+        if self.results.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        for (offset, result) in &self.results {
+            let label = self
+                .prob_names
+                .get(offset)
+                .and_then(|n| n.as_deref())
+                .unwrap_or("");
+            let text = match result {
+                KernelResult::Value(p) => {
+                    if label.is_empty() {
+                        format!("\\= {p:.4}")
+                    } else {
+                        format!("{label}: \\= {p:.4}")
+                    }
+                }
+                KernelResult::Error { code_name, .. } => {
+                    if label.is_empty() {
+                        code_name.clone()
+                    } else {
+                        format!("{label}: {code_name}")
+                    }
+                }
+            };
+            parts.push(text);
+        }
+        parts.sort();
+        Some(parts.join("  │  "))
+    }
+
     /// Translator error messages keyed by the translator segment's body start
     /// offset (P5 #28). Feed this to
     /// [`TransformOptions::translator_errors`](mathed_core::transform::TransformOptions)

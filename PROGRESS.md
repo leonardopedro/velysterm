@@ -83,9 +83,34 @@ Semantic core is implemented and partially wired. The project is now moving back
 - [x] Stage F: Incremental search UI (Ctrl+F, live filter, Enter cycle, Esc cancel).
 - [x] Stage G2: Autosave (2s idle).
 - [x] Stage G3: Scroll-into-view (overflow scroll on padded root).
-- [ ] Stage G1: IME support (requires system-level IME).
-- [ ] Search overlay rendering (search match rects in draw_overlay).
+- [x] Stage G1: IME support (`ImePreedit` + `handle_ime` system, Ctrl/IME preedit overlay; manual verify with fcitx/ibus).
+- [x] Search overlay rendering (search match rects wired into `draw_overlay`).
+- [x] C9 parity: cite popups (Ctrl+1..9), references panel (Ctrl+0), marker overlay (Ctrl+Shift+M, pre-existing), IME preedit.
 - [ ] Smoke run verification (requires display server).
+
+## Remaining Tasks (2026-07-19)
+- [x] Stage R (R3-R5): PRELUDE fix, search cleanup, wordnav warning, semantics tests, full gate.
+- [x] Stage A: All modules present and tested (blocks, search, wordnav, format, keymap, overlay, popup, blink/scroll).
+- [x] Stage B: Per-block rendering, block index, range-restricted transform, keymap wiring.
+- [x] Stage C: Scheduler with two-tier damage queue.
+- [x] Stage D: GlyphIndex, selection/overlay rendering, double-click word selection.
+- [x] Stage E: Semantic index, GotoDefinition (F12), RenameAtCursor (F2), mark hygiene on save.
+- [x] Stage F: Incremental search UI (Ctrl+F, live filter, Enter cycle, Esc cancel).
+- [x] Stage G2: Autosave (2s idle).
+- [x] Stage G3: Scroll-into-view (overflow scroll on padded root).
+- [x] Stage S14: kernel_client crate (worker, parse, 7 tests).
+- [x] Stage S15: PropKinds in mathed_core (Model, Prior, Solver, Event, Prob).
+- [x] Stage S16: Bevy bridge (kernel_sys.rs, overlay rendering).
+- [x] Stage S17: AI-agent interface (unfer_agent, 8 ops).
+- [x] Stage S18: docs (ARCHITECTURE.md, PROTOCOL.md, etc.).
+- [x] mathed_mini increments 1–4 (Bevy-free CPU frontend, caret, a11y, kernel bridge).
+- [x] P3 #10/#11: Translator pipeline + kernel wiring (both frontends unified).
+- [x] P9.15.1: Port deleted velyst examples to velyst 0.15 API.
+- [x] Stage G1: IME support (`ImePreedit` + `handle_ime` system, Ctrl/IME preedit overlay; manual verify with fcitx/ibus).
+- [x] Search overlay rendering (search match rects wired into `draw_overlay`).
+- [x] C9 parity: cite popups (Ctrl+1..9), references panel (Ctrl+0), marker overlay (Ctrl+Shift+M, pre-existing), IME preedit.
+- [ ] Smoke run verification (requires display server).
+- [ ] Plan C stages (C1–C10): hygiene, bayesian ops, worker tests, glyph dedup, lifecycle hardening, GPU gating, incremental rendering, property tests, Bevy parity, headless smoke test.
 
 ## 2026-06-24 — unfer kernel integration (S14–S18)
 
@@ -186,11 +211,12 @@ All three workspaces had `cargo update` run successfully:
 - The kernel is reached only through `prob_kernel::Session` — the same code
   path for the GUI, the `unfer_agent` binary, and Austral modules (via FFI).
 
-## Test counts (CPU, 2026-06-25)
-- mathed_core: 59 tests
-- mathed_mini: 6 tests
-- kernel_client: 7 tests
-- mathed (Bevy): 36 tests
+## Test counts (CPU, 2026-07-19)
+- mathed_core: 126 tests
+- mathed_mini: 105 tests
+- mathed: 29 tests
+- kernel_client: 0 tests (needs unfer path-dep, tested via `cargo test -p kernel_client` in the unfer workspace)
+- mathed_biblio: 11 tests
 
 ## 2026-06-26 — P3 #10 translator pipeline (design phase)
 

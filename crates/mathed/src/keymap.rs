@@ -51,6 +51,12 @@ pub enum EditorCmd {
     SearchNext,
     SearchPrev,
     SearchCancel,
+    /// Toggle (push/pop) the cite popup for cite number `N` (1..=9),
+    /// driven by `Ctrl+<digit>`. `None` closes the whole stack (ESC).
+    CitePopup(Option<u8>),
+    /// Toggle the references panel for the segment(s) at the caret
+    /// (`Ctrl+0`).
+    ReferencesPanel,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -185,6 +191,20 @@ pub fn keymap(
                 }
                 "f" => return Some(EditorCmd::SearchStart),
                 _ => {}
+            }
+        }
+        // Ctrl+digit toggles a cite popup (`1..=9`) or the references
+        // panel (`0`).
+        if let Key::Character(s) = key {
+            if let Some(d) = s.chars().next() {
+                if let Some(n) = d.to_digit(10) {
+                    if n == 0 {
+                        return Some(EditorCmd::ReferencesPanel);
+                    }
+                    if (1..=9).contains(&n) {
+                        return Some(EditorCmd::CitePopup(Some(n as u8)));
+                    }
+                }
             }
         }
         return None;
@@ -359,6 +379,40 @@ mod tests {
         let cmd =
             keymap(&Key::F12, None, mods(false, false, false), false);
         assert_eq!(cmd, Some(EditorCmd::GotoDefinition));
+    }
+
+    #[test]
+    fn ctrl_digit_opens_cite_popup() {
+        let cmd = keymap(
+            &Key::Character("3".into()),
+            None,
+            mods(true, false, false),
+            false,
+        );
+        assert_eq!(cmd, Some(EditorCmd::CitePopup(Some(3))));
+    }
+
+    #[test]
+    fn ctrl_0_opens_references_panel() {
+        let cmd = keymap(
+            &Key::Character("0".into()),
+            None,
+            mods(true, false, false),
+            false,
+        );
+        assert_eq!(cmd, Some(EditorCmd::ReferencesPanel));
+    }
+
+    #[test]
+    fn ctrl_letter_still_works() {
+        // Ctrl+B still inserts a bold segment, not a digit command.
+        let cmd = keymap(
+            &Key::Character("b".into()),
+            None,
+            mods(true, false, false),
+            false,
+        );
+        assert_eq!(cmd, Some(EditorCmd::InsertSegment("bold")));
     }
 
     #[test]
