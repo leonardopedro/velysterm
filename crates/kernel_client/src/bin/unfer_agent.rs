@@ -31,9 +31,12 @@ use std::io::{self, BufRead, Write};
 use std::time::Instant;
 
 use prob_kernel::{Session, SessionBlob};
+use unfer_consensus::{ConsensusNode, Keypair, LocalConsensus};
+use unfer_identity::DidManager;
 use unfer_protocol::{
     AgentRequest, AgentResponse, BeliefPropagationOptsSpec, Code,
-    Diagnostic, EventPredicate, HintKind, HmcOptsSpec, ModelSpec,
+    ConsensusTransaction, ContentOp, ContentRef, Diagnostic, EventPredicate,
+    HintKind, HmcOptsSpec, ModelSpec,
     PriorSpec, RepairHint, Severity, codes,
 };
 
@@ -53,6 +56,14 @@ const VALID_OPS: &[&str] = &[
     "close_model",
     "bayesian_update",
     "belief_propagation",
+    "did_create",
+    "did_resolve",
+    "did_update",
+    "did_revoke",
+    "content_publish",
+    "content_resolve",
+    "consensus_sync",
+    "consensus_status",
 ];
 
 fn unknown_op_diag(op: &str) -> Diagnostic {
@@ -80,11 +91,11 @@ const EVENT_QUEUE_CAPACITY: usize = 64;
 
 struct AgentState {
     sessions: HashMap<u64, Session>,
-    /// Per-model event queue; bounded to EVENT_QUEUE_CAPACITY.
     events: HashMap<u64, VecDeque<serde_json::Value>>,
-    /// Per-model count of events dropped due to queue overflow.
     events_dropped: HashMap<u64, u64>,
     next_id: u64,
+    consensus: ConsensusNode,
+    keypairs: HashMap<String, Keypair>,
 }
 
 impl AgentState {
@@ -94,6 +105,8 @@ impl AgentState {
             events: HashMap::new(),
             events_dropped: HashMap::new(),
             next_id: 1,
+            consensus: ConsensusNode::new(Box::new(LocalConsensus::new())),
+            keypairs: HashMap::new(),
         }
     }
 
@@ -501,6 +514,204 @@ impl AgentState {
                         bad_handle_diag(model_id),
                     ),
                 }
+            }
+            "did_create" => {
+                let kp = Keypair::generate();
+                let service_endpoint = req.params
+                    .get("service_endpoint")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let mut mgr = DidManager::new(&mut self.consensus);
+                match mgr.create_did(&kp, service_endpoint) {
+                    Ok(did) => {
+                        self.keypairs.insert(did.clone(), kp);
+                        AgentResponse::ok(
+                            &req.id,
+                            serde_json::json!({ "did": did }),
+                        )
+                    }
+                    Err(e) => AgentResponse::err(&req.id, e),
+                }
+            }
+            "did_resolve" => {
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
+                    Some(d) => d.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'did' field"),
+                    ),
+                };
+                let mgr = DidManager::new(&mut self.consensus);
+                match mgr.resolve(&did) {
+                    Some(doc) => AgentResponse::ok(
+                        &req.id,
+                        serde_json::to_value(doc).unwrap(),
+                    ),
+                    None => AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::UNKNOWN_DID,
+                            format!("DID not found: {did}"),
+                            Severity::Error,
+                        ),
+                    ),
+                }
+            }
+            "did_update" => {
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
+                    Some(d) => d.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'did' field"),
+                    ),
+                };
+                let kp = match self.keypairs.get(&did) {
+                    Some(k) => k.clone(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::UNKNOWN_DID,
+                            format!("no keypair for DID: {did}"),
+                            Severity::Error,
+                        ),
+                    ),
+                };
+                let service_endpoint = req.params
+                    .get("service_endpoint")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let mut mgr = DidManager::new(&mut self.consensus);
+                match mgr.update_did(&kp, service_endpoint) {
+                    Ok(()) => AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!({ "ok": true }),
+                    ),
+                    Err(e) => AgentResponse::err(&req.id, e),
+                }
+            }
+            "did_revoke" => {
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
+                    Some(d) => d.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'did' field"),
+                    ),
+                };
+                let kp = match self.keypairs.get(&did) {
+                    Some(k) => k.clone(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::UNKNOWN_DID,
+                            format!("no keypair for DID: {did}"),
+                            Severity::Error,
+                        ),
+                    ),
+                };
+                let mut mgr = DidManager::new(&mut self.consensus);
+                match mgr.revoke_did(&kp) {
+                    Ok(()) => {
+                        self.keypairs.remove(&did);
+                        AgentResponse::ok(
+                            &req.id,
+                            serde_json::json!({ "ok": true }),
+                        )
+                    }
+                    Err(e) => AgentResponse::err(&req.id, e),
+                }
+            }
+            "content_publish" => {
+                let content_ref: ContentRef = match serde_json::from_value(
+                    req.params.clone(),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid ContentRef: {e}")),
+                    ),
+                };
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
+                    Some(d) => d.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'did' field"),
+                    ),
+                };
+                let kp = match self.keypairs.get(&did) {
+                    Some(k) => k.clone(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::UNKNOWN_DID,
+                            format!("no keypair for DID: {did}"),
+                            Severity::Error,
+                        ),
+                    ),
+                };
+                let mut tx = ConsensusTransaction::ContentOp(ContentOp {
+                    did: did.clone(),
+                    content_ref: content_ref.clone(),
+                    signature: [0u8; 64],
+                });
+                unfer_consensus::sign_transaction(&mut tx, &kp);
+                match self.consensus.submit(tx) {
+                    Ok(seq) => {
+                        let _ = self.consensus.sync();
+                        AgentResponse::ok(
+                            &req.id,
+                            serde_json::json!({
+                                "seq": seq,
+                                "cid": content_ref.cid,
+                            }),
+                        )
+                    }
+                    Err(e) => AgentResponse::err(&req.id, e),
+                }
+            }
+            "content_resolve" => {
+                let cid = match req.params.get("cid").and_then(|v| v.as_str()) {
+                    Some(c) => c.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'cid' field"),
+                    ),
+                };
+                match self.consensus.content(&cid) {
+                    Some(cr) => AgentResponse::ok(
+                        &req.id,
+                        serde_json::to_value(cr).unwrap(),
+                    ),
+                    None => AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::BAD_JSON,
+                            format!("content not found: {cid}"),
+                            Severity::Error,
+                        ),
+                    ),
+                }
+            }
+            "consensus_sync" => {
+                match self.consensus.sync() {
+                    Ok(applied) => AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!({
+                            "applied": applied,
+                            "current_seq": self.consensus.current_seq(),
+                        }),
+                    ),
+                    Err(e) => AgentResponse::err(&req.id, e),
+                }
+            }
+            "consensus_status" => {
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "applied_seq": self.consensus.applied_seq(),
+                        "current_seq": self.consensus.current_seq(),
+                        "synced": self.consensus.is_synced(),
+                    }),
+                )
             }
             _ => {
                 AgentResponse::err(&req.id, unknown_op_diag(&req.op))
@@ -936,5 +1147,147 @@ mod tests {
         ));
         assert!(poll2.ok);
         assert!(poll2.result.unwrap().get("events_dropped").is_none());
+    }
+
+    #[test]
+    fn did_create_and_resolve() {
+        let mut state = AgentState::new();
+        let create = state.handle(&AgentRequest::new(
+            "d1", "did_create",
+            serde_json::json!({"service_endpoint": "https://node.example.com"}),
+        ));
+        assert!(create.ok, "{:?}", create.error);
+        let did = create.result.unwrap()["did"].as_str().unwrap().to_string();
+        assert!(did.starts_with("did:unfer:"));
+
+        let resolve = state.handle(&AgentRequest::new(
+            "d2", "did_resolve",
+            serde_json::json!({"did": did}),
+        ));
+        assert!(resolve.ok, "{:?}", resolve.error);
+        let doc = resolve.result.unwrap();
+        assert_eq!(doc["id"], did);
+        assert_eq!(doc["@context"], "https://www.w3.org/ns/did/v1");
+        assert_eq!(doc["service"][0]["serviceEndpoint"], "https://node.example.com");
+    }
+
+    #[test]
+    fn did_resolve_unknown_returns_uk6004() {
+        let mut state = AgentState::new();
+        let resolve = state.handle(&AgentRequest::new(
+            "d3", "did_resolve",
+            serde_json::json!({"did": "did:unfer:0000000000000000000000000000000000000000000000000000000000000000"}),
+        ));
+        assert!(!resolve.ok);
+        assert_eq!(resolve.error.unwrap().code, Code::UNKNOWN_DID);
+    }
+
+    #[test]
+    fn did_update_and_revoke() {
+        let mut state = AgentState::new();
+        let create = state.handle(&AgentRequest::new(
+            "d4", "did_create", serde_json::json!({}),
+        ));
+        let did = create.result.unwrap()["did"].as_str().unwrap().to_string();
+
+        let update = state.handle(&AgentRequest::new(
+            "d5", "did_update",
+            serde_json::json!({"did": did, "service_endpoint": "https://new.example.com"}),
+        ));
+        assert!(update.ok, "{:?}", update.error);
+
+        let resolve = state.handle(&AgentRequest::new(
+            "d6", "did_resolve",
+            serde_json::json!({"did": did}),
+        ));
+        assert_eq!(
+            resolve.result.unwrap()["service"][0]["serviceEndpoint"],
+            "https://new.example.com"
+        );
+
+        let revoke = state.handle(&AgentRequest::new(
+            "d7", "did_revoke",
+            serde_json::json!({"did": did}),
+        ));
+        assert!(revoke.ok, "{:?}", revoke.error);
+
+        let resolve2 = state.handle(&AgentRequest::new(
+            "d8", "did_resolve",
+            serde_json::json!({"did": did}),
+        ));
+        assert!(!resolve2.ok);
+        assert_eq!(resolve2.error.unwrap().code, Code::UNKNOWN_DID);
+    }
+
+    #[test]
+    fn content_publish_and_resolve() {
+        let mut state = AgentState::new();
+        let create = state.handle(&AgentRequest::new(
+            "c1", "did_create", serde_json::json!({}),
+        ));
+        let did = create.result.unwrap()["did"].as_str().unwrap().to_string();
+
+        let publish = state.handle(&AgentRequest::new(
+            "c2", "content_publish",
+            serde_json::json!({
+                "did": did,
+                "cid": "abc123",
+                "magnet_uri": "magnet:?xt=urn:btih:abc123",
+                "encryption_key": "x25519:deadbeef",
+                "filesize": 1024,
+                "mime_type": "video/mp4",
+                "chunks": [],
+            }),
+        ));
+        assert!(publish.ok, "{:?}", publish.error);
+        assert_eq!(publish.result.unwrap()["cid"], "abc123");
+
+        let resolve = state.handle(&AgentRequest::new(
+            "c3", "content_resolve",
+            serde_json::json!({"cid": "abc123"}),
+        ));
+        assert!(resolve.ok, "{:?}", resolve.error);
+        let cr = resolve.result.unwrap();
+        assert_eq!(cr["magnet_uri"], "magnet:?xt=urn:btih:abc123");
+        assert_eq!(cr["filesize"], 1024);
+    }
+
+    #[test]
+    fn consensus_status_initial() {
+        let mut state = AgentState::new();
+        let status = state.handle(&AgentRequest::new(
+            "s1", "consensus_status", serde_json::json!({}),
+        ));
+        assert!(status.ok);
+        let result = status.result.unwrap();
+        assert_eq!(result["applied_seq"], 0);
+        assert_eq!(result["current_seq"], 0);
+        assert_eq!(result["synced"], true);
+    }
+
+    #[test]
+    fn consensus_sync_after_did_create() {
+        let mut state = AgentState::new();
+        state.handle(&AgentRequest::new(
+            "s2", "did_create", serde_json::json!({}),
+        ));
+        let status = state.handle(&AgentRequest::new(
+            "s3", "consensus_status", serde_json::json!({}),
+        ));
+        let result = status.result.unwrap();
+        assert_eq!(result["current_seq"], 1);
+        assert_eq!(result["synced"], true);
+    }
+
+    #[test]
+    fn unknown_op_hint_includes_federation_ops() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "u1", "frobnicate", serde_json::json!({}),
+        ));
+        assert!(!resp.ok);
+        let hint = &resp.error.unwrap().hints[0];
+        assert!(hint.suggestion.contains("did_create"));
+        assert!(hint.suggestion.contains("consensus_status"));
     }
 }

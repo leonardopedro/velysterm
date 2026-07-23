@@ -487,8 +487,11 @@ mod tests {
         let h = Harness::new();
         let close = h.send(KernelRequest::CloseModelById { model_id: 999 });
         match close {
-            BlockResponse::Success(block_id) => assert_eq!(block_id, 999),
-            _ => panic!("expected Success, got {:?}", close),
+            BlockResponse::Error(block_id, diag) => {
+                assert_eq!(block_id, 999);
+                assert_eq!(diag.code, Code(1004));
+            }
+            _ => panic!("expected Error(BadHandle), got {:?}", close),
         }
     }
 
@@ -531,13 +534,12 @@ mod tests {
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
         let _ = req_tx.send(KernelRequest::DefineModel { block_id: 1, spec });
-        let mut drained = 0;
+        let mut _drained = 0;
         for _ in 0..70 {
-            // Each of the next 70 successes overflows the ring, dropping events_dropped by 1 each.
             let _ = req_tx.send(KernelRequest::Evolve { block_id: 1, t: 0.01 });
             let resp = resp_rx.recv().unwrap();
             if let BlockResponse::Success(_) = resp {
-                drained += 1;
+                _drained += 1;
             }
         }
         // The ring is 64 capacity, so after 70 events we should have drained 64 (filled),
