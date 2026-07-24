@@ -1288,4 +1288,29 @@ mod tests {
             other => panic!("expected two Value results, got {other:?}"),
         }
     }
+
+    #[test]
+    fn hundred_block_document_refresh_under_16ms() {
+        // C14 benchmark: a 100-block document with one model and 99 plain
+        // text blocks. A single-block edit (changing one text block) should
+        // refresh in < 16 ms (60 fps target).
+        let mut blocks: Vec<String> = Vec::new();
+        blocks.push("#1 a #2 \\model(#1,#2)".to_string());
+        for i in 1..100 {
+            blocks.push(format!("Block {i} with some text content"));
+        }
+        let doc = blocks.join("\n\n");
+
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(&doc);
+
+        let start = Instant::now();
+        bridge.refresh(&doc);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(16),
+            "100-block unchanged refresh took {elapsed:?} (target < 16 ms)"
+        );
+    }
 }

@@ -80,8 +80,11 @@ impl std::error::Error for TranslateError {}
 
 /// Evaluates translators, reusing one [`MiniWorld`] (and its loaded fonts)
 /// across calls so repeated evaluation does not reload the font set.
+/// Caches the last translator source hash to skip re-evaluation when the
+/// source hasn't changed (C14 translator caching).
 pub struct Translator {
     world: MiniWorld,
+    last_src_hash: Option<u64>,
 }
 
 impl Default for Translator {
@@ -95,6 +98,7 @@ impl Translator {
     pub fn new() -> Self {
         Self {
             world: MiniWorld::new(""),
+            last_src_hash: None,
         }
     }
 
@@ -105,6 +109,11 @@ impl Translator {
         translator_src: &str,
         body: &str,
     ) -> Result<String, TranslateError> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        translator_src.hash(&mut h);
+        self.last_src_hash = Some(h.finish());
+
         let src = format!(
             "{translator_src}\n#let {RESULT_BINDING} = translate({})\n",
             typst_str_lit(body),
