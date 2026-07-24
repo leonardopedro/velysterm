@@ -113,6 +113,12 @@ pub enum PropKind {
     /// never hand-written Typst-math (P3.10 pivot) — with the bare
     /// literal extra-args naming the cited keys, in order.
     Cite,
+    /// Federation: create or reference a DID (C12).
+    Did,
+    /// Federation: publish content under a DID (C12).
+    Content,
+    /// Federation: resolve a CID and display content inline (C12).
+    Resolve,
     /// Unknown property: kept, semantically inert in v1.
     Other,
 }
@@ -138,6 +144,9 @@ impl PropKind {
             "translator" => Self::Translator,
             "bibliography" | "refs" => Self::Bibliography,
             "cite" | "citation" => Self::Cite,
+            "did" => Self::Did,
+            "content" => Self::Content,
+            "resolve" => Self::Resolve,
             _ => Self::Other,
         }
     }
@@ -186,6 +195,13 @@ impl PropKind {
     /// the probability kernel.
     pub fn is_biblio(self) -> bool {
         matches!(self, Self::Bibliography | Self::Cite)
+    }
+
+    /// Federation statements (C12): DID creation, content publishing,
+    /// content resolution. Routed through the kernel bridge to the
+    /// worker's consensus node.
+    pub fn is_federation(self) -> bool {
+        matches!(self, Self::Did | Self::Content | Self::Resolve)
     }
 }
 

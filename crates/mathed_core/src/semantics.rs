@@ -214,7 +214,7 @@ impl SemanticIndex {
         let mut translators: HashMap<String, TranslatorDef> =
             HashMap::new();
         for seg in segments {
-            if !seg.kind.is_kernel() {
+            if !seg.kind.is_kernel() && !seg.kind.is_federation() {
                 continue;
             }
             let span = match seg.span.clone() {

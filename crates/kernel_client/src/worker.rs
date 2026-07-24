@@ -9,11 +9,15 @@ pub enum BlockResponse {
     Value(BlockId, f64),
     Success(BlockId),
     Error(BlockId, Diagnostic),
+    StringValue(BlockId, String),
 }
 
 pub struct KernelWorker {
     sessions: HashMap<BlockId, Session>,
     tx: Sender<BlockResponse>,
+    consensus: unfer_consensus::ConsensusNode,
+    keypair: unfer_consensus::Keypair,
+    did: Option<String>,
 }
 
 impl KernelWorker {
@@ -21,6 +25,11 @@ impl KernelWorker {
         Self {
             sessions: HashMap::new(),
             tx,
+            consensus: unfer_consensus::ConsensusNode::new(Box::new(
+                unfer_consensus::LocalConsensus::new(),
+            )),
+            keypair: unfer_consensus::Keypair::generate(),
+            did: None,
         }
     }
 
@@ -197,6 +206,84 @@ impl KernelWorker {
                     } else {
                         let _ =
                             self.tx.send(Self::bad_handle(model_id));
+                    }
+                }
+                KernelRequest::DidCreate {
+                    block_id,
+                    service_endpoint,
+                } => {
+                    let mut mgr =
+                        unfer_identity::DidManager::new(&mut self.consensus);
+                    match mgr.create_did(&self.keypair, service_endpoint) {
+                        Ok(did) => {
+                            self.did = Some(did.clone());
+                            let _ = self.tx.send(BlockResponse::StringValue(
+                                block_id, did,
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code(6001),
+                                    format!("DID creation failed: {e}"),
+                                    Severity::Error,
+                                ),
+                            ));
+                        }
+                    }
+                }
+                KernelRequest::ContentPublish {
+                    block_id,
+                    data,
+                    mime_type,
+                    display_name,
+                } => {
+                    let kp = self.keypair.clone();
+                    let mut pub_ =
+                        unfer_data::DataPublisher::new(&mut self.consensus);
+                    match pub_.publish(
+                        &kp,
+                        &data,
+                        &mime_type,
+                        display_name.as_deref(),
+                    ) {
+                        Ok(content_ref) => {
+                            let _ = self.tx.send(BlockResponse::StringValue(
+                                block_id,
+                                content_ref.cid,
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code(6002),
+                                    format!("content publish failed: {e}"),
+                                    Severity::Error,
+                                ),
+                            ));
+                        }
+                    }
+                }
+                KernelRequest::ContentResolve { block_id, cid } => {
+                    match self.consensus.content(&cid) {
+                        Some(content_ref) => {
+                            let _ = self.tx.send(BlockResponse::StringValue(
+                                block_id,
+                                content_ref.cid.clone(),
+                            ));
+                        }
+                        None => {
+                            let _ = self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code(6003),
+                                    format!("content not found: {cid}"),
+                                    Severity::Error,
+                                ),
+                            ));
+                        }
                     }
                 }
                 KernelRequest::Shutdown => break,

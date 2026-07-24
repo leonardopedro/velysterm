@@ -40,6 +40,8 @@ use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
 pub enum KernelResult {
     /// A probability in [0, 1].
     Value(f64),
+    /// A string result (DID, CID) from federation ops (C12).
+    StringValue(String),
     /// An error: a short code/name, a human-readable message, and zero or more
     /// machine-readable [`RepairHint`]s (the Zero-language agent surface — a
     /// concrete fix the user/agent can apply, not just a string).
@@ -106,6 +108,9 @@ impl KernelBridge {
                     KernelResult::Value(p) => format!(
                         " #text(rgb(\"#138000\"))[\\= {p:.4}]"
                     ),
+                    KernelResult::StringValue(s) => format!(
+                        " #text(rgb(\"#138000\"))[{s}]"
+                    ),
                     KernelResult::Error { code_name, .. } => format!(
                         " #text(rgb(\"#c00000\"))[ {code_name}]"
                     ),
@@ -134,6 +139,13 @@ impl KernelBridge {
                         format!("\\= {p:.4}")
                     } else {
                         format!("{label}: \\= {p:.4}")
+                    }
+                }
+                KernelResult::StringValue(s) => {
+                    if label.is_empty() {
+                        s.clone()
+                    } else {
+                        format!("{label}: {s}")
                     }
                 }
                 KernelResult::Error { code_name, .. } => {
@@ -453,6 +465,11 @@ impl KernelBridge {
                 }
                 // A model session was (re)defined: no displayed result.
                 BlockResponse::Success(_) => {}
+                BlockResponse::StringValue(id, s) => {
+                    self.results
+                        .insert(id as usize, KernelResult::StringValue(s));
+                    changed = true;
+                }
                 BlockResponse::Error(id, diag) => {
                     self.results.insert(
                         id as usize,

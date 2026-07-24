@@ -37,6 +37,20 @@ pub enum KernelRequest {
     CloseModelById {
         model_id: BlockId,
     },
+    DidCreate {
+        block_id: BlockId,
+        service_endpoint: Option<String>,
+    },
+    ContentPublish {
+        block_id: BlockId,
+        data: Vec<u8>,
+        mime_type: String,
+        display_name: Option<String>,
+    },
+    ContentResolve {
+        block_id: BlockId,
+        cid: String,
+    },
     Shutdown,
 }
 

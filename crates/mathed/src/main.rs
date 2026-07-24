@@ -1503,6 +1503,9 @@ fn draw_overlay(
                     kernel_sys::KernelResult::Value(_) => {
                         prob_ok_rects.push(r)
                     }
+                    kernel_sys::KernelResult::StringValue(_) => {
+                        prob_ok_rects.push(r)
+                    }
                     kernel_sys::KernelResult::Error { .. } => {
                         prob_err_rects.push(r)
                     }

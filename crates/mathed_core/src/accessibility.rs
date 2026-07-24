@@ -175,6 +175,15 @@ pub fn describe_segment(
         PropKind::Cite => {
             (AccessRole::Citation, format!("citation: {content}"))
         }
+        PropKind::Did => {
+            (AccessRole::Math, format!("DID: {content}"))
+        }
+        PropKind::Content => {
+            (AccessRole::Math, format!("content: {content}"))
+        }
+        PropKind::Resolve => {
+            (AccessRole::Math, format!("resolve: {content}"))
+        }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }
