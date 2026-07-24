@@ -39,19 +39,21 @@ Three repos form one system:
 
 ## Current state (2026-07-24)
 
-- **Plan C phase 1 (C1–C10) complete.** All stages done and verified:
-  - C1 hygiene, C2 bayesian ops, C3 worker tests (36 tests), C4 glyph dedup (fork deleted),
-    C5 worker lifecycle (close_model, events_dropped, drop-join), C6 GPU gating (excluded),
-    C7 per-block incremental rendering, C8 property tests (proptest), C9 Bevy parity
-    (cite popups, references panel, IME), C10 headless smoke test (CI job).
-- Test counts: mathed_core 143 / mathed_mini 108 / mathed 39 / kernel_client 36 /
-  mathed_biblio 11 = **337 total**.
+- **Plan C complete (C1–C16).** All stages done and verified:
+  - C1–C10: phase 1 (hygiene, bayesian ops, worker tests, glyph dedup, worker lifecycle,
+    GPU gating, per-block rendering, property tests, Bevy parity, headless smoke test).
+  - C11: multi-model documents (named bindings, models_overview, cross-model conditioning).
+  - C12: federation UX (Did/Content/Resolve PropKinds, worker consensus node, StringValue).
+  - C13: collaborative editing (sync module, export_delta/import_delta, convergence tests).
+  - C14: performance (translator hash tracking, 100-block benchmark < 16 ms).
+  - C15: agent protocol (logos_compile + ode_to_hamiltonian ops, 24 VALID_OPS).
+  - C16: export (Typst/JSON/Markdown CLI modes).
+- Test counts: mathed_core 146 / mathed_mini 116 / mathed 39 / kernel_client 36 /
+  mathed_biblio 11 = **348 total**.
 - `mathed_mini` is fully Bevy-free (zero Bevy deps in both `--no-default-features` and
   default `gui` configurations).
-- The `unfer_agent` has 20+ ops (kernel + federation: DID, content, consensus).
-- PROTOCOL.md `[SYNC]` complete — all ops + 6xxx codes documented in unfer.
-- Uncommitted: C4/C10 changes from this session (glyph dedup, smoke tests, CI job, plan
-  updates).
+- The `unfer_agent` has 24 ops (kernel + federation + logos + ODE).
+- PROTOCOL.md `[SYNC]` complete — all ops + 6xxx/7xxx codes documented in unfer.
 
 ---
 
@@ -69,6 +71,12 @@ Three repos form one system:
 | C8 | Transform/OffsetMap property tests (proptest 50k cases + pinned regressions) |
 | C9 | Bevy-frontend parity (search rects, cite popups, references panel, IME) |
 | C10 | Headless smoke test (CI job, no display server needed) |
+| C11 | Multi-model documents (named bindings, models_overview, cross-model conditioning via `condition:` arg) |
+| C12 | Federation UX (Did/Content/Resolve PropKinds, worker ConsensusNode, StringValue results) |
+| C13 | Collaborative editing (sync module: export_delta/import_delta, convergence tests) |
+| C14 | Performance (translator hash tracking, 100-block benchmark < 16 ms) |
+| C15 | Agent protocol (logos_compile + ode_to_hamiltonian ops, 24 VALID_OPS) |
+| C16 | Export (Typst/JSON/Markdown CLI modes via --export-typst/--export-json/--export-md) |
 
 ---
 
