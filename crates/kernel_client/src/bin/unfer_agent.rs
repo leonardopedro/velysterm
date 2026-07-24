@@ -64,6 +64,8 @@ const VALID_OPS: &[&str] = &[
     "content_resolve",
     "consensus_sync",
     "consensus_status",
+    "logos_compile",
+    "ode_to_hamiltonian",
 ];
 
 fn unknown_op_diag(op: &str) -> Diagnostic {
@@ -712,6 +714,80 @@ impl AgentState {
                         "synced": self.consensus.is_synced(),
                     }),
                 )
+            }
+            "logos_compile" => {
+                let cnl = req.params
+                    .get("cnl")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let lexicon = logos::lexicon::Lexicon::parse("").unwrap_or_default();
+                let tokens: Vec<String> = cnl.split_whitespace()
+                    .map(String::from)
+                    .collect();
+                let trees = logos::ccg::parser::parse_sentence(&tokens, &lexicon);
+                if trees.is_empty() {
+                    AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code(7002),
+                            "logos: no parse trees for input".to_string(),
+                            Severity::Error,
+                        ),
+                    )
+                } else {
+                    let hash = format!("{:x}", {
+                        use std::hash::{Hash, Hasher};
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        format!("{:?}", trees).hash(&mut h);
+                        h.finish()
+                    });
+                    AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!({
+                            "hash": hash,
+                            "trees": trees.len(),
+                        }),
+                    )
+                }
+            }
+            "ode_to_hamiltonian" => {
+                let vars: Vec<String> = req.params
+                    .get("vars")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let rhs: Vec<String> = req.params
+                    .get("rhs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let rhs_refs: Vec<&str> = rhs.iter().map(|s| s.as_str()).collect();
+                let t_max = req.params
+                    .get("t_max")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(10.0);
+                match ode_sirk::analyze_ode_system(
+                    vars,
+                    &rhs_refs,
+                    None,
+                    t_max,
+                    &[],
+                ) {
+                    Ok((report, _ham)) => AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!({
+                            "report": format!("{report:?}"),
+                        }),
+                    ),
+                    Err(e) => AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code(7001),
+                            format!("ODE analysis failed: {e}"),
+                            Severity::Error,
+                        ),
+                    ),
+                }
             }
             _ => {
                 AgentResponse::err(&req.id, unknown_op_diag(&req.op))

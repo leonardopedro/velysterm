@@ -11,6 +11,8 @@ prob_kernel = { path = "../../../unfer/prob_kernel" }
 unfer_consensus = { path = "../../../unfer/unfer_consensus" }
 unfer_identity = { path = "../../../unfer/unfer_identity" }
 unfer_data = { path = "../../../unfer/unfer_data" }
+logos = { path = "../../../unfer/logos" }
+ode_sirk = { path = "../../../unfer/ode_sirk" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
