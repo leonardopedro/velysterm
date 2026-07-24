@@ -55,10 +55,10 @@ pub enum DocError {
 const TEXT_ID: &str = "source";
 
 pub struct MathDoc {
-    doc: LoroDoc,
-    text: LoroText,
+    pub(crate) doc: LoroDoc,
+    pub(crate) text: LoroText,
     undo: UndoManager,
-    mirror: String,
+    pub(crate) mirror: String,
 }
 
 impl Default for MathDoc {
