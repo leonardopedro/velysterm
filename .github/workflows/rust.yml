@@ -77,3 +77,21 @@ jobs:
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
       # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
       - run: cargo test --workspace --doc
+
+  # Stage C10: headless kernel smoke — no display server needed.
+  # mathed: document → KernelBridge → worker → prob_kernel → annotation
+  #   appears in the transformed Typst source (green value / red error).
+  # mathed_mini: same document rendered to an RGBA8 image; green pixels
+  #   for a successful prob, red pixels for an error.
+  # Fails if the kernel path breaks end-to-end.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
+      - name: mathed headless kernel smoke (transformed source)
+        run: cargo test -p mathed kernel_smoke
+      - name: mathed_mini headless kernel smoke (rasterized pixels)
+        run: cargo test -p mathed_mini overlay_renders_green

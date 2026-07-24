@@ -78,6 +78,7 @@ pub struct KernelStatement {
     pub body_text: String,
     pub translator: Option<String>,
     pub model_name: Option<String>,
+    pub condition_event: Option<String>,
     pub span: Range<usize>,
 }
 
@@ -267,6 +268,12 @@ impl SemanticIndex {
                 }
                 _ => None,
             };
+            let condition_event = match seg.kind {
+                PropKind::Prob | PropKind::Event => {
+                    extract_named_string(&seg.extra_args, "condition")
+                }
+                _ => None,
+            };
             kernel_statements.push(KernelStatement {
                 kind: seg.kind,
                 block,
@@ -274,6 +281,7 @@ impl SemanticIndex {
                 body_text,
                 translator,
                 model_name,
+                condition_event,
                 span,
             });
         }

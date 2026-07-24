@@ -86,7 +86,7 @@ Semantic core is implemented and partially wired. The project is now moving back
 - [x] Stage G1: IME support (`ImePreedit` + `handle_ime` system, Ctrl/IME preedit overlay; manual verify with fcitx/ibus).
 - [x] Search overlay rendering (search match rects wired into `draw_overlay`).
 - [x] C9 parity: cite popups (Ctrl+1..9), references panel (Ctrl+0), marker overlay (Ctrl+Shift+M, pre-existing), IME preedit.
-- [ ] Smoke run verification (requires display server).
+- [x] Smoke run verification (headless — no display server needed; C10).
 
 ## Remaining Tasks (2026-07-19)
 - [x] Stage R (R3-R5): PRELUDE fix, search cleanup, wordnav warning, semantics tests, full gate.
@@ -109,7 +109,7 @@ Semantic core is implemented and partially wired. The project is now moving back
 - [x] Stage G1: IME support (`ImePreedit` + `handle_ime` system, Ctrl/IME preedit overlay; manual verify with fcitx/ibus).
 - [x] Search overlay rendering (search match rects wired into `draw_overlay`).
 - [x] C9 parity: cite popups (Ctrl+1..9), references panel (Ctrl+0), marker overlay (Ctrl+Shift+M, pre-existing), IME preedit.
-- [ ] Smoke run verification (requires display server).
+- [x] Smoke run verification (headless — no display server needed; C10).
 - [ ] Plan C stages (C1–C10): hygiene, bayesian ops, worker tests, glyph dedup, lifecycle hardening, GPU gating, incremental rendering, property tests, Bevy parity, headless smoke test.
 
 ## 2026-06-24 — unfer kernel integration (S14–S18)

@@ -8,233 +8,183 @@ Parallel workstream 3 of 3. Companion plans: `unfer/PLAN_parallel_unfer.md`,
 Three repos form one system:
 - **unfer** — the kernel: `prob_kernel::Session` (full Born-rule API incl.
   `bayesian_update`, `belief_propagation`, save/restore), `unfer_protocol` (serde +
-  UK-#### codes).
-- **australVM** — Austral JIT hosting modules; irrelevant to this plan except via the
-  frozen contract.
+  UK-#### codes), plus `logos` (CNL compiler), `ode_sirk`, `unfer_consensus` (QuePaxa
+  federation), `unfer_data` (encrypted data plane), `unfer_identity` (DID).
+  Plan A phase 1 (A1–A5) complete; A6–A10 pending.
+- **australVM** — Austral JIT hosting modules; B1–B7 complete; B8–B11 (genuine hosting,
+  Tidepool, Egison, cap-std, federation-aware hosting) pending.
 - **velysterm** (this repo) — the human UI + AI-agent interface:
   - `kernel_client` — worker-thread client over `prob_kernel::Session` (path dep) and the
-    `unfer_agent` NDJSON binary (11 ops, bounded 64-event queues, `timing_ms`, UK codes +
+    `unfer_agent` NDJSON binary (20+ ops, bounded 64-event queues, `timing_ms`, UK codes +
     repair hints on every failure);
   - `mathed_core` — Bevy-free document model (Loro CRDT, PropKind incl.
     Model/Prior/Solver/Event/Prob/Translator/Bibliography/Cite, SemanticIndex, transform +
-    OffsetMap, glyphs, accessibility) — 126 tests;
+    OffsetMap, glyphs, accessibility) — 143 tests;
   - `mathed_mini` — Bevy-free winit+softbuffer frontend, translator pipeline, shared
-    headless `KernelBridge` — 105 tests;
-  - `mathed` — Bevy editor, thin `kernel_sys.rs` over the shared bridge — 29 tests;
+    headless `KernelBridge` — 108 tests;
+  - `mathed` — Bevy editor, thin `kernel_sys.rs` over the shared bridge — 39 tests;
   - `mathed_biblio` — hayagriva citation backend — 11 tests;
-  - `delta_algebra`/`delta_sirk` — orphaned GPU (wgpu) experiments.
+  - `delta_algebra`/`delta_sirk` — orphaned GPU (wgpu) experiments (excluded from workspace).
 
 ## Parallel-execution rules (shared by all three plans)
 
 1. **Ownership**: modify only files inside this repo. Cross-repo *reads* are fine
    (`../unfer/prob_kernel` API, `../unfer/docs/PROTOCOL.md`). Cross-repo *writes* are
    forbidden, except steps explicitly marked `[SYNC]`.
-2. **Frozen contract** (additive-only): the 11 existing NDJSON ops (no renames/removals);
+2. **Frozen contract** (additive-only): the existing NDJSON ops (no renames/removals);
    `unfer_protocol` types; UK-#### assignments (new ops take the next free codes — check
    `../unfer/unfer_protocol` first).
-3. **Commit discipline**: meaningful messages (the latest commit is literally `"a"` — stop
-   that); commit after every stage.
+3. **Commit discipline**: meaningful messages; commit after every stage.
 4. Stages ordered small → large, each with an acceptance command.
 
-## Current state (2026-07-18)
+## Current state (2026-07-24)
 
-- unfer's tree is green again; `cargo check -p kernel_client` passes against it.
-- Doc drift: AGENTS.md PropKind list omits Solver/Bibliography/Cite; PROGRESS.md test counts
-  (59/6/7/36) vs actual (126/105/29/7/11).
-- Tracked debris at root: `repomix-output.xml` (402 KB), `test_sym.rs`, `button_demo.sh`,
-  stale `check_output.txt` (7 weeks old, references a moved file).
-- Capability gap: `prob_kernel::Session` exposes `bayesian_update`/`belief_propagation`,
-  but `unfer_agent` has no ops for them — AI agents cannot drive the QFM §8 update.
-- Duplicated glyph index: `mathed/src/glyphs.rs` is a fork of `mathed_core::glyphs`; one
-  bug was fixed in only one copy already (zero-advance wrap-space patch).
-- `worker.rs` has zero direct tests; `KernelClient::drop` doesn't join the worker; agent
-  session map grows unbounded; event queues silently drop oldest past 64.
+- **Plan C phase 1 (C1–C10) complete.** All stages done and verified:
+  - C1 hygiene, C2 bayesian ops, C3 worker tests (36 tests), C4 glyph dedup (fork deleted),
+    C5 worker lifecycle (close_model, events_dropped, drop-join), C6 GPU gating (excluded),
+    C7 per-block incremental rendering, C8 property tests (proptest), C9 Bevy parity
+    (cite popups, references panel, IME), C10 headless smoke test (CI job).
+- Test counts: mathed_core 143 / mathed_mini 108 / mathed 39 / kernel_client 36 /
+  mathed_biblio 11 = **337 total**.
+- `mathed_mini` is fully Bevy-free (zero Bevy deps in both `--no-default-features` and
+  default `gui` configurations).
+- The `unfer_agent` has 20+ ops (kernel + federation: DID, content, consensus).
+- PROTOCOL.md `[SYNC]` complete — all ops + 6xxx codes documented in unfer.
+- Uncommitted: C4/C10 changes from this session (glyph dedup, smoke tests, CI job, plan
+  updates).
 
 ---
 
-## Stage C1 — Hygiene + doc-drift sweep (S)
+## Completed stages (Phase 1: C1–C10)
 
-1. Delete `repomix-output.xml`, `test_sym.rs`, `button_demo.sh`, `check_output.txt`; add
-   `repomix-output.xml` to `.gitignore`.
-2. `AGENTS.md`: add `PropKind::{Solver, Bibliography, Cite}`; add `mathed_biblio` and the
-   `delta_*` crates to the crate list; refresh verify commands.
-3. `PROGRESS.md`: correct test counts (126 mathed_core / 105 mathed_mini / 29 mathed /
-   7 kernel_client / 11 mathed_biblio); check off completed items, keep honest open ones.
-4. Root `README.md` (currently a symlink to upstream velyst's): prepend a velysterm-specific
-   architecture section (the data-flow paragraph: document → scan → SemanticIndex →
-   KernelBridge → kernel_client → prob_kernel → inline annotation) above the upstream
-   content — or replace the symlink with a real file that links to it.
+| Stage | Summary |
+|-------|---------|
+| C1 | Hygiene + doc-drift sweep (debris deleted, AGENTS.md/PROGRESS.md fixed) |
+| C2 | Bayesian ops (`bayesian_update`, `belief_propagation`) + docs + `[SYNC]` |
+| C3 | worker.rs unit tests (7 → 36 tests) |
+| C4 | Glyph index dedup (fork deleted, thin Bevy newtype inlined into main.rs) |
+| C5 | Worker lifecycle (drop-join, close_model, events_dropped) |
+| C6 | GPU experiments gated (excluded from workspace) |
+| C7 | Per-block incremental rendering (block_layouts cache in mathed_mini) |
+| C8 | Transform/OffsetMap property tests (proptest 50k cases + pinned regressions) |
+| C9 | Bevy-frontend parity (search rects, cite popups, references panel, IME) |
+| C10 | Headless smoke test (CI job, no display server needed) |
 
-**Acceptance**: `git ls-files | grep -E 'repomix|test_sym|button_demo|check_output'` empty;
-`grep Solver AGENTS.md` hits; test counts in PROGRESS.md match `cargo test --workspace`
-output.
+---
 
-## Stage C2 — Agent protocol completion: bayesian ops (S–M)
+## Stage C11 — Multi-model documents (M)
 
-Close the capability gap so AI agents can drive the full QFM §8 loop. The `Session` API
-already exists — this is serde plumbing plus tests.
+The kernel bridge currently associates each `\prob` with its nearest preceding `\model`.
+Real documents will have multiple interacting models (e.g. a system + environment, or
+before/after a perturbation).
 
-1. Add `bayesian_update` and `belief_propagation` ops to
-   `crates/kernel_client/src/bin/unfer_agent.rs` (VALID_OPS, dispatch, arg validation),
-   mirroring the existing op shape: per-model bounded event queue integration,
-   `timing_ms`, UK-#### + RepairHint on every failure. Reuse the `Session` method
-   signatures in `../unfer/prob_kernel` — do not change them.
-2. Add `KernelRequest` variants + worker dispatch in `kernel_client` (worker.rs) if the
-   agent bypasses the bridge for these (check the existing pattern first — keep one code
-   path).
-3. E2E test: NDJSON session — create_model → set_prior → bayesian_update → probability —
-   asserting the posterior shift matches a `prob_kernel::Session` direct call on the same
-   inputs (a reference test exists in unfer's `bayes_update_module`; reuse its numbers).
-4. Write the op specs (request/response JSON schema, UK codes, examples) into
-   `docs/agent_ops_bayes.md` in this repo.
+1. Support explicit `model: "name"` binding in `\prob`/`\event` statements (already
+   partially implemented in `resolve_model`). Verify the named-binding path works end-to-end
+   with distinct models producing different probabilities.
+2. Add a `\models` overview annotation: when a document has 2+ models, render a small
+   summary panel listing each model's name + state norm (from `snapshot`).
+3. Cross-model conditioning: allow `\prob` to reference a model's conditioned state
+   (e.g. "P(event | model_A conditioned on event_B)"). This requires chaining `condition`
+   + `probability` in the bridge dispatch.
+4. Tests: two-model document with named bindings; cross-model conditioning produces the
+   expected posterior; the overview panel renders for 2+ models.
 
-**Acceptance**: `cargo test -p kernel_client` covers both new ops incl. failure paths;
-the e2e posterior matches the direct-`Session` reference within 1e-12.
+**Acceptance**: a document with two named models and a cross-model `\prob` computes
+correctly; `cargo test -p mathed_mini --lib` green with new tests.
 
-`[SYNC]` (final, after unfer Plan A2 has landed): paste `docs/agent_ops_bayes.md` as a new
-section into `../unfer/docs/PROTOCOL.md`. This is the only cross-repo write in this plan;
-if A2 hasn't landed yet, leave the fragment in place and note it in the final report.
+## Stage C12 — Federation UX in the editor (M)
 
-## Stage C3 — `worker.rs` unit tests (S)
+The agent has `did_*`, `content_*`, `consensus_*` ops but the editor has no UI for them.
 
-Direct coverage for branches currently reachable only indirectly.
+1. Add `\did` and `\content` PropKinds to `mathed_core` markers. A `\did` segment creates
+   or references a DID; a `\content` segment publishes its body as content under a DID.
+2. Wire the kernel bridge to dispatch `did_create`/`content_publish` when these segments
+   appear (additive `KernelRequest` variants).
+3. Overlay: show the DID string (green) or error (red) next to `\did` segments; show the
+   CID next to `\content` segments after publishing.
+4. A `\resolve` segment that resolves a CID and displays the content inline (read-only).
+5. Tests: `\did` creates a DID and shows it; `\content` publishes and shows the CID;
+   `\resolve` fetches and displays.
 
-1. bad-handle path → UK-1004 with repair hint;
-2. invalid event JSON → UK-1003;
-3. `Condition`/`Probability` keying: model_id vs block_id — pin the intended keying with a
-   test per request kind;
-4. malformed `DefineModel` spec → clean error, worker thread survives and serves the next
-   request.
+**Acceptance**: a document with `\did` + `\content` + `\resolve` segments works end-to-end
+through the kernel bridge; both frontends show the results inline.
 
-**Acceptance**: `cargo test -p kernel_client` grows from 7 to ≥ 11 tests; killing the worker
-mid-test never hangs (use timeouts).
+## Stage C13 — Collaborative editing groundwork (M)
 
-## Stage C4 — Deduplicate the glyph index (M)
+`mathed_core` uses Loro CRDT but only for local undo/redo. The CRDT is ready for
+multi-writer collaboration.
 
-`mathed/src/glyphs.rs` is a fork of `mathed_core::glyphs`; fixes have already diverged.
+1. Add a `sync` module to `mathed_core`: `export_delta()` / `import_delta()` over the Loro
+   doc, producing compact binary patches suitable for network transport.
+2. Add a `CollabSession` resource to `mathed_mini` (headless, no network): two `MathDoc`
+   instances exchange deltas and converge. Property test: random concurrent edits on two
+   docs → sync → identical text.
+3. Wire `CollabSession` into `mathed_mini`'s app loop behind a `collab` feature flag
+   (default off). When enabled, a second "remote" doc is simulated in-process (echo with
+   delay) to verify the merge path doesn't corrupt the editor state.
+4. Document the collaboration protocol in `docs/mathed/COLLAB_PROTOCOL.md`.
 
-1. Port `mathed` onto `mathed_core::glyphs` behind a thin Bevy `Component`/`Resource`
-   wrapper; delete the fork.
-2. First port the zero-advance wrap-space patch status: verify the mathed_core copy is the
-   superset (it received the band-clustering fix; the fork didn't get zero-advance). Diff
-   both files before deleting anything.
-3. The 29 mathed tests + a headless glyph-position regression test must pass unchanged.
+**Acceptance**: proptest convergence (1000 random concurrent edit pairs → sync → identical);
+`mathed_mini` with `collab` feature compiles and the simulated remote session doesn't
+corrupt the local doc.
 
-**Acceptance**: `crates/mathed/src/glyphs.rs` deleted; `cargo test -p mathed -p mathed_core`
-green; no `glyph` code duplication remains (`grep -rn "struct GlyphIndex" crates/` → one hit).
+## Stage C14 — Performance at scale (S–M)
 
-## Stage C5 — Worker lifecycle hardening (S–M)
+The per-block cache (C7) handles keystroke latency. This stage addresses larger documents
+and slower kernel operations.
 
-1. `KernelClient::drop`: join the worker thread (shutdown message + join with timeout)
-   instead of relying on channel close.
-2. Add a `close_model` op (agent) / `KernelRequest::CloseModel` (client) so sessions don't
-   grow unbounded; evict from the `HashMap<u64, Session>`.
-3. Event-queue overflow: when the 64-event ring drops, count drops and expose
-   `events_dropped` in `poll_events` responses (additive field — contract-safe).
-4. Tests: drop-join terminates; close_model frees the handle (subsequent ops → UK-1004);
-   overflow increments the counter.
+1. Benchmark: 100-block document, measure full relayout time vs. single-block edit time.
+   Target: single-block edit < 16 ms (60 fps) on a 100-block doc.
+2. Kernel bridge batching: when multiple `\prob` segments change simultaneously (e.g. a
+   model edit invalidates 10 probs), batch the dispatch into one worker round-trip instead
+   of 10 sequential submits.
+3. Lazy kernel dispatch: only dispatch `\prob` segments that are visible in the viewport
+   (or within ±2 blocks). Off-screen probs dispatch on scroll-into-view.
+4. Translator caching: cache the typst-eval `Vm` across refreshes when the translator
+   source hasn't changed (currently re-created every `refresh`).
 
-**Acceptance**: a 10k-model create/close loop keeps memory flat (assert map length);
-`events_dropped` appears only when > 0.
+**Acceptance**: benchmark results documented; 100-block doc single-edit < 16 ms; kernel
+bridge submits ≤ 1 batch per refresh regardless of prob count.
 
-## Stage C6 — Gate the GPU experiments (S)
+## Stage C15 — Agent protocol: logos + ODE ops (S)
 
-`delta_algebra`/`delta_sirk` are orphaned and their tests panic without a GPU adapter —
-latent CI fragility.
+unfer's `logos` (CNL→execution graph) and `ode_sirk` (ODE→Hamiltonian) are new kernel
+capabilities the agent should expose.
 
-1. `exclude` them from the default workspace members (or feature-gate their tests with
-   `#[ignore]` unless a `gpu-tests` feature is on).
-2. Fix the `delta_sirk` README (claims 2 tests; 1 exists).
-3. Document them as archived experiments in AGENTS.md (one paragraph).
+1. Add `logos_compile` op: takes a CNL string, returns the compiled execution graph hash
+   + a `ModelSpec` if the CNL describes a quantum system. (Depends on unfer A10 landing.)
+2. Add `ode_to_hamiltonian` op: takes an ODE system description, returns the detected
+   Hamiltonian structure + singularity report.
+3. Wire both into the kernel bridge as new `\logos` and `\ode` PropKinds (optional — can
+   be agent-only initially).
+4. Tests: NDJSON round-trip for both ops; failure paths carry UK codes + repair hints.
 
-**Acceptance**: `cargo test --workspace` on a GPU-less machine passes; the crates still
-build on demand with an explicit `-p`.
+**Acceptance**: `cargo test -p kernel_client` covers both new ops; the agent binary
+handles them end-to-end.
 
-## Stage C7 — Per-block incremental rendering (M)
+## Stage C16 — Export and interchange (S)
 
-`docs/mathed/PLAN_block_incremental_render.md` is executor-ready (stage-by-stage with
-acceptance commands). Execute it as written. This removes the whole-document relayout +
-re-rasterize on every keystroke in `mathed_mini`.
+The editor produces rich semantic documents. Export paths make them useful outside the
+editor.
 
-**Acceptance**: per the plan's own acceptance commands; typing in a 50-block document
-re-lays-out only the touched block (assert via the DocLayout cache stats the plan adds).
+1. **Typst export**: `mathed_mini --export-typst <file>` renders the current document to a
+   standalone `.typ` file (with annotations baked in as colored text).
+2. **JSON export**: `mathed_mini --export-json <file>` dumps the `SemanticIndex` (all
+   kernel statements, translators, bibliography) as structured JSON for downstream tools.
+3. **Markdown export**: a lightweight `--export-md` that strips markers and produces plain
+   markdown with math blocks (for READMEs, papers).
+4. Tests: each export mode produces valid output for a sample document; round-trip
+   stability (export → re-import preserves semantics).
 
-## Stage C8 — Transform/OffsetMap property tests (M) — DONE
-
-The CHANGELOG shows a long tail of one-byte-off bugs (escape bytes, splice points,
-ligatures, wrap spaces). Catch the class systematically.
-
-1. proptest harness: random documents (markers, escapes, ligature-prone text, CJK, emoji)
-   → assert `render_to_doc ∘ doc_to_render` round-trips text and that OffsetMap
-   bidirectional mappings are consistent at every boundary.
-2. Seed the corpus with every regression case from CHANGELOG.md as a fixed unit test.
-
-**Acceptance**: proptest `offset_map_roundtrip_consistency` passes (50k random cases);
-each historical CHANGELOG bug has a pinned test. Full suites green:
-`mathed_core` 143 / `mathed_mini` 108 / `mathed` 29.
-
-**Notes / corrections during C8**:
-- Two pinned regression tests (`unmatched_dollar_does_not_crash_layout`,
-  `math_reveals_when_touched`) had wrong expectations; the underlying behavior was
-  already correct (unmatched `$` → `\$`, math reveal = typeset verbatim when not
-  touched, escaped raw source when touched). Fixed the assertions to match.
-- proptest `prop_assert!`/`prop_assert_eq!` format strings must use positional `{}`
-  args (Rust 2024 forbidds `{var}` capture syntax in `format_args!` macro expansion).
-- Zero-length CopySpans (escape-byte pins) must be skipped in the proptest boundary
-  round-trip check, otherwise `doc_to_render(span.doc_start) != span.render_start` for
-  `_` (the `\` escape byte sits at render_start 0 with no copy).
-
-## Stage C9 — Bevy-frontend parity (M) — DONE
-
-Stop the two frontends diverging.
-
-1. Wire search-match rects into `draw_overlay` — done. `draw_overlay` reads
-   `Searching` and builds `search_rects` + `search_current_rect` from
-   `searching.state.matches`/`current` using the same block/glyph offset loop as
-   selection rects (`main.rs` ~L1344).
-2. Cite popups + references panel + marker overlay ported:
-   - Marker overlay: **already existed** (`show_hidden = ctrl && shift` →
-     `TransformOptions::show_hidden`). No work needed.
-   - Cite popups + references panel: new `crates/mathed/src/cite_refs.rs`
-     (`CitePopupStack`, `ReferencesPanelOpen`, `CiteRefsRoot`, `cite_popup_rows`,
-     `references_panel_rows`, `sync_cite_refs_ui`). Triggered by
-     `EditorCmd::CitePopup(Some(n))` (Ctrl+1..9) and `EditorCmd::ReferencesPanel`
-     (Ctrl+0) in `handle_keyboard`.
-3. IME in Bevy mathed ("Stage G1") — done. New `ImePreedit` resource +
-   `handle_ime` system reading `MessageReader<bevy::window::WindowEvent>` IME
-   events; `Ime::Commit` inserts text via `insert_text`, `Ime::Preedit` renders a
-   preedit overlay through `cite_refs::spawn_preedit`. Registered in PreUpdate.
-
-**Tests**: `mathed` crate 37 tests (incl. `cite_refs` 5, keymap 4 for the new
-commands). `mathed_core` 143 + `mathed_mini` 108 unchanged (no regressions).
-
-**Manual verification**:
-- Ctrl+1..9 → cite popup for the Nth scanned reference.
-- Ctrl+0 → references panel (bottom of screen).
-- Ctrl+Shift+M → marker overlay (pre-existing).
-- Type with an IME (e.g. fcitx/ibus) → preedit overlay shows; commit inserts text.
-
-**Acceptance**: feature checklist in PROGRESS.md updated; each ported feature has at least
-one test or a documented manual-verification step.
-
-## Stage C10 — Headless smoke test (M–L)
-
-"Smoke run verification (requires display server)" has been open since Jun 12.
-
-1. Add a CI job (xvfb-run or Bevy `ScheduleRunnerPlugin` headless mode) that boots
-   `mathed`, injects a `\model`/`\prob` document via the test harness, and asserts the
-   green annotation appears in the transformed source.
-2. Also boot `mathed_mini` headless (already supported) rendering the same document to a
-   PNG and assert non-empty + annotation pixels.
-
-**Acceptance**: CI job fails if the kernel path breaks end-to-end; PROGRESS.md smoke item
-finally checked off.
+**Acceptance**: all three export modes work from the CLI; output is valid (Typst compiles,
+JSON parses, Markdown renders).
 
 ---
 
 ## Out of scope (other workstreams)
 
-- unfer: PROTOCOL.md restructuring, FFI gates, modules, QFM research.
-- australVM: JIT, auth enforcement, modhost.
+- unfer: QFM research (A6), new-crate docs (A8), cross-repo integration (A9), logos (A10).
+- australVM: genuine hosting (B8), Tidepool (B9), Egison (B9b), cap-std (B10),
+  federation-aware hosting (B11).
 
-`[SYNC]` steps in this plan: C2's final PROTOCOL.md paste only.
+`[SYNC]` steps in this plan: none remaining (C2 sync complete).

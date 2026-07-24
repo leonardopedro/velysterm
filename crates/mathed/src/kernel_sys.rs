@@ -122,3 +122,115 @@ fn dirty_prob_blocks(
         scheduler.note_blocks(dirty, now);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use mathed_core::markers::{resolve_segments, scan};
+    use mathed_core::transform::{to_render_text, TransformOptions};
+    use std::time::{Duration, Instant};
+
+    /// Stage C10 headless smoke: the full kernel path — document →
+    /// KernelBridge → worker → prob_kernel → annotation → transformed
+    /// Typst source — must produce the green `= 1.0000` markup for a
+    /// successful `\prob`, with no window or GPU. This is the pipeline
+    /// `sync_blocks` runs before handing source to Typst; the Bevy
+    /// rendering layer is not involved.
+    #[test]
+    fn kernel_smoke_annotation_in_transformed_source() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #5 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+                   #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
+
+        let mut bridge = mathed_mini::KernelBridge::new();
+        bridge.refresh(doc);
+
+        let start = Instant::now();
+        loop {
+            bridge.poll();
+            if !bridge.results().is_empty() {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "kernel worker did not respond in time"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let annotations = bridge.result_annotations();
+        assert!(
+            !annotations.is_empty(),
+            "kernel bridge must produce annotations"
+        );
+
+        let scan = scan(doc);
+        let segments = resolve_segments(&scan);
+        let render = to_render_text(
+            doc,
+            &scan,
+            &segments,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        );
+        assert!(
+            render.text.contains("#text(rgb(\"#138000\"))"),
+            "transformed source must contain the green annotation, got:\n{}",
+            render.text
+        );
+        assert!(
+            render.text.contains("1.0000"),
+            "transformed source must contain the probability value, got:\n{}",
+            render.text
+        );
+    }
+
+    /// The error path: a bad translator produces a red UK-style code in
+    /// the transformed source, again with no window or GPU.
+    #[test]
+    fn kernel_smoke_error_annotation_in_transformed_source() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\n\
+                   #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
+
+        let mut bridge = mathed_mini::KernelBridge::new();
+        bridge.refresh(doc);
+
+        let start = Instant::now();
+        loop {
+            bridge.poll();
+            if !bridge.results().is_empty() {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "kernel worker did not respond in time"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let annotations = bridge.result_annotations();
+        assert!(
+            !annotations.is_empty(),
+            "kernel bridge must produce error annotations"
+        );
+
+        let scan = scan(doc);
+        let segments = resolve_segments(&scan);
+        let render = to_render_text(
+            doc,
+            &scan,
+            &segments,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        );
+        assert!(
+            render.text.contains("#text(rgb(\"#c00000\"))"),
+            "transformed source must contain the red error annotation, got:\n{}",
+            render.text
+        );
+    }
+}

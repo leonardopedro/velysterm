@@ -150,6 +150,30 @@ impl KernelBridge {
         Some(parts.join("  │  "))
     }
 
+    /// Summary panel for multi-model documents (C11). Returns `None` when
+    /// fewer than 2 models are present. Lists each model's name (or offset)
+    /// so the reader can see which models are in scope.
+    pub fn models_overview(&self, doc_text: &str) -> Option<String> {
+        let idx = build_index(doc_text);
+        let models: Vec<&KernelStatement> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Model)
+            .collect();
+        if models.len() < 2 {
+            return None;
+        }
+        let names: Vec<String> = models
+            .iter()
+            .map(|m| {
+                m.name
+                    .clone()
+                    .unwrap_or_else(|| format!("@{}", m.span.start))
+            })
+            .collect();
+        Some(format!("models: {}", names.join(", ")))
+    }
+
     /// Translator error messages keyed by the translator segment's body start
     /// offset (P5 #28). Feed this to
     /// [`TransformOptions::translator_errors`](mathed_core::transform::TransformOptions)
@@ -352,6 +376,7 @@ impl KernelBridge {
                 prob_trans_src,
                 &model.body_text,
                 model_trans_src,
+                stmt.condition_event.as_deref().unwrap_or(""),
             ]);
             if self.prob_hashes.get(&stmt.span.start) == Some(&key) {
                 continue;
@@ -368,6 +393,13 @@ impl KernelBridge {
                 Ok(event_json) => {
                     if let Some(off) = event_trans_off {
                         self.translator_errors.remove(&off);
+                    }
+                    if let Some(cond_json) = &stmt.condition_event {
+                        self.client.submit(KernelRequest::Condition {
+                            model_id: model.span.start as u64,
+                            block_id: stmt.span.start as u64,
+                            event_json: cond_json.clone(),
+                        });
                     }
                     self.client.submit(KernelRequest::Probability {
                         model_id: model.span.start as u64,
@@ -1166,5 +1198,77 @@ mod tests {
             red2 > 0,
             "error overlay must render red pixels (got {green2} green, {red2} red)"
         );
+    }
+
+    #[test]
+    fn models_overview_none_for_single_model() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)";
+        let bridge = KernelBridge::new();
+        assert!(bridge.models_overview(doc).is_none());
+    }
+
+    #[test]
+    fn models_overview_lists_two_models() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n#3 b #4 \\model(#3,#4, m2)";
+        let bridge = KernelBridge::new();
+        let overview = bridge.models_overview(doc).expect("overview for 2 models");
+        assert!(overview.contains("m1"), "overview: {overview}");
+        assert!(overview.contains("m2"), "overview: {overview}");
+    }
+
+    #[test]
+    fn condition_event_parsed_from_prob_args() {
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
+                   #3 vac #4 \\prob(#3,#4, model: \"m1\", condition: \"{\\\"kind\\\":\\\"vacuum\\\"}\")";
+        let idx = build_index(doc);
+        let prob = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Prob)
+            .expect("a prob statement");
+        assert!(
+            prob.condition_event.is_some(),
+            "condition_event should be parsed from the condition: arg"
+        );
+        let cond = prob.condition_event.as_deref().unwrap();
+        assert!(cond.contains("vacuum"), "condition event: {cond}");
+    }
+
+    #[test]
+    fn two_named_models_produce_different_probabilities() {
+        // m1: vacuum prior (default). m2: one-boson prior in mode 0.
+        // P(vacuum) on m1 = 1.0; P(vacuum) on m2 = 0.0 (one boson present).
+        let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
+                   #3 b #4 \\model(#3,#4, m2)\n\n\
+                   #7 bosons(0:1) #8 \\prior(#7,#8, model: \"m2\")\n\n\
+                   #5 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
+                   #9 p1 #10 \\prob(#9,#10, model: \"m1\", translator: \"ev\")\n\n\
+                   #11 p2 #12 \\prob(#11,#12, model: \"m2\", translator: \"ev\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let idx = build_index(doc);
+        let probs: Vec<&KernelStatement> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Prob)
+            .collect();
+        assert_eq!(probs.len(), 2);
+        let key1 = probs[0].span.start;
+        let key2 = probs[1].span.start;
+        let r1 = wait_for(&mut bridge, key1, Duration::from_secs(15));
+        let r2 = wait_for(&mut bridge, key2, Duration::from_secs(15));
+        match (r1, r2) {
+            (Some(KernelResult::Value(p1)), Some(KernelResult::Value(p2))) => {
+                assert!(
+                    (p1 - 1.0).abs() < 1e-9,
+                    "P(vacuum|m1) should be 1.0, got {p1}"
+                );
+                assert!(
+                    p2.abs() < 1e-9,
+                    "P(vacuum|m2 with one boson) should be 0.0, got {p2}"
+                );
+            }
+            other => panic!("expected two Value results, got {other:?}"),
+        }
     }
 }

@@ -18,7 +18,7 @@ use mathed_core::markers::{
 };
 
 use crate::blocks_view::Blocks;
-use crate::glyphs::GlyphIndex;
+use crate::GlyphIndex;
 
 /// Stack of open cite numbers (`[N]`), earliest-pushed first.
 /// Driven by `Ctrl+<digit>`; `ESC` clears it.
