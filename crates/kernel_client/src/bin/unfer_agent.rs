@@ -40,6 +40,8 @@ use unfer_protocol::{
     PriorSpec, RepairHint, Severity, codes,
 };
 
+use mathed_core::markers::{resolve_segments, scan};
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const VALID_OPS: &[&str] = &[
     "version",
@@ -66,6 +68,8 @@ const VALID_OPS: &[&str] = &[
     "consensus_status",
     "logos_compile",
     "ode_to_hamiltonian",
+    "export_html",
+    "export_tex",
 ];
 
 fn unknown_op_diag(op: &str) -> Diagnostic {
@@ -789,6 +793,28 @@ impl AgentState {
                     ),
                 }
             }
+            "export_html" => {
+                let doc = req.params
+                    .get("doc")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let html = doc_export_html(doc);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({ "html": html }),
+                )
+            }
+            "export_tex" => {
+                let doc = req.params
+                    .get("doc")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tex = doc_export_tex(doc);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({ "tex": tex }),
+                )
+            }
             _ => {
                 AgentResponse::err(&req.id, unknown_op_diag(&req.op))
             }
@@ -822,6 +848,73 @@ fn parse_model_and_param<T: serde::de::DeserializeOwned>(
             bad_json_diag(&format!("invalid '{}': {}", param_name, e))
         })?;
     Ok((model_id, value))
+}
+
+fn doc_export_html(doc_text: &str) -> String {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let mut body = String::new();
+    let mut last_end = 0;
+
+    for seg in &segments {
+        if let Some(span) = &seg.span {
+            if span.start > last_end {
+                body.push_str(&escape_html(&doc_text[last_end..span.start]));
+            }
+            let raw = doc_text[span.clone()].trim();
+            if seg.kind.is_kernel() {
+                body.push_str(&format!(
+                    "<span class=\"math-kernel\">{}</span>",
+                    escape_html(raw)
+                ));
+            } else {
+                body.push_str(&escape_html(raw));
+            }
+            last_end = span.end;
+        }
+    }
+    if last_end < doc_text.len() {
+        body.push_str(&escape_html(&doc_text[last_end..]));
+    }
+
+    format!(
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>mathed export</title>\n<style>\n.math-kernel {{ color: #1a56db; font-family: monospace; }}\n</style>\n</head>\n<body>\n{body}\n</body>\n</html>"
+    )
+}
+
+fn doc_export_tex(doc_text: &str) -> String {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let mut out = String::new();
+    let mut last_end = 0;
+
+    for seg in &segments {
+        if let Some(span) = &seg.span {
+            if span.start > last_end {
+                out.push_str(&doc_text[last_end..span.start]);
+            }
+            let raw = doc_text[span.clone()].trim();
+            if seg.kind.is_kernel() {
+                out.push_str(&format!("${raw}$"));
+            } else {
+                out.push_str(raw);
+            }
+            last_end = span.end;
+        }
+    }
+    if last_end < doc_text.len() {
+        out.push_str(&doc_text[last_end..]);
+    }
+
+    format!(
+        "\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{out}\n\\end{{document}}"
+    )
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn main() {
@@ -1365,5 +1458,63 @@ mod tests {
         let hint = &resp.error.unwrap().hints[0];
         assert!(hint.suggestion.contains("did_create"));
         assert!(hint.suggestion.contains("consensus_status"));
+    }
+
+    #[test]
+    fn export_html_op() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e1",
+            "export_html",
+            serde_json::json!({ "doc": "= Title\n\n#1 a #2 \\model(#1,#2)\n\nSome <text>." }),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let html = resp.result.unwrap()["html"].as_str().unwrap().to_string();
+        assert!(html.contains("<!DOCTYPE html>"), "doctype: {html}");
+        assert!(html.contains("&lt;text&gt;"), "escaped: {html}");
+        assert!(html.contains("math-kernel"), "kernel span: {html}");
+    }
+
+    #[test]
+    fn export_tex_op() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e2",
+            "export_tex",
+            serde_json::json!({ "doc": "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $" }),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let tex = resp.result.unwrap()["tex"].as_str().unwrap().to_string();
+        assert!(tex.contains("\\documentclass{article}"), "preamble: {tex}");
+        assert!(tex.contains("\\begin{document}"), "begin: {tex}");
+        assert!(tex.contains("\\end{document}"), "end: {tex}");
+    }
+
+    #[test]
+    fn export_html_empty_doc() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e3",
+            "export_html",
+            serde_json::json!({ "doc": "" }),
+        ));
+        assert!(resp.ok);
+        let binding = resp.result.unwrap();
+        let html = binding["html"].as_str().unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn export_tex_empty_doc() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e4",
+            "export_tex",
+            serde_json::json!({ "doc": "" }),
+        ));
+        assert!(resp.ok);
+        let binding = resp.result.unwrap();
+        let tex = binding["tex"].as_str().unwrap();
+        assert!(tex.contains("\\documentclass{article}"));
     }
 }

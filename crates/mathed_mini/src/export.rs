@@ -78,6 +78,73 @@ pub fn export_markdown(doc_text: &str) -> String {
         .join("\n")
 }
 
+pub fn export_html(doc_text: &str) -> String {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let mut body = String::new();
+    let mut last_end = 0;
+
+    for seg in &segments {
+        if let Some(span) = &seg.span {
+            if span.start > last_end {
+                body.push_str(&escape_html(&doc_text[last_end..span.start]));
+            }
+            let raw = doc_text[span.clone()].trim();
+            if seg.kind.is_kernel() {
+                body.push_str(&format!(
+                    "<span class=\"math-kernel\">{}</span>",
+                    escape_html(raw)
+                ));
+            } else {
+                body.push_str(&escape_html(raw));
+            }
+            last_end = span.end;
+        }
+    }
+    if last_end < doc_text.len() {
+        body.push_str(&escape_html(&doc_text[last_end..]));
+    }
+
+    format!(
+        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>mathed export</title>\n<style>\n.math-kernel {{ color: #1a56db; font-family: monospace; }}\n</style>\n</head>\n<body>\n{body}\n</body>\n</html>"
+    )
+}
+
+pub fn export_tex(doc_text: &str) -> String {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let mut out = String::new();
+    let mut last_end = 0;
+
+    for seg in &segments {
+        if let Some(span) = &seg.span {
+            if span.start > last_end {
+                out.push_str(&doc_text[last_end..span.start]);
+            }
+            let raw = doc_text[span.clone()].trim();
+            if seg.kind.is_kernel() {
+                out.push_str(&format!("${raw}$"));
+            } else {
+                out.push_str(raw);
+            }
+            last_end = span.end;
+        }
+    }
+    if last_end < doc_text.len() {
+        out.push_str(&doc_text[last_end..]);
+    }
+
+    format!(
+        "\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{out}\n\\end{{document}}"
+    )
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +174,25 @@ mod tests {
         let out = export_markdown(doc);
         assert!(out.contains("Title"), "title: {out}");
         assert!(out.contains("Plain text"), "plain text: {out}");
+    }
+
+    #[test]
+    fn html_export_produces_valid_structure() {
+        let doc = "= Title\n\n#1 a #2 \\model(#1,#2)\n\nSome <text> & more.";
+        let out = export_html(doc);
+        assert!(out.contains("<!DOCTYPE html>"), "doctype: {out}");
+        assert!(out.contains("&lt;text&gt;"), "escaped: {out}");
+        assert!(out.contains("&amp;"), "ampersand escaped: {out}");
+        assert!(out.contains("math-kernel"), "kernel span: {out}");
+    }
+
+    #[test]
+    fn tex_export_wraps_document() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $";
+        let out = export_tex(doc);
+        assert!(out.contains("\\documentclass{article}"), "preamble: {out}");
+        assert!(out.contains("\\begin{document}"), "begin: {out}");
+        assert!(out.contains("\\end{document}"), "end: {out}");
+        assert!(out.contains("$"), "math mode: {out}");
     }
 }

@@ -5365,6 +5365,7 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "logos",
+ "mathed_core",
  "ode_sirk",
  "parking_lot",
  "prob_kernel",
