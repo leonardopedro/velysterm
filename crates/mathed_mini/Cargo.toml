@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 mathed_core = { path = "../mathed_core" }
+mathed_biblio = { path = "../mathed_biblio" }
 typst_imaging = { workspace = true }
 
 # Kernel contract types: the translator pipeline parses translator output

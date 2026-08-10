@@ -5738,6 +5738,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mathed_biblio"
+version = "0.1.0"
+dependencies = [
+ "hayagriva",
+ "mathed_core",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "mathed_core"
 version = "0.1.0"
 dependencies = [
@@ -5758,6 +5767,7 @@ dependencies = [
  "imaging",
  "imaging_vello_cpu",
  "kernel_client",
+ "mathed_biblio",
  "mathed_core",
  "serde_json",
  "softbuffer",

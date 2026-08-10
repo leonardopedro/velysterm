@@ -2,9 +2,10 @@
 //!
 //! A "cite popup" is a translucent, framed box drawn on top of the
 //! cached document layout. It contains the rendered body of a cited
-//! document part (for `\cite(#s, #f)`) or a placeholder showing the
-//! bibliography keys (for `\cite(key1, key2, ...)` — full bibliography
-//! integration is a follow-up).
+//! document part (for `\cite(#s, #f)`) or the resolved bibliography
+//! citation (for `\cite(key1, key2, ...)` — via `mathed_biblio`; the
+//! keys are shown as a placeholder only when no `\bibliography` is
+//! bound).
 //!
 //! The box is purely a render-time overlay: the base document is not
 //! re-laid-out when the popup stack changes. The cache from
@@ -14,6 +15,7 @@
 use mathed_core::markers::{
     ReferenceEntry, ReferenceKind, scan, scan_references,
 };
+use mathed_core::semantics::SemanticIndex;
 use mathed_core::transform::{
     RenderOutput, TransformOptions, to_render_text,
 };
@@ -77,9 +79,15 @@ pub enum PopupBody {
         /// labels spliced, ready for re-rendering as a sub-doc).
         body_markup: String,
     },
-    /// Placeholder for `\cite(key1, key2, ...)`; full integration
-    /// with `mathed_biblio` is a follow-up.
-    Bibliography { keys: Vec<String> },
+    /// Placeholder for `\cite(key1, key2, ...)`; the `rendered` text (from
+    /// `mathed_biblio::resolve_citations`) is preferred when present.
+    Bibliography {
+        keys: Vec<String>,
+        /// The resolved in-text citation (e.g. `(Kwan 2014)`) when the
+        /// document has a `\bibliography` binding and `mathed_biblio` can
+        /// render it; `None` keeps the key placeholder.
+        rendered: Option<String>,
+    },
 }
 
 impl PopupBody {
@@ -88,7 +96,7 @@ impl PopupBody {
             PopupBody::DocumentRef { body_text, .. } => {
                 format!("Document: {}", truncate(body_text, 40))
             }
-            PopupBody::Bibliography { keys } => {
+            PopupBody::Bibliography { keys, .. } => {
                 format!("Bibliography: {}", keys.join(", "))
             }
         }
@@ -142,11 +150,63 @@ pub fn resolve_popup_body(
                 }
             }
             ReferenceKind::Bibliography { keys } => {
-                PopupBody::Bibliography { keys: keys.clone() }
+                let rendered = resolve_bib_rendered(doc_text, &keys);
+                PopupBody::Bibliography {
+                    keys: keys.clone(),
+                    rendered,
+                }
             }
         });
     }
     None
+}
+
+/// Resolve a `\cite(key1, key2, ...)` to its rendered in-text citation via
+/// `mathed_biblio::resolve_citations`. Returns `None` when the document has no
+/// `\bibliography` binding for these keys, or the citation cannot be rendered
+/// (the caller then falls back to the key placeholder).
+fn resolve_bib_rendered(doc_text: &str, keys: &[String]) -> Option<String> {
+    let statements = SemanticIndex::scan_biblio_statements(doc_text);
+    if statements.iter().all(|s| s.kind != mathed_core::markers::PropKind::Bibliography) {
+        return None;
+    }
+    let resolved = mathed_biblio::resolve_citations(&statements);
+    // `scan_references` (the popup's key source) keeps quotes and `bib:` args;
+    // normalize to the clean key set `scan_biblio_statements` produces so the
+    // two agree.
+    let wanted = normalize_cite_keys(keys);
+    for stmt in &statements {
+        if stmt.kind != mathed_core::markers::PropKind::Cite {
+            continue;
+        }
+        if stmt.keys == wanted {
+            if let Some(Ok(text)) = resolved.get(&stmt.span.start) {
+                if !text.is_empty() {
+                    return Some(text.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip quotes and drop named (`name: value`) args from a raw key list, the
+/// same normalization `mathed_core` applies when it builds a `BiblioStatement`.
+fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
+    keys.iter()
+        .filter_map(|k| {
+            let t = k.trim();
+            if t.contains(':') {
+                return None;
+            }
+            let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+                &t[1..t.len() - 1]
+            } else {
+                t
+            };
+            Some(t.to_string())
+        })
+        .collect()
 }
 
 /// Resolve a cite's `[N]` label position from the cached [`DocLayout`].
@@ -191,17 +251,22 @@ pub fn render_popup_body(
         PopupBody::DocumentRef { body_markup, .. } => {
             body_markup.clone()
         }
-        PopupBody::Bibliography { keys } => {
-            // v1: place the keys in a code block so the box has
-            // *something* to show. Full bibliography integration
-            // (resolved entries via mathed_biblio) is the Stage 7
-            // follow-up.
-            let escaped = keys
-                .iter()
-                .map(|k| k.replace('[', "\\[").replace(']', "\\]"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("```\n[{}]\n```", escaped)
+        PopupBody::Bibliography { keys, rendered } => {
+            // Prefer the resolved citation (mathed_biblio); fall back to the
+            // key placeholder when the document has no bibliography binding.
+            match rendered {
+                Some(text) if !text.is_empty() => {
+                    format!("```\n{text}\n```")
+                }
+                _ => {
+                    let escaped = keys
+                        .iter()
+                        .map(|k| k.replace('[', "\\[").replace(']', "\\]"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("```\n[{}]\n```", escaped)
+                }
+            }
         }
     };
     if markup.is_empty() {
@@ -264,17 +329,49 @@ mod tests {
 
     #[test]
     fn resolve_popup_body_bib_ref() {
+        // No `\bibliography` binding → the placeholder is kept, `rendered` is None.
         let doc = "\\cite(authorA89, authorB94)";
         let body =
             resolve_popup_body(doc, 1).expect("cite [1] exists");
         match body {
-            PopupBody::Bibliography { keys } => {
+            PopupBody::Bibliography { keys, rendered } => {
                 assert_eq!(
                     keys,
                     vec![
                         "authorA89".to_string(),
                         "authorB94".to_string()
                     ]
+                );
+                assert!(rendered.is_none(), "no bibliography to resolve against");
+            }
+            _ => panic!("expected Bibliography"),
+        }
+    }
+
+    #[test]
+    fn resolve_popup_body_bib_ref_renders_real_citation() {
+        // A `\bibliography` binding + matching key → the popup body carries the
+        // resolved citation text (mathed_biblio integration), not the placeholder.
+        let doc = "#1 crazy-rich:\n\
+                   \x20   type: Book\n\
+                   \x20   title: Crazy Rich Asians\n\
+                   \x20   author: Kwan, Kevin\n\
+                   \x20   date: 2014\n\
+                   \x20   publisher: Anchor Books\n\
+                   #2 \\bibliography(#1,#2, refs)\n\
+                   #3 x #4 \\cite(#3,#4, \"crazy-rich\", bib: \"refs\")";
+        let body =
+            resolve_popup_body(doc, 1).expect("cite [1] exists");
+        match body {
+            PopupBody::Bibliography { keys, rendered } => {
+                // The popup's `keys` are the raw scan form (quotes + `bib:` arg
+                // retained); the meaningful assertion is that the citation text
+                // resolves through mathed_biblio.
+                assert!(!keys.is_empty());
+                let text = rendered.expect("a real citation is resolved");
+                assert!(
+                    text.contains("Kwan") || text.contains("2014"),
+                    "resolved citation should mention the author or year: {text}"
                 );
             }
             _ => panic!("expected Bibliography"),
@@ -338,6 +435,7 @@ mod tests {
 
         let bib = PopupBody::Bibliography {
             keys: vec!["a".to_string(), "b".to_string()],
+            rendered: None,
         };
         assert_eq!(bib.label(), "Bibliography: a, b");
     }

@@ -220,8 +220,9 @@ box is a render-time overlay.
   `[1]` numbering, so **Ctrl+1 inside the box** opens a
   nested box for the inner cite.
 - For bibliography keys, `\cite(key1, key2)` renders as
-  `[1, 2]` and the popup body shows the keys as a placeholder
-  (full `mathed_biblio` integration is a follow-up).
+  `[1, 2]` and the popup body shows the resolved citation via
+  `mathed_biblio` (or the keys as a placeholder when no
+  `\bibliography` is bound).
 
 ### 6. Run the tests
 

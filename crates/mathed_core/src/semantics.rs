@@ -353,6 +353,72 @@ impl SemanticIndex {
         self.biblio_statements = biblio_statements;
     }
 
+    /// Scan the `\bibliography`/`\cite` statements in `doc_text` directly,
+    /// without the full `SemanticIndex` (per-block render) pipeline. This is
+    /// the lightweight path the CPU frontend (`mathed_mini`) uses to hand
+    /// `BiblioStatement`s to `mathed_biblio::resolve_citations`. `block` is
+    /// always 0 (the citation bridge does not use it).
+    pub fn scan_biblio_statements(doc_text: &str) -> Vec<BiblioStatement> {
+        let scan = crate::markers::scan(doc_text);
+        let segments = crate::markers::resolve_segments(&scan);
+        let mut out = Vec::new();
+        for seg in segments {
+            if !seg.kind.is_biblio() {
+                continue;
+            }
+            let Some(span) = seg.span.clone() else {
+                continue;
+            };
+            let body_text = doc_text[span.clone()].trim().to_string();
+
+            let keys: Vec<String> = seg
+                .extra_args
+                .iter()
+                .filter_map(|arg| {
+                    let Arg::Literal { text, .. } = arg else {
+                        return None;
+                    };
+                    let t = text.trim();
+                    if t.contains(':') {
+                        return None;
+                    }
+                    let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+                        &t[1..t.len() - 1]
+                    } else {
+                        t
+                    };
+                    Some(t.to_string())
+                })
+                .collect();
+            let format = extract_named_string(&seg.extra_args, "format");
+            let style = extract_named_string(&seg.extra_args, "style");
+            let bib_name = match seg.kind {
+                PropKind::Cite => extract_named_string(&seg.extra_args, "bib"),
+                _ => None,
+            };
+            let name = match seg.kind {
+                PropKind::Bibliography => keys.first().cloned(),
+                _ => None,
+            };
+            let keys = match seg.kind {
+                PropKind::Cite => keys,
+                _ => Vec::new(),
+            };
+            out.push(BiblioStatement {
+                kind: seg.kind,
+                block: 0,
+                name,
+                keys,
+                format,
+                style,
+                bib_name,
+                body_text,
+                span,
+            });
+        }
+        out
+    }
+
     pub fn plan_rename(
         index: &Self,
         def_idx: usize,
@@ -737,5 +803,33 @@ mod tests {
         assert_eq!(idx.kernel_statements.len(), 1, "only \\model is a kernel statement");
         assert_eq!(idx.kernel_statements[0].kind, PropKind::Model);
         assert_eq!(idx.biblio_statements.len(), 2);
+    }
+
+    #[test]
+    fn scan_biblio_statements_matches_index_pipeline() {
+        // The lightweight CPU-frontend path must yield the same statements the
+        // full SemanticIndex pipeline collects (it feeds mathed_biblio).
+        let doc = "#1 a #2 \\model(#1,#2)\n\n\
+                   #3 x #4 \\bibliography(#3,#4, refs, format: \"yaml\", style: \"apa\")\n\n\
+                   #5 y #6 \\cite(#5,#6, \"crazy-rich\", bib: \"refs\")";
+        let idx = build_index_for(doc);
+        let scanned = SemanticIndex::scan_biblio_statements(doc);
+        assert_eq!(scanned.len(), idx.biblio_statements.len());
+        assert_eq!(scanned.len(), 2);
+
+        let bib = scanned
+            .iter()
+            .find(|s| s.kind == PropKind::Bibliography)
+            .expect("a bibliography statement");
+        assert_eq!(bib.name.as_deref(), Some("refs"));
+        assert_eq!(bib.format.as_deref(), Some("yaml"));
+        assert_eq!(bib.style.as_deref(), Some("apa"));
+
+        let cite = scanned
+            .iter()
+            .find(|s| s.kind == PropKind::Cite)
+            .expect("a cite statement");
+        assert_eq!(cite.keys, vec!["crazy-rich".to_string()]);
+        assert_eq!(cite.bib_name.as_deref(), Some("refs"));
     }
 }
