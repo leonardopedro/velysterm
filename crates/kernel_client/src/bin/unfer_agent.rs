@@ -70,6 +70,12 @@ const VALID_OPS: &[&str] = &[
     "ode_to_hamiltonian",
     "export_html",
     "export_tex",
+    "cert_set_authority",
+    "cert_mint",
+    "cert_transfer",
+    "cert_burn",
+    "cert_status",
+    "cert_root",
 ];
 
 fn unknown_op_diag(op: &str) -> Diagnostic {
@@ -91,6 +97,46 @@ fn bad_json_diag(msg: &str) -> Diagnostic {
         format!("Invalid JSON: {}", msg),
         Severity::Error,
     )
+}
+
+// ── Plan R: certificate-ledger helpers ────────────────────────────────
+// The `cert_*` ops drive the in-process `ConsensusNode`'s certificate ledger
+// (the same state-transition engine a QuePaxa node applies a `CertificateOp`
+// with). The agent signs each op with the actor's keypair so the node's
+// signature check passes.
+
+fn parse_hex32(s: &str, field: &str) -> Result<[u8; 32], Diagnostic> {
+    let bytes = hex::decode(s).map_err(|e| {
+        bad_json_diag(&format!("{field}: invalid hex: {e}"))
+    })?;
+    bytes.try_into().map_err(|_| {
+        bad_json_diag(&format!("{field}: expected 32 bytes"))
+    })
+}
+
+fn parse_coinref(v: &serde_json::Value) -> Result<unfer_protocol::CoinRef, Diagnostic> {
+    let amount = v.get("amount").and_then(|x| x.as_u64()).ok_or_else(|| {
+        bad_json_diag("coin ref missing 'amount' (u64)")
+    })?;
+    let owner = v.get("owner").and_then(|x| x.as_str()).ok_or_else(|| {
+        bad_json_diag("coin ref missing 'owner' (DID)")
+    })?;
+    let coin_id = match v.get("coin_id").and_then(|x| x.as_str()) {
+        Some(hex_s) => unfer_protocol::CertId(parse_hex32(hex_s, "coin_id")?),
+        None => unfer_protocol::CertId([0u8; 32]),
+    };
+    Ok(unfer_protocol::CoinRef {
+        coin_id,
+        amount,
+        owner: owner.to_string(),
+    })
+}
+
+fn parse_coinrefs(v: &serde_json::Value, field: &str) -> Result<Vec<unfer_protocol::CoinRef>, Diagnostic> {
+    let arr = v.as_array().ok_or_else(|| {
+        bad_json_diag(&format!("{field}: expected an array"))
+    })?;
+    arr.iter().map(parse_coinref).collect()
 }
 
 const EVENT_QUEUE_CAPACITY: usize = 64;
@@ -130,6 +176,56 @@ impl AgentState {
             .get_mut(&model_id)
             .map(|q| q.drain(..).collect())
             .unwrap_or_default()
+    }
+
+    /// A keypair for `did`, creating + storing one on first use (mirrors
+    /// `did_create`). The certificate ops sign with the actor's keypair so the
+    /// node's signature check passes.
+    fn keypair_for(&mut self, did: &str) -> Keypair {
+        if let Some(k) = self.keypairs.get(did) {
+            return k.clone();
+        }
+        let kp = Keypair::generate();
+        self.keypairs.insert(did.to_string(), kp.clone());
+        kp
+    }
+
+    /// Sign + submit + sync a certificate op as `actor`, returning an
+    /// `AgentResponse` with the resulting ledger status.
+    fn submit_cert_op(
+        &mut self,
+        actor: &str,
+        kp: &Keypair,
+        kind: unfer_protocol::CertificateOpKind,
+        id: &str,
+    ) -> AgentResponse {
+        let seq = self.consensus.current_seq() + 1;
+        let mut tx = ConsensusTransaction::CertificateOp(
+            unfer_protocol::CertificateOp {
+                did: actor.to_string(),
+                kind,
+                seq,
+                signature: [0u8; 64],
+            },
+        );
+        unfer_consensus::sign_transaction(&mut tx, kp);
+        match self.consensus.submit(tx) {
+            Ok(_) => match self.consensus.sync() {
+                Ok(_) => {
+                    let certs = self.consensus.certs();
+                    AgentResponse::ok(
+                        id,
+                        serde_json::json!({
+                            "ok": true,
+                            "root": hex::encode(certs.root()),
+                            "total_supply": certs.total_supply(),
+                        }),
+                    )
+                }
+                Err(e) => AgentResponse::err(id, e),
+            },
+            Err(e) => AgentResponse::err(id, e),
+        }
     }
 
     fn handle(&mut self, req: &AgentRequest) -> AgentResponse {
@@ -717,6 +813,131 @@ impl AgentState {
                         "current_seq": self.consensus.current_seq(),
                         "synced": self.consensus.is_synced(),
                     }),
+                )
+            }
+            "cert_set_authority" => {
+                let did = req.params
+                    .get("did")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let authority = if did.is_empty() {
+                    unfer_consensus::MintAuthority::None
+                } else {
+                    unfer_consensus::MintAuthority::Only(did)
+                };
+                self.consensus.set_mint_authority(authority);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({ "ok": true }),
+                )
+            }
+            "cert_mint" => {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
+                    Some(a) => a.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'actor' field"),
+                    ),
+                };
+                let amount = match req.params.get("amount").and_then(|v| v.as_u64()) {
+                    Some(a) => a,
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'amount' (u64) field"),
+                    ),
+                };
+                let owner = match req.params.get("owner").and_then(|v| v.as_str()) {
+                    Some(o) => o.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'owner' field"),
+                    ),
+                };
+                let blinding = match req.params.get("blinding").and_then(|v| v.as_str()) {
+                    Some(b) => match parse_hex32(b, "blinding") {
+                        Ok(x) => x,
+                        Err(e) => return AgentResponse::err(&req.id, e),
+                    },
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'blinding' (hex32) field"),
+                    ),
+                };
+                let source = req.params
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let kp = self.keypair_for(&actor);
+                let kind = unfer_protocol::CertificateOpKind::Mint {
+                    amount,
+                    owner,
+                    blinding,
+                    source,
+                };
+                self.submit_cert_op(&actor, &kp, kind, &req.id)
+            }
+            "cert_transfer" => {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
+                    Some(a) => a.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'actor' field"),
+                    ),
+                };
+                let inputs = match parse_coinrefs(
+                    req.params.get("inputs").unwrap_or(&serde_json::Value::Null),
+                    "inputs",
+                ) {
+                    Ok(i) => i,
+                    Err(e) => return AgentResponse::err(&req.id, e),
+                };
+                let outputs = match parse_coinrefs(
+                    req.params.get("outputs").unwrap_or(&serde_json::Value::Null),
+                    "outputs",
+                ) {
+                    Ok(o) => o,
+                    Err(e) => return AgentResponse::err(&req.id, e),
+                };
+                let kp = self.keypair_for(&actor);
+                let kind = unfer_protocol::CertificateOpKind::Transfer { inputs, outputs };
+                self.submit_cert_op(&actor, &kp, kind, &req.id)
+            }
+            "cert_burn" => {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
+                    Some(a) => a.to_string(),
+                    None => return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("missing 'actor' field"),
+                    ),
+                };
+                let inputs = match parse_coinrefs(
+                    req.params.get("inputs").unwrap_or(&serde_json::Value::Null),
+                    "inputs",
+                ) {
+                    Ok(i) => i,
+                    Err(e) => return AgentResponse::err(&req.id, e),
+                };
+                let kp = self.keypair_for(&actor);
+                let kind = unfer_protocol::CertificateOpKind::Burn { inputs };
+                self.submit_cert_op(&actor, &kp, kind, &req.id)
+            }
+            "cert_status" => {
+                let certs = self.consensus.certs();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "root": hex::encode(certs.root()),
+                        "unspent_count": certs.unspent_count(),
+                        "total_supply": certs.total_supply(),
+                    }),
+                )
+            }
+            "cert_root" => {
+                let root = self.consensus.certs().root();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({ "root": hex::encode(root) }),
                 )
             }
             "logos_compile" => {
@@ -1516,5 +1737,125 @@ mod tests {
         let binding = resp.result.unwrap();
         let tex = binding["tex"].as_str().unwrap();
         assert!(tex.contains("\\documentclass{article}"));
+    }
+
+    #[test]
+    fn cert_ledger_roundtrip_via_ops() {
+        let mut state = AgentState::new();
+        // Real DIDs (verify_transaction requires the op did to encode a 32-byte
+        // pubkey). Pre-seed keypairs so the agent signs each op correctly.
+        let authority = Keypair::generate();
+        let alice = Keypair::generate();
+        let bob = Keypair::generate();
+        state.keypairs.insert(authority.did(), authority.clone());
+        state.keypairs.insert(alice.did(), alice.clone());
+        state.keypairs.insert(bob.did(), bob.clone());
+
+        // Configure the mint authority.
+        let auth = state.handle(&AgentRequest::new(
+            "r1",
+            "cert_set_authority",
+            serde_json::json!({ "did": authority.did() }),
+        ));
+        assert!(auth.ok);
+
+        // Mint 1000 to alice.
+        let mint = state.handle(&AgentRequest::new(
+            "r2",
+            "cert_mint",
+            serde_json::json!({
+                "actor": authority.did(),
+                "amount": 1000,
+                "owner": alice.did(),
+                "blinding": "0101010101010101010101010101010101010101010101010101010101010101",
+                "source": "unfccc:cert:TEST"
+            }),
+        ));
+        assert!(mint.ok, "{:?}", mint.error);
+        assert_eq!(mint.result.unwrap()["total_supply"], 1000);
+
+        let alice_coin = unfer_consensus::certs::commit_coin(
+            1000,
+            &alice.did(),
+            &[1u8; 32],
+        );
+
+        // Transfer the whole thing to bob.
+        let transfer = state.handle(&AgentRequest::new(
+            "r3",
+            "cert_transfer",
+            serde_json::json!({
+                "actor": alice.did(),
+                "inputs": [{
+                    "coin_id": hex::encode(alice_coin.0),
+                    "amount": 1000,
+                    "owner": alice.did()
+                }],
+                "outputs": [{ "amount": 1000, "owner": bob.did() }]
+            }),
+        ));
+        assert!(transfer.ok, "{:?}", transfer.error);
+        assert_eq!(transfer.result.unwrap()["total_supply"], 1000);
+
+        let bob_coin = unfer_consensus::certs::commit_coin(
+            1000,
+            &bob.did(),
+            &[0u8; 32],
+        );
+
+        // Burn bob's certificate.
+        let burn = state.handle(&AgentRequest::new(
+            "r4",
+            "cert_burn",
+            serde_json::json!({
+                "actor": bob.did(),
+                "inputs": [{
+                    "coin_id": hex::encode(bob_coin.0),
+                    "amount": 1000,
+                    "owner": bob.did()
+                }]
+            }),
+        ));
+        assert!(burn.ok, "{:?}", burn.error);
+        assert_eq!(burn.result.unwrap()["total_supply"], 0);
+
+        // Status reflects a deterministic committed root.
+        let status = state.handle(&AgentRequest::new(
+            "r5",
+            "cert_status",
+            serde_json::json!({}),
+        ));
+        assert!(status.ok);
+        let s = status.result.unwrap();
+        assert_eq!(s["unspent_count"], 0);
+        assert_eq!(s["total_supply"], 0);
+        assert_eq!(s["root"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn cert_mint_refuses_non_authority() {
+        let mut state = AgentState::new();
+        let authority = Keypair::generate();
+        let alice = Keypair::generate();
+        let nobody = Keypair::generate();
+        state.keypairs.insert(authority.did(), authority.clone());
+        state.keypairs.insert(nobody.did(), nobody.clone());
+        state.handle(&AgentRequest::new(
+            "n1",
+            "cert_set_authority",
+            serde_json::json!({ "did": authority.did() }),
+        ));
+        let mint = state.handle(&AgentRequest::new(
+            "n2",
+            "cert_mint",
+            serde_json::json!({
+                "actor": nobody.did(),
+                "amount": 100,
+                "owner": alice.did(),
+                "blinding": "0202020202020202020202020202020202020202020202020202020202020202"
+            }),
+        ));
+        assert!(!mint.ok);
+        assert_eq!(mint.error.unwrap().code, Code::CERT_MINT_NOT_AUTHORIZED);
     }
 }
