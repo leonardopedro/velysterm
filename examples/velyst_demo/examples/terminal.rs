@@ -32,7 +32,10 @@ fn main() {
         ))
         .register_typst_func::<TerminalFunc>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (update_terminal_render, send_button_input))
+        .add_systems(
+            Update,
+            (update_terminal_render, send_button_input),
+        )
         .run();
 }
 
@@ -83,21 +86,20 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .expect("failed to open pty");
 
     let cmd = CommandBuilder::new("bash");
-    let _child = pair
-        .slave
-        .spawn_command(cmd)
-        .expect("failed to spawn bash");
+    let _child =
+        pair.slave.spawn_command(cmd).expect("failed to spawn bash");
 
-    let writer = pair
-        .master
-        .take_writer()
-        .expect("failed to take writer");
+    let writer =
+        pair.master.take_writer().expect("failed to take writer");
     let reader = pair
         .master
         .try_clone_reader()
         .expect("failed to clone reader");
 
-    let dims = TermSize { cols: 120, rows: 24 };
+    let dims = TermSize {
+        cols: 120,
+        rows: 24,
+    };
     let term = Term::new(Config::default(), &dims, DummyListener);
     let term = Arc::new(Mutex::new(term));
     let writer = Arc::new(Mutex::new(writer));
@@ -116,10 +118,8 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                     {
                         let mut term_lock =
                             term_clone.lock().unwrap();
-                        processor.advance(
-                            &mut *term_lock,
-                            &buffer[..n],
-                        );
+                        processor
+                            .advance(&mut *term_lock, &buffer[..n]);
                     }
                     {
                         let mut p = pending_clone.lock().unwrap();
@@ -134,7 +134,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Welcome the shell so the user sees something on first render.
     {
         let mut w = writer.lock().unwrap();
-        let _ = w.write_all(b"echo Welcome to the simplified velyst terminal.\n");
+        let _ = w.write_all(
+            b"echo Welcome to the simplified velyst terminal.\n",
+        );
         let _ = w.flush();
     }
 
@@ -226,14 +228,15 @@ fn update_terminal_render(
     for row_idx in 0..grid.screen_lines() {
         let line_idx = alacritty_terminal::index::Line(
             -(grid.history_size() as i32)
-                + (row_idx as i32
-                    + grid.total_lines() as i32
+                + (row_idx as i32 + grid.total_lines() as i32
                     - grid.screen_lines() as i32),
         );
         let row = &grid[line_idx];
         for col in 0..grid.columns() {
             let cell = &row[alacritty_terminal::index::Column(col)];
-            if cell.c == '\0' || (cell.c.is_control() && cell.c != '\n') {
+            if cell.c == '\0'
+                || (cell.c.is_control() && cell.c != '\n')
+            {
                 plain.push(' ');
             } else {
                 plain.push(cell.c);

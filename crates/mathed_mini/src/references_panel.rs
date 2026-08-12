@@ -132,9 +132,10 @@ pub fn render_entry_body(
     let scan = scan(body_text);
     let segments = mathed_core::markers::resolve_segments(&scan);
     let refs = scan_references(&scan);
-    let mut opts =
-        mathed_core::transform::TransformOptions::default();
-    opts.references = refs;
+    let opts = mathed_core::transform::TransformOptions {
+        references: refs,
+        ..Default::default()
+    };
     let render = mathed_core::transform::to_render_text(
         body_text, &scan, &segments, &opts,
     );
@@ -212,12 +213,11 @@ pub fn draw_references_panel(
         if entry.body_image.is_none() {
             let body_text =
                 doc_text.get(entry.core.segment_range.clone());
-            if let Some(body_text) = body_text {
-                if let Ok(img) =
+            if let Some(body_text) = body_text
+                && let Ok(img) =
                     render_entry_body(body_text, BODY_WIDTH_PT)
-                {
-                    entry.body_image = Some(img);
-                }
+            {
+                entry.body_image = Some(img);
             }
         }
     }
@@ -343,6 +343,7 @@ pub fn draw_references_panel(
     y.saturating_sub(panel_top)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_band(
     buffer: &mut [u32],
     win_w: usize,
@@ -371,6 +372,7 @@ fn fill_band(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_frame(
     buffer: &mut [u32],
     win_w: usize,

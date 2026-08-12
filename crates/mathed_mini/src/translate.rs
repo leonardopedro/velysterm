@@ -222,6 +222,54 @@ mod tests {
     }
 
     #[test]
+    fn builtin_translator_round_trips_through_term_spec() {
+        // Compile-time contract for the builtin JSON keys: the emitted array
+        // must parse into the real `unfer_protocol::TermSpec`/`OpSpec`
+        // structs. Any key/level/kind drift in builtin_translator.typ now
+        // fails this test, not a downstream UK-1003.
+        use unfer_protocol::{Level, OpKind, OpSpec, TermSpec};
+        let mut t = Translator::new();
+        let out =
+            t.run_builtin("ignored").expect("builtin translator");
+        let terms: Vec<TermSpec> = serde_json::from_str(&out)
+            .expect("builtin output is TermSpec[]");
+        assert_eq!(terms.len(), 1);
+        let term = &terms[0];
+        assert_eq!(term.coeff_re, 1.0);
+        assert_eq!(term.coeff_im, 0.0);
+        assert_eq!(
+            term.ops,
+            vec![
+                OpSpec::new(OpKind::Create, Level::InnerBoson, 0),
+                OpSpec::new(OpKind::Annihilate, Level::InnerBoson, 0),
+            ],
+            "builtin_translator.typ must emit a mode-0 number operator"
+        );
+    }
+
+    #[test]
+    fn builtin_event_translator_round_trips_through_event_predicate()
+    {
+        // Same contract for builtin_event_translator.typ: its `kind: vacuum`
+        // tag must map onto `unfer_protocol::EventPredicate::Vacuum` via the
+        // real serde schema (tag = "kind", rename_all = "snake_case").
+        use unfer_protocol::EventPredicate;
+        let mut t = Translator::new();
+        let out = t
+            .run(BUILTIN_EVENT_TRANSLATOR, "ignored")
+            .expect("builtin event");
+        let pred: EventPredicate = serde_json::from_str(&out)
+            .expect("builtin output is an EventPredicate");
+        assert_eq!(pred, EventPredicate::Vacuum);
+        // Re-serialize through the schema and confirm the tag survives.
+        let re = serde_json::to_string(&pred).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EventPredicate>(&re).unwrap(),
+            pred
+        );
+    }
+
+    #[test]
     fn translate_eval_error() {
         let mut t = Translator::new();
         // `#let` with no body is a Typst syntax error.

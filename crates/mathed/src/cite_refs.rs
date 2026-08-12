@@ -17,8 +17,8 @@ use mathed_core::markers::{
     references_for_cursor, scan, scan_references,
 };
 
-use crate::blocks_view::Blocks;
 use crate::GlyphIndex;
+use crate::blocks_view::Blocks;
 
 /// Stack of open cite numbers (`[N]`), earliest-pushed first.
 /// Driven by `Ctrl+<digit>`; `ESC` clears it.
@@ -43,14 +43,18 @@ pub struct CiteRow {
 
 /// Build the rows for an open cite popup stack from the document text.
 /// Returns `None` when the stack is empty or no cite resolves.
-pub fn cite_popup_rows(doc_text: &str, stack: &[u32]) -> Option<Vec<CiteRow>> {
+pub fn cite_popup_rows(
+    doc_text: &str,
+    stack: &[u32],
+) -> Option<Vec<CiteRow>> {
     if stack.is_empty() {
         return None;
     }
     let refs = scan_references(&scan(doc_text));
     let mut rows = Vec::new();
     for &n in stack {
-        let entry = refs.iter().find(|e| e.numbers.contains(&(n as u64)))?;
+        let entry =
+            refs.iter().find(|e| e.numbers.contains(&(n as u64)))?;
         rows.push(cite_row_for(entry, doc_text));
     }
     Some(rows)
@@ -59,18 +63,20 @@ pub fn cite_popup_rows(doc_text: &str, stack: &[u32]) -> Option<Vec<CiteRow>> {
 fn cite_row_for(entry: &ReferenceEntry, doc_text: &str) -> CiteRow {
     let label = cite_label_text(entry);
     let detail = match &entry.kind {
-        mathed_core::markers::ReferenceKind::DocumentRef { start_id, end_id, body } => {
-            match body {
-                Some(r) => doc_text[r.clone()].trim().to_string(),
-                None => format!(
-                    "(dangling cite: {start_id}..{end_id} — \
+        mathed_core::markers::ReferenceKind::DocumentRef {
+            start_id,
+            end_id,
+            body,
+        } => match body {
+            Some(r) => doc_text[r.clone()].trim().to_string(),
+            None => format!(
+                "(dangling cite: {start_id}..{end_id} — \
                      one of the markers is missing or out of order)"
-                ),
-            }
-        }
-        mathed_core::markers::ReferenceKind::Bibliography { keys } => {
-            keys.join(", ")
-        }
+            ),
+        },
+        mathed_core::markers::ReferenceKind::Bibliography {
+            keys,
+        } => keys.join(", "),
     };
     CiteRow { label, detail }
 }
@@ -90,7 +96,8 @@ pub fn references_panel_rows(
     }
     let mut rows = Vec::new();
     for e in &entries {
-        let body = doc_text[e.segment_range.clone()].trim().to_string();
+        let body =
+            doc_text[e.segment_range.clone()].trim().to_string();
         rows.push(CiteRow {
             label: e.tag.clone(),
             detail: body,
@@ -110,7 +117,10 @@ pub fn sync_cite_refs_ui(
     state: Res<crate::EditorState>,
     blocks: Res<Blocks>,
     block_q: Query<(&ComputedNode, &GlobalTransform, &GlyphIndex)>,
-    root_q: Query<(&ComputedNode, &GlobalTransform), With<crate::PaddedRoot>>,
+    root_q: Query<
+        (&ComputedNode, &GlobalTransform),
+        With<crate::PaddedRoot>,
+    >,
     roots: Query<Entity, With<CiteRefsRoot>>,
     windows: Query<&Window>,
     ime: Res<crate::ImePreedit>,
@@ -161,8 +171,11 @@ pub fn sync_cite_refs_ui(
 
     // References panel (anchored at the screen bottom).
     if panel_open.0 {
-        if let Some(rows) = references_panel_rows(doc_text, state.cursor) {
-            let header = format!("References at cursor ({})", rows.len());
+        if let Some(rows) =
+            references_panel_rows(doc_text, state.cursor)
+        {
+            let header =
+                format!("References at cursor ({})", rows.len());
             let panel_w = (win_w * 0.5).min(400.0);
             let panel_h = (rows.len() as f32 + 1.0) * 22.0 + 8.0;
             spawn_panel(
@@ -281,7 +294,8 @@ mod tests {
     #[test]
     fn cite_popup_rows_doc_ref() {
         let doc = "#1 a #2 \\cite(#1,#2)";
-        let rows = cite_popup_rows(doc, &[1]).expect("cite [1] exists");
+        let rows =
+            cite_popup_rows(doc, &[1]).expect("cite [1] exists");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "[1]");
         assert_eq!(rows[0].detail, "a");
@@ -291,7 +305,8 @@ mod tests {
     fn cite_popup_rows_bib() {
         // A bib-key cite with two keys gets two numbers: [1, 2].
         let doc = "\\cite(authorA89, authorB94)";
-        let rows = cite_popup_rows(doc, &[1]).expect("cite [1] exists");
+        let rows =
+            cite_popup_rows(doc, &[1]).expect("cite [1] exists");
         assert_eq!(rows[0].label, "[1, 2]");
         assert_eq!(rows[0].detail, "authorA89, authorB94");
     }
@@ -308,8 +323,8 @@ mod tests {
         // A statement segment `\bold(#1,#2)` with body ` hello `;
         // the caret inside the body (byte 7) should find the segment.
         let doc = "#1 hello #2 \\bold(#1,#2) world";
-        let rows =
-            references_panel_rows(doc, 7).expect("a reference at cursor");
+        let rows = references_panel_rows(doc, 7)
+            .expect("a reference at cursor");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "hello");
     }

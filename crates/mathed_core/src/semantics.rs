@@ -297,7 +297,8 @@ impl SemanticIndex {
                 None => continue,
             };
             let body_text = doc_text[span.clone()].trim().to_string();
-            let block = find_block_for_doc_pos(per_block_renders, span.start);
+            let block =
+                find_block_for_doc_pos(per_block_renders, span.start);
 
             let keys: Vec<String> = seg
                 .extra_args
@@ -310,7 +311,10 @@ impl SemanticIndex {
                     if t.contains(':') {
                         return None;
                     }
-                    let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+                    let t = if t.len() >= 2
+                        && t.starts_with('"')
+                        && t.ends_with('"')
+                    {
                         &t[1..t.len() - 1]
                     } else {
                         t
@@ -318,10 +322,14 @@ impl SemanticIndex {
                     Some(t.to_string())
                 })
                 .collect();
-            let format = extract_named_string(&seg.extra_args, "format");
-            let style = extract_named_string(&seg.extra_args, "style");
+            let format =
+                extract_named_string(&seg.extra_args, "format");
+            let style =
+                extract_named_string(&seg.extra_args, "style");
             let bib_name = match seg.kind {
-                PropKind::Cite => extract_named_string(&seg.extra_args, "bib"),
+                PropKind::Cite => {
+                    extract_named_string(&seg.extra_args, "bib")
+                }
                 _ => None,
             };
             let name = match seg.kind {
@@ -358,7 +366,9 @@ impl SemanticIndex {
     /// the lightweight path the CPU frontend (`mathed_mini`) uses to hand
     /// `BiblioStatement`s to `mathed_biblio::resolve_citations`. `block` is
     /// always 0 (the citation bridge does not use it).
-    pub fn scan_biblio_statements(doc_text: &str) -> Vec<BiblioStatement> {
+    pub fn scan_biblio_statements(
+        doc_text: &str,
+    ) -> Vec<BiblioStatement> {
         let scan = crate::markers::scan(doc_text);
         let segments = crate::markers::resolve_segments(&scan);
         let mut out = Vec::new();
@@ -382,7 +392,10 @@ impl SemanticIndex {
                     if t.contains(':') {
                         return None;
                     }
-                    let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+                    let t = if t.len() >= 2
+                        && t.starts_with('"')
+                        && t.ends_with('"')
+                    {
                         &t[1..t.len() - 1]
                     } else {
                         t
@@ -390,10 +403,14 @@ impl SemanticIndex {
                     Some(t.to_string())
                 })
                 .collect();
-            let format = extract_named_string(&seg.extra_args, "format");
-            let style = extract_named_string(&seg.extra_args, "style");
+            let format =
+                extract_named_string(&seg.extra_args, "format");
+            let style =
+                extract_named_string(&seg.extra_args, "style");
             let bib_name = match seg.kind {
-                PropKind::Cite => extract_named_string(&seg.extra_args, "bib"),
+                PropKind::Cite => {
+                    extract_named_string(&seg.extra_args, "bib")
+                }
                 _ => None,
             };
             let name = match seg.kind {
@@ -778,7 +795,10 @@ mod tests {
         assert_eq!(b.kind, PropKind::Bibliography);
         assert_eq!(b.name.as_deref(), Some("refs"));
         assert_eq!(b.format.as_deref(), Some("yaml"));
-        assert!(b.keys.is_empty(), "Bibliography statements carry no cite keys");
+        assert!(
+            b.keys.is_empty(),
+            "Bibliography statements carry no cite keys"
+        );
     }
 
     #[test]
@@ -788,10 +808,16 @@ mod tests {
         assert_eq!(idx.biblio_statements.len(), 1);
         let c = &idx.biblio_statements[0];
         assert_eq!(c.kind, PropKind::Cite);
-        assert_eq!(c.keys, vec!["crazy-rich".to_string(), "other-book".to_string()]);
+        assert_eq!(
+            c.keys,
+            vec!["crazy-rich".to_string(), "other-book".to_string()]
+        );
         assert_eq!(c.bib_name.as_deref(), Some("refs"));
         assert_eq!(c.style.as_deref(), Some("apa"));
-        assert!(c.name.is_none(), "Cite statements carry no bibliography label");
+        assert!(
+            c.name.is_none(),
+            "Cite statements carry no bibliography label"
+        );
     }
 
     #[test]
@@ -800,7 +826,11 @@ mod tests {
                    #3 x #4 \\bibliography(#3,#4, refs)\n\n\
                    #5 y #6 \\cite(#5,#6, \"crazy-rich\")";
         let idx = build_index_for(doc);
-        assert_eq!(idx.kernel_statements.len(), 1, "only \\model is a kernel statement");
+        assert_eq!(
+            idx.kernel_statements.len(),
+            1,
+            "only \\model is a kernel statement"
+        );
         assert_eq!(idx.kernel_statements[0].kind, PropKind::Model);
         assert_eq!(idx.biblio_statements.len(), 2);
     }

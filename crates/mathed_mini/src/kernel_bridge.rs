@@ -108,9 +108,9 @@ impl KernelBridge {
                     KernelResult::Value(p) => format!(
                         " #text(rgb(\"#138000\"))[\\= {p:.4}]"
                     ),
-                    KernelResult::StringValue(s) => format!(
-                        " #text(rgb(\"#138000\"))[{s}]"
-                    ),
+                    KernelResult::StringValue(s) => {
+                        format!(" #text(rgb(\"#138000\"))[{s}]")
+                    }
                     KernelResult::Error { code_name, .. } => format!(
                         " #text(rgb(\"#c00000\"))[ {code_name}]"
                     ),
@@ -407,11 +407,13 @@ impl KernelBridge {
                         self.translator_errors.remove(&off);
                     }
                     if let Some(cond_json) = &stmt.condition_event {
-                        self.client.submit(KernelRequest::Condition {
-                            model_id: model.span.start as u64,
-                            block_id: stmt.span.start as u64,
-                            event_json: cond_json.clone(),
-                        });
+                        self.client.submit(
+                            KernelRequest::Condition {
+                                model_id: model.span.start as u64,
+                                block_id: stmt.span.start as u64,
+                                event_json: cond_json.clone(),
+                            },
+                        );
                     }
                     self.client.submit(KernelRequest::Probability {
                         model_id: model.span.start as u64,
@@ -466,8 +468,10 @@ impl KernelBridge {
                 // A model session was (re)defined: no displayed result.
                 BlockResponse::Success(_) => {}
                 BlockResponse::StringValue(id, s) => {
-                    self.results
-                        .insert(id as usize, KernelResult::StringValue(s));
+                    self.results.insert(
+                        id as usize,
+                        KernelResult::StringValue(s),
+                    );
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
@@ -1228,7 +1232,9 @@ mod tests {
     fn models_overview_lists_two_models() {
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n#3 b #4 \\model(#3,#4, m2)";
         let bridge = KernelBridge::new();
-        let overview = bridge.models_overview(doc).expect("overview for 2 models");
+        let overview = bridge
+            .models_overview(doc)
+            .expect("overview for 2 models");
         assert!(overview.contains("m1"), "overview: {overview}");
         assert!(overview.contains("m2"), "overview: {overview}");
     }
@@ -1275,7 +1281,10 @@ mod tests {
         let r1 = wait_for(&mut bridge, key1, Duration::from_secs(15));
         let r2 = wait_for(&mut bridge, key2, Duration::from_secs(15));
         match (r1, r2) {
-            (Some(KernelResult::Value(p1)), Some(KernelResult::Value(p2))) => {
+            (
+                Some(KernelResult::Value(p1)),
+                Some(KernelResult::Value(p2)),
+            ) => {
                 assert!(
                     (p1 - 1.0).abs() < 1e-9,
                     "P(vacuum|m1) should be 1.0, got {p1}"
@@ -1285,7 +1294,9 @@ mod tests {
                     "P(vacuum|m2 with one boson) should be 0.0, got {p2}"
                 );
             }
-            other => panic!("expected two Value results, got {other:?}"),
+            other => {
+                panic!("expected two Value results, got {other:?}")
+            }
         }
     }
 

@@ -36,7 +36,10 @@ pub enum EditorCmd {
     InsertTab,
     Backspace,
     DeleteForward,
-    Move { motion: Motion, extend: bool },
+    Move {
+        motion: Motion,
+        extend: bool,
+    },
     Undo,
     Redo,
     Cut,
@@ -202,7 +205,9 @@ pub fn keymap(
                         return Some(EditorCmd::ReferencesPanel);
                     }
                     if (1..=9).contains(&n) {
-                        return Some(EditorCmd::CitePopup(Some(n as u8)));
+                        return Some(EditorCmd::CitePopup(Some(
+                            n as u8,
+                        )));
                     }
                 }
             }

@@ -473,7 +473,8 @@ fn find_text_index_in_frame(
                             let span = glyph.span.0;
                             if let Some(id) = span.id() {
                                 if let Ok(source) = world.source(id) {
-                                    if let Some(node) = source.find(span)
+                                    if let Some(node) =
+                                        source.find(span)
                                     {
                                         let index = node
                                             .range()
@@ -511,10 +512,8 @@ fn find_text_index_in_frame(
                 }
             }
             FrameItem::Group(group) => {
-                let offset = Vec2::new(
-                    p.x.to_pt() as f32,
-                    p.y.to_pt() as f32,
-                );
+                let offset =
+                    Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
                 if let Some((found_index, math_range)) =
                     find_text_index_in_frame(
                         &group.frame,
@@ -558,10 +557,9 @@ fn get_glyph_position_at_byte_index(
                 FrameItem::Text(text) => {
                     let mut x = 0.0;
                     for glyph in &text.glyphs {
-                        let advance = glyph
-                            .x_advance
-                            .at(text.size)
-                            .to_pt() as f32;
+                        let advance =
+                            glyph.x_advance.at(text.size).to_pt()
+                                as f32;
                         all_glyphs.push((
                             item_pos + Vec2::new(x, 0.0),
                             text.size.to_pt() as f32,

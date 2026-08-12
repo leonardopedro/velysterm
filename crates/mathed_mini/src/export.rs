@@ -71,9 +71,10 @@ pub fn export_markdown(doc_text: &str) -> String {
         out.push_str(&doc_text[last_end..]);
     }
 
-    out
-        .lines()
-        .filter(|l| !l.trim().starts_with('#') || l.trim().starts_with("# "))
+    out.lines()
+        .filter(|l| {
+            !l.trim().starts_with('#') || l.trim().starts_with("# ")
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -87,7 +88,9 @@ pub fn export_html(doc_text: &str) -> String {
     for seg in &segments {
         if let Some(span) = &seg.span {
             if span.start > last_end {
-                body.push_str(&escape_html(&doc_text[last_end..span.start]));
+                body.push_str(&escape_html(
+                    &doc_text[last_end..span.start],
+                ));
             }
             let raw = doc_text[span.clone()].trim();
             if seg.kind.is_kernel() {
@@ -165,7 +168,11 @@ mod tests {
             serde_json::from_str(&out).expect("valid JSON");
         assert!(parsed.get("kernel_statements").is_some());
         let stmts = parsed["kernel_statements"].as_array().unwrap();
-        assert!(stmts.len() >= 2, "expected 2+ statements, got {}", stmts.len());
+        assert!(
+            stmts.len() >= 2,
+            "expected 2+ statements, got {}",
+            stmts.len()
+        );
     }
 
     #[test]
@@ -188,9 +195,13 @@ mod tests {
 
     #[test]
     fn tex_export_wraps_document() {
-        let doc = "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $";
+        let doc =
+            "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $";
         let out = export_tex(doc);
-        assert!(out.contains("\\documentclass{article}"), "preamble: {out}");
+        assert!(
+            out.contains("\\documentclass{article}"),
+            "preamble: {out}"
+        );
         assert!(out.contains("\\begin{document}"), "begin: {out}");
         assert!(out.contains("\\end{document}"), "end: {out}");
         assert!(out.contains("$"), "math mode: {out}");

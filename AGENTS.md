@@ -13,13 +13,14 @@ codes, typed repair hints.
   - `worker.rs` — `KernelClient`: one worker thread + mpsc channels so kernel
     solves never block the frame loop. Owns `HashMap<u64, Session>` keyed by
     model-block id with spec-hash caching.
-  - `parse.rs` — `parse_model` (builtin `name(k: v)` / `latex"…"`) and
-    `parse_event` (`n(mode)==k`, `occupied(mode)`, `vacuum`, `& | !`). Parse
-    errors carry UK-1002/1003 with `ReplaceValue` hints.
   - `bin/unfer_agent.rs` — NDJSON request/response loop (AI-agent interface).
-    Ops: `version, create_model, set_prior, evolve, condition, probability,
-    snapshot, list_codes`. Every failure carries a `Diagnostic` with hints;
-    unknown op → UK-1001 + `ReplaceValue` listing valid ops.
+    Model/event specs arrive as JSON and are parsed with
+    `serde_json::from_str::<ModelSpec>` / `EventPredicate` from
+    `unfer_protocol`; parse errors carry UK-1002/1003 with `ReplaceValue`
+    hints. Ops come from `unfer_protocol::ops::AGENT_OPS` (32 ops across the
+    session / did / content / consensus / cert / logos-ode / export
+    namespaces). Every failure carries a `Diagnostic` with hints; unknown op
+    → UK-1001 + `ReplaceValue` listing valid ops.
 - `crates/mathed_core/` — Loro doc model. `markers.rs` has the `PropKind` enum
   (`Model, Prior, Solver, Event, Prob` are kernel-bearing; `Bibliography, Cite`
   are biblio-bearing); `semantics.rs build_index` collects `KernelStatement`s

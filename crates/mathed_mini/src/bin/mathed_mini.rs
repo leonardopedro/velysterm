@@ -17,39 +17,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          #6 \\translator(#5,#6, name: \"ev\")\n\n\
          #3 vacuum #4 \\prob(#3,#4, translator: \"ev\")\n";
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
+    if let Some(flag) = args.get(1) {
+        let rest = &args[2..];
+        match flag.as_str() {
             "--export-typst" => {
-                i += 1;
-                let path = args.get(i).ok_or("--export-typst requires a file path")?;
+                let path = rest
+                    .first()
+                    .ok_or("--export-typst requires a file path")?;
                 let out = mathed_mini::export::export_typst(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported Typst to {path}");
                 return Ok(());
             }
             "--export-json" => {
-                i += 1;
-                let path = args.get(i).ok_or("--export-json requires a file path")?;
+                let path = rest
+                    .first()
+                    .ok_or("--export-json requires a file path")?;
                 let out = mathed_mini::export::export_json(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported JSON to {path}");
                 return Ok(());
             }
             "--export-md" => {
-                i += 1;
-                let path = args.get(i).ok_or("--export-md requires a file path")?;
-                let out = mathed_mini::export::export_markdown(initial);
+                let path = rest
+                    .first()
+                    .ok_or("--export-md requires a file path")?;
+                let out =
+                    mathed_mini::export::export_markdown(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported Markdown to {path}");
                 return Ok(());
             }
             _ => {
-                eprintln!("Unknown option: {}", args[i]);
+                eprintln!("Unknown option: {}", args[1]);
                 return Ok(());
             }
         }
-        i += 1;
     }
 
     mathed_mini::app::run(initial)

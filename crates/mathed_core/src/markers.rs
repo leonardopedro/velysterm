@@ -410,7 +410,7 @@ pub fn scan_references(scan: &MarkerScan) -> Vec<ReferenceEntry> {
                     let e_m =
                         scan.markers.iter().find(|m| &m.id == e)?;
                     (s_m.range.end <= e_m.range.start)
-                        .then(|| s_m.range.end..e_m.range.start)
+                        .then_some(s_m.range.end..e_m.range.start)
                 })();
                 ReferenceKind::DocumentRef {
                     start_id: s.clone(),
@@ -526,9 +526,10 @@ pub fn references_for_cursor(
             let body_scan = scan(body);
             let body_segs = resolve_segments(&body_scan);
             let body_refs = scan_references(&body_scan);
-            let mut opts =
-                crate::transform::TransformOptions::default();
-            opts.references = body_refs;
+            let opts = crate::transform::TransformOptions {
+                references: body_refs,
+                ..Default::default()
+            };
             let body_rendered = crate::transform::to_render_text(
                 body, &body_scan, &body_segs, &opts,
             )
@@ -772,8 +773,11 @@ mod tests {
         // Markers already using the words for 1 and 3 (built from
         // `auto_marker_id` itself, so this doesn't hardcode RFC 1751
         // table entries).
-        let text =
-            format!("#{} a #{} b", auto_marker_id(1), auto_marker_id(3));
+        let text = format!(
+            "#{} a #{} b",
+            auto_marker_id(1),
+            auto_marker_id(3)
+        );
         let s = scan(&text);
         assert_eq!(lowest_free_marker_numbers(&s, 3), vec![2, 4, 5]);
         assert_eq!(
@@ -846,10 +850,7 @@ mod tests {
             } => {
                 assert_eq!(start_id, "1");
                 assert_eq!(end_id, "2");
-                assert_eq!(
-                    body.as_ref().map(|r| r.clone()),
-                    Some(2..5)
-                );
+                assert_eq!(body.clone(), Some(2..5));
             }
             _ => panic!("expected DocumentRef"),
         }

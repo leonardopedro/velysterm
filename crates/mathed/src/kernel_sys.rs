@@ -126,7 +126,7 @@ fn dirty_prob_blocks(
 #[cfg(test)]
 mod tests {
     use mathed_core::markers::{resolve_segments, scan};
-    use mathed_core::transform::{to_render_text, TransformOptions};
+    use mathed_core::transform::{TransformOptions, to_render_text};
     use std::time::{Duration, Instant};
 
     /// Stage C10 headless smoke: the full kernel path — document →

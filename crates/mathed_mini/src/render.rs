@@ -11,8 +11,6 @@ use mathed_core::transform::{
 use typst::layout::{Abs, Axes, Frame, Region, Size};
 
 use crate::world::MiniWorld;
-use mathed_core::blocks::Block;
-use mathed_core::markers::{MarkerScan, Segment};
 
 /// Default page width in points for the minimal editor.
 pub const DEFAULT_WIDTH_PT: f64 = 600.0;
@@ -290,7 +288,12 @@ pub fn layout_block(
     );
     let image = rasterize(&frame)?;
     let (width, height) = (image.width, image.height);
-    Ok(DocLayout { image, glyphs, width, height })
+    Ok(DocLayout {
+        image,
+        glyphs,
+        width,
+        height,
+    })
 }
 
 /// Lay out the results-panel footer markup as its own `DocLayout` (no
@@ -367,6 +370,9 @@ pub fn render_doc(
 
 #[cfg(test)]
 mod tests {
+    // clamp_reveal_to_block cases pass single-element `&[Range<usize>]`
+    // slices; clippy's suggestion would change them into `Vec<usize>`.
+    #![allow(clippy::single_range_in_vec_init)]
     use super::*;
 
     #[test]
@@ -449,7 +455,8 @@ mod tests {
             .layout(&content_without, region)
             .expect("layout");
         assert!(
-            frame_with.size().y.to_pt() > frame_without.size().y.to_pt(),
+            frame_with.size().y.to_pt()
+                > frame_without.size().y.to_pt(),
             "THEME_PRELUDE must reserve more vertical room than the \
              baseline-only default, or the last line's descenders \
              will clip again"
@@ -510,7 +517,8 @@ mod tests {
         // of its neighbor.
         let to = layout_doc("To", 400.0).expect("layout");
         let ta = layout_doc("Ta", 400.0).expect("layout");
-        let t_advance = |layout: &DocLayout| layout.glyphs.entries[0].advance;
+        let t_advance =
+            |layout: &DocLayout| layout.glyphs.entries[0].advance;
         assert_eq!(
             t_advance(&to),
             t_advance(&ta),
@@ -617,8 +625,9 @@ mod tests {
             reveal: std::iter::once(touch..touch).collect(),
             ..Default::default()
         };
-        layout_doc_with(text, 300.0, &opts)
-            .expect("layout must succeed with the caret inside $x_2$");
+        layout_doc_with(text, 300.0, &opts).expect(
+            "layout must succeed with the caret inside $x_2$",
+        );
     }
 
     #[test]
@@ -672,8 +681,9 @@ mod tests {
         // reveal span must fall back to the statement's own range.
         let doc = "\\cite(authorA89, authorB94)";
         let inside = doc.find("authorA89").unwrap();
-        let span = active_reveal_span(doc, inside)
-            .expect("bib-key cite statement should still be a reveal span");
+        let span = active_reveal_span(doc, inside).expect(
+            "bib-key cite statement should still be a reveal span",
+        );
         assert_eq!(span, 0..doc.len());
     }
 
@@ -779,7 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn caret_at_a_soft_wrap_point_has_nonzero_width_and_is_hit_testable() {
+    fn caret_at_a_soft_wrap_point_has_nonzero_width_and_is_hit_testable()
+     {
         // Typst collapses the trailing space that causes a soft wrap
         // to zero advance (correct — no visible width at the end of a
         // line). Without a fallback, that gives the caret zero *drawn*
@@ -820,7 +831,9 @@ mod tests {
                     geom.x + 0.1,
                     mid_y,
                 ))
-                .expect("hit-test just inside the space should resolve");
+                .expect(
+                    "hit-test just inside the space should resolve",
+                );
             assert_eq!(
                 hit.0, last.doc_byte,
                 "clicking just inside the wrap-point space should hit \
@@ -839,8 +852,10 @@ mod tests {
         // relays out at `size.width` every time the width changes).
         let text = "the quick brown fox jumps over the lazy dog \
                     and then keeps running through the wide green field";
-        let narrow = layout_doc(text, 150.0).expect("layout should succeed");
-        let wide = layout_doc(text, 1000.0).expect("layout should succeed");
+        let narrow =
+            layout_doc(text, 150.0).expect("layout should succeed");
+        let wide =
+            layout_doc(text, 1000.0).expect("layout should succeed");
         assert!(
             narrow.glyphs.bands.len() > wide.glyphs.bands.len(),
             "narrower width should wrap onto more lines: {} vs {}",
@@ -888,8 +903,8 @@ mod tests {
     fn hard_newline_produces_a_new_band() {
         // A single Enter press must move to a genuinely new visual line
         // (not collapse to a space, as bare Typst markup would).
-        let layout =
-            layout_doc("one\ntwo", 400.0).expect("layout should succeed");
+        let layout = layout_doc("one\ntwo", 400.0)
+            .expect("layout should succeed");
         assert_eq!(layout.glyphs.bands.len(), 2);
         let first = layout.glyphs.band_for_byte(0).unwrap();
         let second = layout.glyphs.band_for_byte(5).unwrap(); // 't' of "two"
@@ -905,7 +920,11 @@ mod tests {
         let collapsed = layout_doc(doc, 400.0).expect("layout");
         for b in 4..7 {
             assert!(
-                collapsed.glyphs.entries.iter().all(|e| e.doc_byte != b),
+                collapsed
+                    .glyphs
+                    .entries
+                    .iter()
+                    .all(|e| e.doc_byte != b),
                 "byte {b} should have collapsed away, no entry expected"
             );
         }
@@ -915,10 +934,15 @@ mod tests {
             reveal: std::iter::once(5..5).collect(),
             ..Default::default()
         };
-        let expanded = layout_doc_with(doc, 400.0, &opts).expect("layout");
+        let expanded =
+            layout_doc_with(doc, 400.0, &opts).expect("layout");
         for b in 3..7 {
             assert!(
-                expanded.glyphs.entries.iter().any(|e| e.doc_byte == b),
+                expanded
+                    .glyphs
+                    .entries
+                    .iter()
+                    .any(|e| e.doc_byte == b),
                 "byte {b} should be a real glyph while the run is touched"
             );
         }
@@ -928,8 +952,8 @@ mod tests {
     fn blank_line_has_its_own_reachable_band() {
         // A blank line (from pressing Enter twice) must still get a band
         // — otherwise up/down-arrow navigation and clicks skip over it.
-        let layout =
-            layout_doc("a\n\nb", 400.0).expect("layout should succeed");
+        let layout = layout_doc("a\n\nb", 400.0)
+            .expect("layout should succeed");
         assert_eq!(
             layout.glyphs.bands.len(),
             3,
@@ -939,7 +963,10 @@ mod tests {
             .glyphs
             .band_for_byte(2)
             .expect("blank line's doc byte should resolve to a band");
-        assert_eq!(blank_band, 1, "blank line should be the middle band");
+        assert_eq!(
+            blank_band, 1,
+            "blank line should be the middle band"
+        );
         // Clicking in the middle of the blank band's vertical space must
         // resolve back to its doc byte (2).
         let band = &layout.glyphs.bands[1];
@@ -968,7 +995,8 @@ mod tests {
             expand: std::iter::once(0..text.len()).collect(),
             ..Default::default()
         };
-        let layout = layout_doc_with(text, 400.0, &opts).expect("layout");
+        let layout =
+            layout_doc_with(text, 400.0, &opts).expect("layout");
         let brace_band = layout
             .glyphs
             .band_for_byte(last_brace)
@@ -979,19 +1007,21 @@ mod tests {
         // line above (e.g. "#let translate(b) = {").
         let (byte, after) = layout
             .glyphs
-            .byte_for_point(mathed_core::glyphs::V2::new(200.0, mid_y))
+            .byte_for_point(mathed_core::glyphs::V2::new(
+                200.0, mid_y,
+            ))
             .expect("hit-test on the brace's line should resolve");
         // Mirrors `app::resolve_hit`'s "advance past the hit glyph,
         // but never past a newline" rule.
-        let resolved = if after && text.as_bytes().get(byte) != Some(&b'\n')
-        {
-            text[byte..]
-                .char_indices()
-                .nth(1)
-                .map_or(text.len(), |(i, _)| byte + i)
-        } else {
-            byte
-        };
+        let resolved =
+            if after && text.as_bytes().get(byte) != Some(&b'\n') {
+                text[byte..]
+                    .char_indices()
+                    .nth(1)
+                    .map_or(text.len(), |(i, _)| byte + i)
+            } else {
+                byte
+            };
         let resolved_band = layout.glyphs.band_for_byte(resolved);
         assert_eq!(
             resolved_band,
@@ -1013,8 +1043,10 @@ mod tests {
         // including punctuation (`(`, `)`, `{`, `}`) and keywords
         // (`let`), must have its own reachable caret position.
         use mathed_core::transform::TransformOptions;
-        let code = "#let translate(body) = {\n  let x = (1, 2)\n  x\n}";
-        let text = format!("#3 {code} #4 \\translator(#3,#4, name: \"ho\")");
+        let code =
+            "#let translate(body) = {\n  let x = (1, 2)\n  x\n}";
+        let text =
+            format!("#3 {code} #4 \\translator(#3,#4, name: \"ho\")");
         let code_start = text.find("#let").unwrap();
         let code_end = code_start + code.len();
         let opts = TransformOptions {
@@ -1048,7 +1080,11 @@ mod tests {
             let at = text[code_start..code_end].find(needle).unwrap()
                 + code_start;
             assert!(
-                layout.glyphs.entries.iter().any(|e| e.doc_byte == at),
+                layout
+                    .glyphs
+                    .entries
+                    .iter()
+                    .any(|e| e.doc_byte == at),
                 "{needle:?} at byte {at} should be reachable"
             );
         }
@@ -1132,8 +1168,8 @@ mod tests {
             &TransformOptions::default(),
         )
         .expect("layout_block should succeed");
-        let doc_layout =
-            layout_doc(text, 400.0).expect("layout_doc should succeed");
+        let doc_layout = layout_doc(text, 400.0)
+            .expect("layout_doc should succeed");
         // Same width, same height, same glyph entry count.
         assert_eq!(
             block_layout.width, doc_layout.width,
@@ -1163,8 +1199,10 @@ mod tests {
         let partial = clamp_reveal_to_block(&[15..25], &block_range);
         assert_eq!(partial, vec![15..20]);
         // Multiple ranges → only overlapping ones kept.
-        let multi =
-            clamp_reveal_to_block(&[0..5, 12..15, 15..25, 25..30], &block_range);
+        let multi = clamp_reveal_to_block(
+            &[0..5, 12..15, 15..25, 25..30],
+            &block_range,
+        );
         assert_eq!(multi, vec![12..15, 15..20]);
     }
 

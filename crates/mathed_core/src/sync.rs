@@ -17,7 +17,10 @@ impl MathDoc {
     }
 
     /// Import a remote delta patch, merging concurrent operations.
-    pub fn import_delta(&mut self, delta: &[u8]) -> Result<(), crate::doc::DocError> {
+    pub fn import_delta(
+        &mut self,
+        delta: &[u8],
+    ) -> Result<(), crate::doc::DocError> {
         self.doc
             .import(delta)
             .map_err(|e| crate::doc::DocError::Loro(e.to_string()))?;

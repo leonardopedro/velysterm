@@ -212,24 +212,32 @@ impl KernelWorker {
                     block_id,
                     service_endpoint,
                 } => {
-                    let mut mgr =
-                        unfer_identity::DidManager::new(&mut self.consensus);
-                    match mgr.create_did(&self.keypair, service_endpoint) {
+                    let mut mgr = unfer_identity::DidManager::new(
+                        &mut self.consensus,
+                    );
+                    match mgr
+                        .create_did(&self.keypair, service_endpoint)
+                    {
                         Ok(did) => {
                             self.did = Some(did.clone());
-                            let _ = self.tx.send(BlockResponse::StringValue(
-                                block_id, did,
-                            ));
+                            let _ = self.tx.send(
+                                BlockResponse::StringValue(
+                                    block_id, did,
+                                ),
+                            );
                         }
                         Err(e) => {
-                            let _ = self.tx.send(BlockResponse::Error(
-                                block_id,
-                                Diagnostic::new(
-                                    Code(6001),
-                                    format!("DID creation failed: {e}"),
-                                    Severity::Error,
-                                ),
-                            ));
+                            let _ =
+                                self.tx.send(BlockResponse::Error(
+                                    block_id,
+                                    Diagnostic::new(
+                                        Code(6001),
+                                        format!(
+                                            "DID creation failed: {e}"
+                                        ),
+                                        Severity::Error,
+                                    ),
+                                ));
                         }
                     }
                 }
@@ -240,8 +248,9 @@ impl KernelWorker {
                     display_name,
                 } => {
                     let kp = self.keypair.clone();
-                    let mut pub_ =
-                        unfer_data::DataPublisher::new(&mut self.consensus);
+                    let mut pub_ = unfer_data::DataPublisher::new(
+                        &mut self.consensus,
+                    );
                     match pub_.publish(
                         &kp,
                         &data,
@@ -249,10 +258,12 @@ impl KernelWorker {
                         display_name.as_deref(),
                     ) {
                         Ok(content_ref) => {
-                            let _ = self.tx.send(BlockResponse::StringValue(
-                                block_id,
-                                content_ref.cid,
-                            ));
+                            let _ = self.tx.send(
+                                BlockResponse::StringValue(
+                                    block_id,
+                                    content_ref.cid,
+                                ),
+                            );
                         }
                         Err(e) => {
                             let _ = self.tx.send(BlockResponse::Error(
@@ -269,20 +280,25 @@ impl KernelWorker {
                 KernelRequest::ContentResolve { block_id, cid } => {
                     match self.consensus.content(&cid) {
                         Some(content_ref) => {
-                            let _ = self.tx.send(BlockResponse::StringValue(
-                                block_id,
-                                content_ref.cid.clone(),
-                            ));
+                            let _ = self.tx.send(
+                                BlockResponse::StringValue(
+                                    block_id,
+                                    content_ref.cid.clone(),
+                                ),
+                            );
                         }
                         None => {
-                            let _ = self.tx.send(BlockResponse::Error(
-                                block_id,
-                                Diagnostic::new(
-                                    Code(6003),
-                                    format!("content not found: {cid}"),
-                                    Severity::Error,
-                                ),
-                            ));
+                            let _ =
+                                self.tx.send(BlockResponse::Error(
+                                    block_id,
+                                    Diagnostic::new(
+                                        Code(6003),
+                                        format!(
+                                            "content not found: {cid}"
+                                        ),
+                                        Severity::Error,
+                                    ),
+                                ));
                         }
                     }
                 }
@@ -334,7 +350,10 @@ mod tests {
     #[test]
     fn bad_handle_evolve_returns_uk1004() {
         let h = Harness::new();
-        let resp = h.send(KernelRequest::Evolve { block_id: 999, t: 0.1 });
+        let resp = h.send(KernelRequest::Evolve {
+            block_id: 999,
+            t: 0.1,
+        });
         match resp {
             BlockResponse::Error(id, diag) => {
                 assert_eq!(id, 999);
@@ -386,7 +405,8 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def = h.send(KernelRequest::DefineModel { block_id: 1, spec });
+        let def =
+            h.send(KernelRequest::DefineModel { block_id: 1, spec });
         assert!(matches!(def, BlockResponse::Success(1)));
 
         let prob = h.send(KernelRequest::Probability {
@@ -411,7 +431,8 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def = h.send(KernelRequest::DefineModel { block_id: 1, spec });
+        let def =
+            h.send(KernelRequest::DefineModel { block_id: 1, spec });
         assert!(matches!(def, BlockResponse::Success(1)));
 
         let cond = h.send(KernelRequest::Condition {
@@ -436,7 +457,8 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def = h.send(KernelRequest::DefineModel { block_id: 10, spec });
+        let def =
+            h.send(KernelRequest::DefineModel { block_id: 10, spec });
         assert!(matches!(def, BlockResponse::Success(10)));
 
         // model_id=10 (session), block_id=20 (condition block).
@@ -447,7 +469,10 @@ mod tests {
         });
         match cond {
             BlockResponse::Value(id, p) => {
-                assert_eq!(id, 20, "response keyed by block_id, not model_id");
+                assert_eq!(
+                    id, 20,
+                    "response keyed by block_id, not model_id"
+                );
                 assert!((p - 1.0).abs() < 1e-6, "vacuum prior → P=1");
             }
             _ => panic!("expected Value, got {:?}", cond),
@@ -462,7 +487,8 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def = h.send(KernelRequest::DefineModel { block_id: 10, spec });
+        let def =
+            h.send(KernelRequest::DefineModel { block_id: 10, spec });
         assert!(matches!(def, BlockResponse::Success(10)));
 
         // model_id=10 (session), block_id=20 (prob block).
@@ -473,7 +499,10 @@ mod tests {
         });
         match prob {
             BlockResponse::Value(id, p) => {
-                assert_eq!(id, 20, "response keyed by block_id, not model_id");
+                assert_eq!(
+                    id, 20,
+                    "response keyed by block_id, not model_id"
+                );
                 assert!((p - 1.0).abs() < 1e-6, "vacuum prior → P=1");
             }
             _ => panic!("expected Value, got {:?}", prob),
@@ -488,7 +517,10 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let r1 = h.send(KernelRequest::DefineModel { block_id: 1, spec: valid_spec.clone() });
+        let r1 = h.send(KernelRequest::DefineModel {
+            block_id: 1,
+            spec: valid_spec.clone(),
+        });
         assert!(matches!(r1, BlockResponse::Success(1)));
 
         let bad: ModelSpec = serde_json::from_value(serde_json::json!({
@@ -496,10 +528,16 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let r2 = h.send(KernelRequest::DefineModel { block_id: 2, spec: bad });
+        let r2 = h.send(KernelRequest::DefineModel {
+            block_id: 2,
+            spec: bad,
+        });
         assert!(matches!(r2, BlockResponse::Error(2, _)));
 
-        let r3 = h.send(KernelRequest::DefineModel { block_id: 3, spec: valid_spec });
+        let r3 = h.send(KernelRequest::DefineModel {
+            block_id: 3,
+            spec: valid_spec,
+        });
         assert!(matches!(r3, BlockResponse::Success(3)));
     }
 
@@ -511,14 +549,19 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def = h.send(KernelRequest::DefineModel { block_id: 42, spec });
+        let def =
+            h.send(KernelRequest::DefineModel { block_id: 42, spec });
         assert!(matches!(def, BlockResponse::Success(42)));
 
-        let close = h.send(KernelRequest::CloseModel { block_id: 42 });
+        let close =
+            h.send(KernelRequest::CloseModel { block_id: 42 });
         assert!(matches!(close, BlockResponse::Success(42)));
 
         // Subsequent op on that handle → UK-1004.
-        let evolve = h.send(KernelRequest::Evolve { block_id: 42, t: 0.1 });
+        let evolve = h.send(KernelRequest::Evolve {
+            block_id: 42,
+            t: 0.1,
+        });
         match evolve {
             BlockResponse::Error(id, diag) => {
                 assert_eq!(id, 42);
@@ -531,7 +574,8 @@ mod tests {
     #[test]
     fn close_model_nonexistent_returns_uk1004() {
         let h = Harness::new();
-        let close = h.send(KernelRequest::CloseModel { block_id: 999 });
+        let close =
+            h.send(KernelRequest::CloseModel { block_id: 999 });
         match close {
             BlockResponse::Error(id, diag) => {
                 assert_eq!(id, 999);
@@ -549,17 +593,24 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def = h.send(KernelRequest::DefineModel { block_id: 42, spec });
+        let def =
+            h.send(KernelRequest::DefineModel { block_id: 42, spec });
         assert!(matches!(def, BlockResponse::Success(42)));
 
-        let close = h.send(KernelRequest::CloseModelById { model_id: 42 });
+        let close =
+            h.send(KernelRequest::CloseModelById { model_id: 42 });
         match close {
-            BlockResponse::Success(block_id) => assert_eq!(block_id, 42),
+            BlockResponse::Success(block_id) => {
+                assert_eq!(block_id, 42)
+            }
             _ => panic!("expected Success, got {:?}", close),
         }
 
         // Subsequent op on that handle → UK-1004 (worker still returns bad_handle).
-        let evolve = h.send(KernelRequest::Evolve { block_id: 42, t: 0.1 });
+        let evolve = h.send(KernelRequest::Evolve {
+            block_id: 42,
+            t: 0.1,
+        });
         match evolve {
             BlockResponse::Error(id, diag) => {
                 assert_eq!(id, 42);
@@ -572,7 +623,8 @@ mod tests {
     #[test]
     fn close_model_by_id_nonexistent() {
         let h = Harness::new();
-        let close = h.send(KernelRequest::CloseModelById { model_id: 999 });
+        let close =
+            h.send(KernelRequest::CloseModelById { model_id: 999 });
         match close {
             BlockResponse::Error(block_id, diag) => {
                 assert_eq!(block_id, 999);
@@ -620,10 +672,14 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let _ = req_tx.send(KernelRequest::DefineModel { block_id: 1, spec });
+        let _ = req_tx
+            .send(KernelRequest::DefineModel { block_id: 1, spec });
         let mut _drained = 0;
         for _ in 0..70 {
-            let _ = req_tx.send(KernelRequest::Evolve { block_id: 1, t: 0.01 });
+            let _ = req_tx.send(KernelRequest::Evolve {
+                block_id: 1,
+                t: 0.01,
+            });
             let resp = resp_rx.recv().unwrap();
             if let BlockResponse::Success(_) = resp {
                 _drained += 1;
@@ -631,7 +687,8 @@ mod tests {
         }
         // The ring is 64 capacity, so after 70 events we should have drained 64 (filled),
         // then the remaining 6 overflow and leave events_dropped 6 (with one per overflow).
-        let _ = req_tx.send(KernelRequest::CloseModelById { model_id: 1 });
+        let _ = req_tx
+            .send(KernelRequest::CloseModelById { model_id: 1 });
         let resp = resp_rx.recv().unwrap();
         assert!(matches!(resp, BlockResponse::Success(1)));
         drop(req_tx);

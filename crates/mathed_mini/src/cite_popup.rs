@@ -150,7 +150,7 @@ pub fn resolve_popup_body(
                 }
             }
             ReferenceKind::Bibliography { keys } => {
-                let rendered = resolve_bib_rendered(doc_text, &keys);
+                let rendered = resolve_bib_rendered(doc_text, keys);
                 PopupBody::Bibliography {
                     keys: keys.clone(),
                     rendered,
@@ -165,9 +165,14 @@ pub fn resolve_popup_body(
 /// `mathed_biblio::resolve_citations`. Returns `None` when the document has no
 /// `\bibliography` binding for these keys, or the citation cannot be rendered
 /// (the caller then falls back to the key placeholder).
-fn resolve_bib_rendered(doc_text: &str, keys: &[String]) -> Option<String> {
+fn resolve_bib_rendered(
+    doc_text: &str,
+    keys: &[String],
+) -> Option<String> {
     let statements = SemanticIndex::scan_biblio_statements(doc_text);
-    if statements.iter().all(|s| s.kind != mathed_core::markers::PropKind::Bibliography) {
+    if statements.iter().all(|s| {
+        s.kind != mathed_core::markers::PropKind::Bibliography
+    }) {
         return None;
     }
     let resolved = mathed_biblio::resolve_citations(&statements);
@@ -179,12 +184,11 @@ fn resolve_bib_rendered(doc_text: &str, keys: &[String]) -> Option<String> {
         if stmt.kind != mathed_core::markers::PropKind::Cite {
             continue;
         }
-        if stmt.keys == wanted {
-            if let Some(Ok(text)) = resolved.get(&stmt.span.start) {
-                if !text.is_empty() {
-                    return Some(text.clone());
-                }
-            }
+        if stmt.keys == wanted
+            && let Some(Ok(text)) = resolved.get(&stmt.span.start)
+            && !text.is_empty()
+        {
+            return Some(text.clone());
         }
     }
     None
@@ -199,7 +203,10 @@ fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
             if t.contains(':') {
                 return None;
             }
-            let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+            let t = if t.len() >= 2
+                && t.starts_with('"')
+                && t.ends_with('"')
+            {
                 &t[1..t.len() - 1]
             } else {
                 t
@@ -261,7 +268,9 @@ pub fn render_popup_body(
                 _ => {
                     let escaped = keys
                         .iter()
-                        .map(|k| k.replace('[', "\\[").replace(']', "\\]"))
+                        .map(|k| {
+                            k.replace('[', "\\[").replace(']', "\\]")
+                        })
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("```\n[{}]\n```", escaped)
@@ -294,8 +303,10 @@ pub fn doc_ref_body_markup(
     let scan = scan(body_text);
     let segments = mathed_core::markers::resolve_segments(&scan);
     let refs = scan_references(&scan);
-    let mut opts = TransformOptions::default();
-    opts.references = refs;
+    let opts = TransformOptions {
+        references: refs,
+        ..Default::default()
+    };
     to_render_text(body_text, &scan, &segments, &opts)
 }
 
@@ -342,7 +353,10 @@ mod tests {
                         "authorB94".to_string()
                     ]
                 );
-                assert!(rendered.is_none(), "no bibliography to resolve against");
+                assert!(
+                    rendered.is_none(),
+                    "no bibliography to resolve against"
+                );
             }
             _ => panic!("expected Bibliography"),
         }
@@ -368,7 +382,8 @@ mod tests {
                 // retained); the meaningful assertion is that the citation text
                 // resolves through mathed_biblio.
                 assert!(!keys.is_empty());
-                let text = rendered.expect("a real citation is resolved");
+                let text =
+                    rendered.expect("a real citation is resolved");
                 assert!(
                     text.contains("Kwan") || text.contains("2014"),
                     "resolved citation should mention the author or year: {text}"

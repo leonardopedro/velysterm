@@ -59,7 +59,10 @@ pub struct GlyphIndex(pub core_g::GlyphIndex);
 pub use core_g::CaretGeom;
 
 impl GlyphIndex {
-    pub fn caret_for_byte(&self, doc_byte: usize) -> Option<CaretGeom> {
+    pub fn caret_for_byte(
+        &self,
+        doc_byte: usize,
+    ) -> Option<CaretGeom> {
         self.0.caret_for_byte(doc_byte)
     }
 
@@ -97,7 +100,10 @@ pub fn build_glyph_index(
     prelude_len: usize,
 ) -> GlyphIndex {
     GlyphIndex(core_g::build_glyph_index(
-        frame, source, map, prelude_len,
+        frame,
+        source,
+        map,
+        prelude_len,
     ))
 }
 
@@ -746,9 +752,10 @@ fn handle_keyboard(
                         // Toggle: if already on the stack, pop it;
                         // otherwise push (only if the cite exists).
                         let doc = editor.doc.text();
-                        let refs = mathed_core::markers::scan_references(
-                            &mathed_core::markers::scan(doc),
-                        );
+                        let refs =
+                            mathed_core::markers::scan_references(
+                                &mathed_core::markers::scan(doc),
+                            );
                         let exists = refs
                             .iter()
                             .any(|e| e.numbers.contains(&(d as u64)));
@@ -1517,8 +1524,11 @@ fn draw_overlay(
     // Search-match rects: every query match (yellow fill) plus the
     // currently-selected one (fill + stroke). The matches are byte ranges
     // maintained by `Searching`; only built while a search is active.
-    let mut search_rects: Vec<bevy_vello::vello::kurbo::Rect> = Vec::new();
-    let mut search_current_rect: Option<bevy_vello::vello::kurbo::Rect> = None;
+    let mut search_rects: Vec<bevy_vello::vello::kurbo::Rect> =
+        Vec::new();
+    let mut search_current_rect: Option<
+        bevy_vello::vello::kurbo::Rect,
+    > = None;
     if searching.active {
         let matches = &searching.state.matches;
         for (i, m) in matches.iter().enumerate() {
@@ -1528,7 +1538,8 @@ fn draw_overlay(
                 if cs >= ce {
                     continue;
                 }
-                let Some(&entity) = blocks.entities.get(&block.id) else {
+                let Some(&entity) = blocks.entities.get(&block.id)
+                else {
                     continue;
                 };
                 let Ok((cn, tf, gi)) = block_q.get(entity) else {
