@@ -170,23 +170,21 @@ pub fn sync_cite_refs_ui(
     }
 
     // References panel (anchored at the screen bottom).
-    if panel_open.0 {
-        if let Some(rows) =
+    if panel_open.0
+        && let Some(rows) =
             references_panel_rows(doc_text, state.cursor)
-        {
-            let header =
-                format!("References at cursor ({})", rows.len());
-            let panel_w = (win_w * 0.5).min(400.0);
-            let panel_h = (rows.len() as f32 + 1.0) * 22.0 + 8.0;
-            spawn_panel(
-                &mut commands,
-                win_w - panel_w - 8.0,
-                (win_h - panel_h - 8.0).max(8.0),
-                Some(header),
-                &rows,
-                panel_w,
-            );
-        }
+    {
+        let header = format!("References at cursor ({})", rows.len());
+        let panel_w = (win_w * 0.5).min(400.0);
+        let panel_h = (rows.len() as f32 + 1.0) * 22.0 + 8.0;
+        spawn_panel(
+            &mut commands,
+            win_w - panel_w - 8.0,
+            (win_h - panel_h - 8.0).max(8.0),
+            Some(header),
+            &rows,
+            panel_w,
+        );
     }
 
     // IME preedit overlay (underlined composition text at the caret).

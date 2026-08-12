@@ -43,6 +43,7 @@
           xorg.libXi
           xorg.libXrandr
           alsa-lib
+          udev
           vulkan-loader
           mesa
           vulkan-validation-layers
@@ -61,8 +62,31 @@
           # that keeps bevy/winit running even when no GPU ICD matches.
           export VK_DRIVER_FILES="${pkgs.mesa}/share/vulkan/icd.d/radeon_icd.x86_64.json:${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json"
           export VK_ICD_FILENAMES="$VK_DRIVER_FILES"
+
+          # Modern nixpkgs (systemd >= 25x) no longer ships libudev.pc, but the
+          # `libudev-sys` build.rs insists on `pkg-config find_library("libudev")`.
+          # Generate a minimal libudev.pc pointing at the udev store lib so the
+          # bevy/bevy_audio->cpal->libudev-sys chain can link.
+          export _UNFER_UDEV_PCDIR="$HOME/.cache/unfer-libudev-pc"
+          mkdir -p "$_UNFER_UDEV_PCDIR"
+          _UNFER_UDEV_LIB="${pkgs.udev}/lib"
+          cat > "$_UNFER_UDEV_PCDIR/libudev.pc" <<EOF
+prefix=${pkgs.udev}
+exec_prefix=${pkgs.udev}
+libdir=$_UNFER_UDEV_LIB
+includedir=${pkgs.udev.dev}/include
+
+Name: libudev
+Description: udev library
+Version: 1
+Libs: -L$_UNFER_UDEV_LIB -ludev
+Cflags: -I${pkgs.udev.dev}/include
+EOF
+          export PKG_CONFIG_PATH="$_UNFER_UDEV_PCDIR:$PKG_CONFIG_PATH"
+
           echo "[velysterm-shell] wayland/xkb/X11 dev libs + pkg-config on PATH"
           echo "[velysterm-shell] Vulkan ICD: RADV (AMD) + lavapipe via VK_DRIVER_FILES"
+          echo "[velysterm-shell] generated libudev.pc -> $PKG_CONFIG_PATH"
         '';
       };
     };

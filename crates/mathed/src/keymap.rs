@@ -198,18 +198,15 @@ pub fn keymap(
         }
         // Ctrl+digit toggles a cite popup (`1..=9`) or the references
         // panel (`0`).
-        if let Key::Character(s) = key {
-            if let Some(d) = s.chars().next() {
-                if let Some(n) = d.to_digit(10) {
-                    if n == 0 {
-                        return Some(EditorCmd::ReferencesPanel);
-                    }
-                    if (1..=9).contains(&n) {
-                        return Some(EditorCmd::CitePopup(Some(
-                            n as u8,
-                        )));
-                    }
-                }
+        if let Key::Character(s) = key
+            && let Some(d) = s.chars().next()
+            && let Some(n) = d.to_digit(10)
+        {
+            if n == 0 {
+                return Some(EditorCmd::ReferencesPanel);
+            }
+            if (1..=9).contains(&n) {
+                return Some(EditorCmd::CitePopup(Some(n as u8)));
             }
         }
         return None;
