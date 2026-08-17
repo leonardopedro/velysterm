@@ -17,8 +17,8 @@ codes, typed repair hints.
     Model/event specs arrive as JSON and are parsed with
     `serde_json::from_str::<ModelSpec>` / `EventPredicate` from
     `unfer_protocol`; parse errors carry UK-1002/1003 with `ReplaceValue`
-    hints. Ops come from `unfer_protocol::ops::AGENT_OPS` (32 ops across the
-    session / did / content / consensus / cert / logos-ode / export
+    hints. Ops come from `unfer_protocol::ops::AGENT_OPS` (36 ops across the
+    session / did / content / consensus / cert / auction / logos-ode / export
     namespaces). Every failure carries a `Diagnostic` with hints; unknown op
     → UK-1001 + `ReplaceValue` listing valid ops.
 - `crates/mathed_core/` — Loro doc model. `markers.rs` has the `PropKind` enum

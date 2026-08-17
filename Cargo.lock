@@ -5980,6 +5980,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanoda_lib"
+version = "0.4.13"
+source = "git+https://github.com/ammkrn/nanoda_lib#418320295890faed83a96fd97907b12a3b6728c2"
+dependencies = [
+ "indexmap",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "rustc-hash 1.1.0",
+ "semver",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6194,6 +6209,7 @@ checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -7292,12 +7308,16 @@ version = "0.1.0"
 dependencies = [
  "candle-core",
  "fock_sirk",
+ "hex",
+ "logos",
+ "nanoda_lib",
  "nested_fock_algebra",
  "num-complex",
  "ode_sirk",
  "qfm",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.19",
  "unfer_protocol",
 ]

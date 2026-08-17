@@ -216,6 +216,48 @@ impl AgentState {
         }
     }
 
+    /// Sign + submit + sync an auction op as `actor`, returning an
+    /// `AgentResponse` with the deterministic winner (if the op selects one).
+    fn submit_auction_op(
+        &mut self,
+        actor: &str,
+        kp: &Keypair,
+        kind: unfer_protocol::AuctionOpKind,
+        lot_id: unfer_protocol::AuctionId,
+        id: &str,
+    ) -> AgentResponse {
+        let seq = self.consensus.current_seq() + 1;
+        let mut tx = ConsensusTransaction::AuctionOp(
+            unfer_protocol::AuctionOp {
+                did: actor.to_string(),
+                kind,
+                seq,
+                signature: [0u8; 64],
+            },
+        );
+        unfer_consensus::sign_transaction(&mut tx, kp);
+        match self.consensus.submit(tx) {
+            Ok(_) => match self.consensus.sync() {
+                Ok(_) => {
+                    let winner = self
+                        .consensus
+                        .auction()
+                        .report(&lot_id)
+                        .and_then(|r| r.winner);
+                    AgentResponse::ok(
+                        id,
+                        serde_json::json!({
+                            "ok": true,
+                            "winner": winner,
+                        }),
+                    )
+                }
+                Err(e) => AgentResponse::err(id, e),
+            },
+            Err(e) => AgentResponse::err(id, e),
+        }
+    }
+
     fn handle(&mut self, req: &AgentRequest) -> AgentResponse {
         let t0 = Instant::now();
         let resp = self.dispatch(req);
@@ -1114,6 +1156,198 @@ impl AgentState {
                     &req.id,
                     serde_json::json!({ "root": hex::encode(root) }),
                 )
+            }
+            "auction_open" => {
+                let lot: unfer_protocol::AuctionLot =
+                    match serde_json::from_value(
+                        req.params
+                            .get("lot")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    ) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            return AgentResponse::err(
+                                &req.id,
+                                Diagnostic::new(
+                                    Code(1001),
+                                    format!(
+                                        "auction_open: bad 'lot': {e}"
+                                    ),
+                                    Severity::Error,
+                                ),
+                            );
+                        }
+                    };
+                let actor = req
+                    .params
+                    .get("actor")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(lot.seller_did.as_str())
+                    .to_string();
+                let kp = match self.keypairs.get(&actor) {
+                    Some(kp) => kp.clone(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code(6001),
+                                format!(
+                                    "no keypair for actor {actor}"
+                                ),
+                                Severity::Error,
+                            ),
+                        );
+                    }
+                };
+                let lot_id = lot.lot_id;
+                self.submit_auction_op(
+                    &actor,
+                    &kp,
+                    unfer_protocol::AuctionOpKind::Open { lot },
+                    lot_id,
+                    &req.id,
+                )
+            }
+            "auction_bid" => {
+                let actor = match req
+                    .params
+                    .get("actor")
+                    .and_then(|v| v.as_str())
+                {
+                    Some(a) => a.to_string(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing 'actor' field"),
+                        );
+                    }
+                };
+                let kp = match self.keypairs.get(&actor) {
+                    Some(kp) => kp.clone(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code(6001),
+                                format!(
+                                    "no keypair for actor {actor}"
+                                ),
+                                Severity::Error,
+                            ),
+                        );
+                    }
+                };
+                let lot_id_hex = req
+                    .params
+                    .get("lot_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let lot_id = match parse_hex32(lot_id_hex, "lot_id") {
+                    Ok(bytes) => unfer_protocol::AuctionId(bytes),
+                    Err(e) => return AgentResponse::err(&req.id, e),
+                };
+                let price_per_unit = req
+                    .params
+                    .get("price_per_unit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let quantity = req
+                    .params
+                    .get("quantity")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.submit_auction_op(
+                    &actor,
+                    &kp,
+                    unfer_protocol::AuctionOpKind::Bid {
+                        lot_id,
+                        price_per_unit,
+                        quantity,
+                    },
+                    lot_id,
+                    &req.id,
+                )
+            }
+            "auction_close" => {
+                let actor = match req
+                    .params
+                    .get("actor")
+                    .and_then(|v| v.as_str())
+                {
+                    Some(a) => a.to_string(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing 'actor' field"),
+                        );
+                    }
+                };
+                let kp = match self.keypairs.get(&actor) {
+                    Some(kp) => kp.clone(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code(6001),
+                                format!(
+                                    "no keypair for actor {actor}"
+                                ),
+                                Severity::Error,
+                            ),
+                        );
+                    }
+                };
+                let lot_id_hex = req
+                    .params
+                    .get("lot_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let lot_id = match parse_hex32(lot_id_hex, "lot_id") {
+                    Ok(bytes) => unfer_protocol::AuctionId(bytes),
+                    Err(e) => return AgentResponse::err(&req.id, e),
+                };
+                self.submit_auction_op(
+                    &actor,
+                    &kp,
+                    unfer_protocol::AuctionOpKind::Close { lot_id },
+                    lot_id,
+                    &req.id,
+                )
+            }
+            "auction_report" => {
+                let lot_id_hex = req
+                    .params
+                    .get("lot_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if lot_id_hex.is_empty() {
+                    let lots = self.consensus.auction().open_lots();
+                    return AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!({ "lots": lots }),
+                    );
+                }
+                let lot_id = match parse_hex32(lot_id_hex, "lot_id") {
+                    Ok(bytes) => unfer_protocol::AuctionId(bytes),
+                    Err(e) => return AgentResponse::err(&req.id, e),
+                };
+                match self.consensus.auction().report(&lot_id) {
+                    Some(report) => AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!(report),
+                    ),
+                    None => AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code(7301),
+                            format!(
+                                "auction_report: no such lot {lot_id_hex}"
+                            ),
+                            Severity::Error,
+                        ),
+                    ),
+                }
             }
             "logos_compile" => {
                 let cnl = req
