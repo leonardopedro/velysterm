@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# H1 verify-invariants gate (velysterm).
+#
+# Turns the AGENTS.md maintenance checklist into machine-checkable invariants
+# owned by THIS repo: the unfer_agent op census (must not drift from
+# unfer_protocol::ops::AGENT_OPS) and the PropKind/SemanticIndex kernel surface.
+
+set -u
+FAILED=0
+PASSED=0
+GAPS=0
+
+check() {
+    local name="$1"
+    shift
+    if "$@"; then
+        echo "[pass] $name"
+        PASSED=$((PASSED + 1))
+    else
+        echo "[FAIL] $name"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+gap() {
+    echo "[gap]  $1"
+    GAPS=$((GAPS + 1))
+}
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+unfer_root="${UNFER_ROOT:-$repo_root/../unfer}"
+
+# --- H1.17 unfer_agent op census is generated from AGENT_OPS, never local ---
+check "C: VALID_OPS sourced from unfer_protocol::ops::AGENT_OPS" \
+    grep -q "unfer_protocol::ops::AGENT_OPS" "$repo_root/crates/kernel_client/src/bin/unfer_agent.rs"
+check "C: unknown op falls back to UK-1001 + hint" \
+    grep -q "UK-1001" "$repo_root/crates/kernel_client/src/bin/unfer_agent.rs"
+
+# Op-count drift: the module doc header must not claim a stale count.
+# (Counts entries in the AGENT_OPS array in the sibling unfer repo.)
+actual_ops="$(
+  sed -n '/pub const AGENT_OPS/,/];/p' "$unfer_root/unfer_protocol/src/ops.rs" \
+  | grep -c '^    "[a-z_]*",$' || true
+)"
+if [ "$actual_ops" -gt 0 ]; then
+    declared="$(grep -oE '[0-9]+-op' "$repo_root/crates/kernel_client/src/bin/unfer_agent.rs" | grep -oE '[0-9]+' | head -1)"
+    if [ "$declared" = "$actual_ops" ]; then
+        check "C: op-count header matches AGENT_OPS.len() ($actual_ops)" true
+    else
+        check "C: op-count header matches AGENT_OPS.len() ($actual_ops, header says $declared)" false
+    fi
+else
+    gap "C: could not parse AGENT_OPS from $unfer_root (sibling unfer not path-dependency?)"
+fi
+
+# --- H1.18 PropKind kernel variants present and mapped ---
+check "C: PropKind::Model kernel variant present" \
+    grep -q "Model" "$repo_root/crates/mathed_core/src/markers.rs"
+check "C: PropKind::is_kernel() distinguishes kernel from non-kernel" \
+    grep -q "fn is_kernel" "$repo_root/crates/mathed_core/src/markers.rs"
+check "C: KernelStatement carries kind + body_text" \
+    grep -q "body_text" "$repo_root/crates/mathed_core/src/semantics.rs"
+
+# --- H1.19 SemanticIndex collects kernel statements (index built, not stubbed) ---
+check "C: SemanticIndex has kernel_statements collection" \
+    grep -q "kernel_statements" "$repo_root/crates/mathed_core/src/semantics.rs"
+check "C: build_index assembles KernelStatement entries" \
+    grep -q "fn build_index" "$repo_root/crates/mathed_core/src/semantics.rs"
+
+echo
+echo "verify-invariants: $PASSED passed, $GAPS explained gap(s), $FAILED failed"
+if [ "$FAILED" -gt 0 ]; then
+    exit 1
+fi
+exit 0

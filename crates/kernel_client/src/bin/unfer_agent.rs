@@ -9,18 +9,20 @@
 //! {"id":"1","ok":true,"result":{"version":1},"timing_ms":0}
 //! ```
 //!
-//! Ops: the full 32-op registry lives in `unfer_protocol::ops::AGENT_OPS`.
+//! Ops: the full 36-op registry lives in `unfer_protocol::ops::AGENT_OPS`.
 //! Namespaces:
 //! - kernel session: `version`, `create_model`, `set_prior`, `evolve`,
 //!   `condition`, `probability`, `snapshot`, `bayesian_update`,
-//!   `belief_propagation`, `list_codes`, `save_session`, `restore_session`,
-//!   `poll_events`, `close_model`.
+//!   `belief_propagation`, `list_codes`.
 //! - identity + content: `did_create`, `did_resolve`, `did_update`,
 //!   `did_revoke`, `content_publish`, `content_resolve`.
 //! - consensus + certificate ledger: `consensus_sync`, `consensus_status`,
 //!   `cert_set_authority`, `cert_mint`, `cert_transfer`, `cert_burn`,
 //!   `cert_status`, `cert_root`.
-//! - compilers/export: `logos_compile`, `ode_to_hamiltonian`,
+//! - unified auction: `auction_open`, `auction_bid`, `auction_close`,
+//!   `auction_report`.
+//! - agent-local: `save_session`, `restore_session`, `poll_events`,
+//!   `close_model`, `logos_compile`, `ode_to_hamiltonian`,
 //!   `export_html`, `export_tex`.
 //!
 //! Unknown ops return `ok:false` with code UK-1001 and a `ReplaceValue`
