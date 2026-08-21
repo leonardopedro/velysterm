@@ -32,6 +32,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::time::Instant;
 
 use prob_kernel::{Session, SessionBlob};
@@ -129,10 +130,21 @@ struct AgentState {
     next_id: u64,
     consensus: ConsensusNode,
     keypairs: HashMap<String, Keypair>,
+    /// H10: named GrantSet presets (roster directory `UNFER_PRESETS_DIR`, or
+    /// none). `preset_list`/`preset_set` resolve against this.
+    roster: unfer_protocol::preset::Roster,
 }
 
 impl AgentState {
     fn new() -> Self {
+        let roster = std::env::var("UNFER_PRESETS_DIR")
+            .ok()
+            .map(|dir| {
+                unfer_protocol::preset::Roster::from_entries(
+                    unfer_protocol::preset::discover_roster(Path::new(&dir)),
+                )
+            })
+            .unwrap_or_default();
         Self {
             sessions: HashMap::new(),
             events: HashMap::new(),
@@ -142,6 +154,7 @@ impl AgentState {
                 LocalConsensus::new(),
             )),
             keypairs: HashMap::new(),
+            roster,
         }
     }
 
@@ -1471,6 +1484,132 @@ impl AgentState {
                     serde_json::json!({ "tex": tex }),
                 )
             }
+            // ── H10: named GrantSet presets ───────────────────────────────
+            "preset_list" => {
+                // List the roster: each id + trust tier + tool surface, and the
+                // broken presets with their reasons (never silently skipped).
+                let ids: Vec<&str> = self.roster.ids();
+                let presets: Vec<serde_json::Value> = ids
+                    .iter()
+                    .map(|id| {
+                        let p = self.roster.get(id).expect("id from roster");
+                        serde_json::json!({
+                            "id": p.id,
+                            "trust": p.trust,
+                            "tools": p.tools,
+                            "sections": p.sections,
+                        })
+                    })
+                    .collect();
+                let broken: Vec<serde_json::Value> = self
+                    .roster
+                    .broken()
+                    .iter()
+                    .map(|b| {
+                        serde_json::json!({
+                            "id": b.id,
+                            "reason": b.reason,
+                        })
+                    })
+                    .collect();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "presets": presets,
+                        "broken": broken,
+                    }),
+                )
+            }
+            "preset_set" => {
+                // Record the start preset on a blank session (a switch is valid
+                // only while the session has produced nothing).
+                let model_id = match req
+                    .params
+                    .get("model_id")
+                    .and_then(|v| v.as_u64())
+                {
+                    Some(id) => id,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag(
+                                "missing or non-integer 'model_id' field",
+                            ),
+                        );
+                    }
+                };
+                let preset_id = match req
+                    .params
+                    .get("preset")
+                    .and_then(|v| v.as_str())
+                {
+                    Some(p) => p.to_string(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing 'preset' field"),
+                        );
+                    }
+                };
+                let session = match self.sessions.get_mut(&model_id) {
+                    Some(s) => s,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_handle_diag(model_id),
+                        );
+                    }
+                };
+                // Blank-session check: refuse a switch once the session has
+                // produced anything (the tool surface must not change under a
+                // model that already ran).
+                let produced = session
+                    .event_log_len_for_preset_switch();
+                if !unfer_protocol::preset::switch_valid_when_blank(produced) {
+                    return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code(1001),
+                            format!(
+                                "preset switch on model {model_id} refused: \
+                                 session has already produced {produced} ops"
+                            ),
+                            Severity::Error,
+                        ),
+                    );
+                }
+                match self.roster.get(&preset_id) {
+                    Some(p) => {
+                        session.set_start_preset(&p.id);
+                        AgentResponse::ok(
+                            &req.id,
+                            serde_json::json!({
+                                "ok": true,
+                                "preset": p.id,
+                            }),
+                        )
+                    }
+                    None => {
+                        let reason = self
+                            .roster
+                            .broken()
+                            .iter()
+                            .find(|b| b.id == preset_id)
+                            .and_then(|b| b.reason.clone())
+                            .unwrap_or_else(|| "unknown preset".to_string());
+                        AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code(1001),
+                                format!(
+                                    "preset '{preset_id}' is not available: {reason}"
+                                ),
+                                Severity::Error,
+                            ),
+                        )
+                    }
+                }
+            }
             _ => {
                 AgentResponse::err(&req.id, unknown_op_diag(&req.op))
             }
@@ -2370,6 +2509,145 @@ mod tests {
         assert_eq!(
             mint.error.unwrap().code,
             Code::CERT_MINT_NOT_AUTHORIZED
+        );
+    }
+
+    // ── H10: named GrantSet presets ─────────────────────────────────────
+
+    #[test]
+    fn preset_list_and_set_roundtrip() {
+        // Unfer_agent `preset_list`/`preset_set` round-trip: create a blank
+        // session, set its start preset, and confirm the roster + broken
+        // surface via `preset_list`.
+        let mut state = AgentState::new();
+        // With no roster dir configured, the roster is empty (but not broken).
+        let req = AgentRequest::new("1", "preset_list", serde_json::json!({}));
+        let resp = state.handle(&req);
+        assert!(resp.ok);
+        let list = resp.result.as_ref().unwrap();
+        assert_eq!(list["presets"].as_array().unwrap().len(), 0);
+        assert_eq!(list["broken"].as_array().unwrap().len(), 0);
+
+        // A roster in the temp dir: one good preset + one broken file.
+        let dir = std::env::temp_dir().join(format!(
+            "unfer-h10-roster-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("analyst.json"),
+            r#"{"id":"analyst","trust":"read-only","grants":{"kernel":["uk_evolve","uk_probability"]},"tools":["uk_probability"],"sections":["overview"]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("broken.json"), "not json").unwrap();
+
+        let mut state = AgentState::new();
+        state.roster = unfer_protocol::preset::Roster::from_entries(
+            unfer_protocol::preset::discover_roster(&dir),
+        );
+        let req = AgentRequest::new("2", "preset_list", serde_json::json!({}));
+        let resp = state.handle(&req);
+        assert!(resp.ok);
+        let list = resp.result.as_ref().unwrap();
+        assert_eq!(list["presets"].as_array().unwrap().len(), 1);
+        let broken = list["broken"].as_array().unwrap();
+        assert_eq!(broken.len(), 1);
+        assert!(broken[0]["reason"].as_str().unwrap().contains("broken"));
+
+        // Create a blank session, set its start preset.
+        let spec = ModelSpec {
+            hamiltonian: unfer_protocol::HamiltonianSpec::builtin(
+                "harmonic_chain",
+                serde_json::json!({"n_modes": 2, "omega": 1.0}),
+            ),
+            prior: unfer_protocol::PriorSpec::Vacuum,
+            solver: unfer_protocol::SolverSpec::default(),
+        };
+        let req = AgentRequest::new(
+            "3",
+            "create_model",
+            serde_json::to_value(spec).unwrap(),
+        );
+        let resp = state.handle(&req);
+        assert!(resp.ok);
+        let model_id = resp.result.as_ref().unwrap()["model_id"].as_u64().unwrap();
+
+        let req = AgentRequest::new(
+            "4",
+            "preset_set",
+            serde_json::json!({ "model_id": model_id, "preset": "analyst" }),
+        );
+        let resp = state.handle(&req);
+        assert!(resp.ok, "blank-session preset_set must succeed: {resp:?}");
+        assert_eq!(resp.result.as_ref().unwrap()["preset"], "analyst");
+        assert_eq!(
+            state.sessions[&model_id].start_preset(),
+            Some("analyst")
+        );
+
+        // A broken/unknown preset is refused with its reason.
+        let req = AgentRequest::new(
+            "5",
+            "preset_set",
+            serde_json::json!({ "model_id": model_id, "preset": "broken" }),
+        );
+        let resp = state.handle(&req);
+        assert!(!resp.ok, "broken preset must be refused");
+        assert!(resp.error.unwrap().message.contains("broken"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preset_switch_on_non_blank_session_is_rejected() {
+        let mut state = AgentState::new();
+        // Create a blank session, evolve it (produced ≥1 op), then try a switch.
+        let spec = ModelSpec {
+            hamiltonian: unfer_protocol::HamiltonianSpec::builtin(
+                "harmonic_chain",
+                serde_json::json!({"n_modes": 2, "omega": 1.0}),
+            ),
+            prior: unfer_protocol::PriorSpec::Vacuum,
+            solver: unfer_protocol::SolverSpec::default(),
+        };
+        let req = AgentRequest::new(
+            "1",
+            "create_model",
+            serde_json::to_value(spec).unwrap(),
+        );
+        let resp = state.handle(&req);
+        let model_id = resp.result.as_ref().unwrap()["model_id"].as_u64().unwrap();
+
+        let req = AgentRequest::new(
+            "2",
+            "evolve",
+            serde_json::json!({ "model_id": model_id, "t": 0.1 }),
+        );
+        let resp = state.handle(&req);
+        assert!(resp.ok, "evolve must succeed: {resp:?}");
+
+        let req = AgentRequest::new(
+            "3",
+            "preset_set",
+            serde_json::json!({ "model_id": model_id, "preset": "analyst" }),
+        );
+        let resp = state.handle(&req);
+        assert!(
+            !resp.ok,
+            "preset switch on a non-blank session must be refused"
+        );
+        assert!(
+            resp.error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("already produced"),
+            "refusal names the blank-session rule: {:?}",
+            resp.error
         );
     }
 }
