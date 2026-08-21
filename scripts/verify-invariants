@@ -67,6 +67,13 @@ check "C: SemanticIndex has kernel_statements collection" \
 check "C: build_index assembles KernelStatement entries" \
     grep -q "fn build_index" "$repo_root/crates/mathed_core/src/semantics.rs"
 
+# --- H12: agent notes (four implemented categories) ---
+check "H12: notes implemented dir has the four categories" \
+    test -d "$repo_root/.agents/notes/implemented/architecture" \
+    && test -d "$repo_root/.agents/notes/implemented/feature" \
+    && test -d "$repo_root/.agents/notes/implemented/testing" \
+    && test -d "$repo_root/.agents/notes/implemented/process"
+
 echo
 echo "verify-invariants: $PASSED passed, $GAPS explained gap(s), $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
