@@ -1,0 +1,6 @@
+{"id":"1","op":"create_model","params":{"hamiltonian":{"kind":"qfm_tomography","spec":{"training_data":[[1.0,0.0,0.0,0.0],[0.0,1.0,0.0,0.0],[0.0,0.0,1.0,0.0],[0.0,0.0,0.0,1.0]],"k":2,"k2":4,"krylov_dim":4,"seed":42}},"prior":{"kind":"vacuum"},"solver":{"krylov_dim":4,"restarts":1,"prune_eps":1e-8,"max_components":64,"adaptive":false,"device":{"kind":"cpu"}}}}
+{"id":"2","op":"evolve","params":{"model_id":1,"t":0.1}}
+{"id":"3","op":"probability","params":{"model_id":1,"event":{"kind":"boson_mode_total","mode":0,"cmp":"ge","value":1}}}
+{"id":"4","op":"bayesian_update","params":{"model_id":1,"observations":[[1.0,0.0,0.0,0.0]],"hmc_opts":{"leapfrog_steps":8,"step_size":0.05,"n_iterations":8,"burn_in":2,"seed":42}}}
+{"id":"5","op":"save_session","params":{"model_id":1}}
+{"id":"6","op":"close_model","params":{"model_id":1}}
