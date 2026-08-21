@@ -119,6 +119,10 @@ pub enum PropKind {
     Content,
     /// Federation: resolve a CID and display content inline (C12).
     Resolve,
+    /// H13: a skill catalog entry (`\skill`). Renders the skills registry
+    /// surface (scope-owned modules shared by grant); the body names the skill
+    /// id, extra-args may carry `scope:` / `grants:` for the catalog panel.
+    Skill,
     /// Unknown property: kept, semantically inert in v1.
     Other,
 }
@@ -147,6 +151,7 @@ impl PropKind {
             "did" => Self::Did,
             "content" => Self::Content,
             "resolve" => Self::Resolve,
+            "skill" => Self::Skill,
             _ => Self::Other,
         }
     }
@@ -202,6 +207,12 @@ impl PropKind {
     /// worker's consensus node.
     pub fn is_federation(self) -> bool {
         matches!(self, Self::Did | Self::Content | Self::Resolve)
+    }
+
+    /// H13: skill catalog statements (`\skill`) render the skills registry
+    /// surface (discovery/sharing over the existing module path).
+    pub fn is_skill(self) -> bool {
+        matches!(self, Self::Skill)
     }
 }
 
@@ -750,6 +761,27 @@ mod tests {
         assert!(s.stmts.is_empty());
         // The marker refs inside are still scanned as markers.
         assert_eq!(s.markers.len(), 2);
+    }
+
+    // ── H13: skill catalog marker ───────────────────────────────────────
+
+    #[test]
+    fn skill_marker_resolves_and_is_skill() {
+        // `\skill` names a registry entry (discovery/sharing over the module
+        // path). With literal args (a skill id) it is a statement that
+        // resolves to PropKind::Skill; is_skill() is true.
+        let s = scan(r"\skill(acme/carbon-audit, scope:org)");
+        assert_eq!(s.stmts.len(), 1);
+        let kind = PropKind::resolve(&s.stmts[0].name, &s.stmts[0].args);
+        assert_eq!(kind, PropKind::Skill);
+        assert!(kind.is_skill());
+        assert!(!kind.is_kernel());
+        assert!(!kind.is_federation());
+        // A marker-ref form also resolves to Skill (a segment).
+        let s = scan(r"\skill(#1,#2, scope:org)");
+        let segs = resolve_segments(&s);
+        assert!(!segs.is_empty());
+        assert_eq!(segs[0].kind, PropKind::Skill);
     }
 
     #[test]

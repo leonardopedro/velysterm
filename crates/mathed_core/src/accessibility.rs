@@ -184,6 +184,10 @@ pub fn describe_segment(
         PropKind::Resolve => {
             (AccessRole::Math, format!("resolve: {content}"))
         }
+        PropKind::Skill => {
+            let n = name.as_deref().unwrap_or(content);
+            (AccessRole::Math, format!("skill: {n}"))
+        }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }
