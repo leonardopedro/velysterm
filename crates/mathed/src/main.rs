@@ -38,7 +38,8 @@ use keymap::{EditorCmd, Mods, Motion};
 use mathed_core::{
     MathDoc, TransformOptions, auto_marker_id, auto_marker_token,
     lowest_free_marker_numbers, resolve_segments, scan,
-    semantics::SemanticIndex, to_render_text, to_render_text_range,
+    semantics::SemanticIndex, sync::PresenceStore, to_render_text,
+    to_render_text_range,
 };
 use velyst::prelude::*;
 use velyst::typst::syntax::{
@@ -222,6 +223,7 @@ fn main() {
                 .after(sync_blocks),
         )
         .add_systems(Update, autosave)
+        .add_systems(Update, sync_presence)
         .add_systems(
             PostUpdate,
             (build_glyph_indices, draw_overlay)
@@ -281,6 +283,60 @@ impl EditorState {
     }
 }
 
+/// This host's live-presence channel (C13). Presence never enters the
+/// document's CRDT history and is never persisted — it is ephemeral
+/// gossip over the same blob channel that carries deltas.
+#[derive(Resource)]
+struct HostPresence(PresenceStore);
+
+/// Single-host demo peer: a second in-process `PresenceStore` that
+/// exchanges presence blobs with [`HostPresence`] every frame, so the
+/// inbound `apply` path is exercised without a second process.
+#[derive(Resource)]
+struct DemoPeerPresence(PresenceStore);
+
+/// Transport hook for inbound presence blobs: a real network pushes
+/// remote `encode()` payloads here; [`sync_presence`] drains them.
+#[derive(Resource, Default)]
+struct InboundPresenceBlob(Option<Vec<u8>>);
+
+/// C13 host wiring: publish the caret on every move, drain inbound
+/// presence blobs, and run the single-host demo exchange. Runs every
+/// frame after `handle_keyboard` (PreUpdate) so `state.cursor` is
+/// current.
+fn sync_presence(
+    state: Res<EditorState>,
+    host: Res<HostPresence>,
+    demo: Res<DemoPeerPresence>,
+    mut inbound: ResMut<InboundPresenceBlob>,
+    mut last_cursor: Local<Option<usize>>,
+    mut announced: Local<bool>,
+) {
+    if *last_cursor != Some(state.cursor) {
+        host.0.set_cursor(Some(state.cursor));
+        *last_cursor = Some(state.cursor);
+    }
+    if let Some(blob) = inbound.0.take() {
+        let _ = host.0.apply(&blob);
+    }
+    // Single-host demo: exchange blobs with the in-process peer.
+    let host_blob = host.0.encode();
+    let peer_blob = demo.0.encode();
+    let _ = host.0.apply(&peer_blob);
+    let _ = demo.0.apply(&host_blob);
+    host.0.remove_outdated();
+    demo.0.remove_outdated();
+    if !*announced {
+        let live = host.0.peers();
+        info!(
+            "presence: {} peer(s) visible (demo: {:?})",
+            live.len(),
+            live.iter().map(|p| p.peer.as_str()).collect::<Vec<_>>()
+        );
+        *announced = true;
+    }
+}
+
 /// In-progress IME composition text (CJK/composed input), if any — the
 /// OS `Ime::Preedit` string, not yet committed to the document. Shown as
 /// an underlined overlay at the caret; `Ime::Commit` clears it and
@@ -306,6 +362,19 @@ struct OverlayLayer;
 struct LastChange(Option<f64>);
 
 fn setup(mut commands: Commands) {
+    // C13 host wiring: this editor publishes its own presence (name +
+    // caret + heartbeat) and merges remote blobs; the demo peer below
+    // is a second in-process `PresenceStore` that exchanges blobs with
+    // the host over the same channel a real network would carry deltas
+    // on — so the inbound `apply` path runs end-to-end with no
+    // networking (see `sync_presence`).
+    let host = PresenceStore::new("host", "host", 30_000);
+    commands.insert_resource(HostPresence(host));
+    let demo = PresenceStore::new("demo-peer", "demo peer", 30_000);
+    demo.set_name("demo peer");
+    commands.insert_resource(DemoPeerPresence(demo));
+    commands.init_resource::<InboundPresenceBlob>();
+
     commands.spawn((Camera2d, VelloView));
 
     commands
