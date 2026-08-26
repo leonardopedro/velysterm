@@ -23,6 +23,7 @@ mod kernel_sys;
 mod keymap;
 mod overlay;
 mod popup;
+mod presence_net;
 mod scheduler;
 mod search_sys;
 
@@ -48,6 +49,7 @@ use velyst::typst::syntax::{
 
 use blocks_view::{BlockView, Blocks, EditorRoot, PRELUDE};
 use mathed_core::blocks::BlockId as CoreBlockId;
+use presence_net::PresenceTransport;
 use scheduler::Scheduler;
 use search_sys::Searching;
 
@@ -166,8 +168,42 @@ pub fn scroll_adjust(
 }
 
 fn main() {
-    let file = std::env::args().nth(1).map(PathBuf::from);
-    App::new()
+    // Args: `mathed [file] [--listen host:port | --connect host:port]`.
+    // The transport is optional — without it the editor runs offline
+    // with the in-process demo peer.
+    let mut file = None;
+    let mut listen = None;
+    let mut connect = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--listen" => listen = args.next(),
+            "--connect" => connect = args.next(),
+            _ if file.is_none() => file = Some(PathBuf::from(a)),
+            _ => {}
+        }
+    }
+    let transport = match (listen, connect) {
+        (Some(addr), _) => Some(
+            presence_net::PresenceTransport::listen(&addr)
+                .unwrap_or_else(|e| {
+                    panic!("presence listen {addr}: {e}")
+                }),
+        ),
+        (_, Some(addr)) => Some(
+            presence_net::PresenceTransport::connect(&addr)
+                .unwrap_or_else(|e| {
+                    panic!("presence connect {addr}: {e}")
+                }),
+        ),
+        _ => None,
+    };
+
+    let mut app = App::new();
+    if let Some(t) = transport {
+        app.insert_resource(t);
+    }
+    app.insert_resource(PresenceOverlay::default())
         .insert_resource(ClearColor(Color::srgb(0.07, 0.07, 0.09)))
         .add_plugins((
             DefaultPlugins.set(WindowPlugin {
@@ -223,7 +259,14 @@ fn main() {
                 .after(sync_blocks),
         )
         .add_systems(Update, autosave)
-        .add_systems(Update, sync_presence)
+        .add_systems(
+            Update,
+            (toggle_presence_overlay, sync_presence).chain(),
+        )
+        .add_systems(
+            Update,
+            sync_presence_overlay.after(sync_presence),
+        )
         .add_systems(
             PostUpdate,
             (build_glyph_indices, draw_overlay)
@@ -301,40 +344,198 @@ struct DemoPeerPresence(PresenceStore);
 struct InboundPresenceBlob(Option<Vec<u8>>);
 
 /// C13 host wiring: publish the caret on every move, drain inbound
-/// presence blobs, and run the single-host demo exchange. Runs every
-/// frame after `handle_keyboard` (PreUpdate) so `state.cursor` is
-/// current.
+/// presence blobs, and exchange presence over the transport (or the
+/// in-process demo peer when offline). Runs every frame after
+/// `handle_keyboard` (PreUpdate) so `state.cursor` is current.
 fn sync_presence(
     state: Res<EditorState>,
     host: Res<HostPresence>,
     demo: Res<DemoPeerPresence>,
+    transport: Option<Res<PresenceTransport>>,
     mut inbound: ResMut<InboundPresenceBlob>,
     mut last_cursor: Local<Option<usize>>,
     mut announced: Local<bool>,
 ) {
-    if *last_cursor != Some(state.cursor) {
+    let cursor_moved = *last_cursor != Some(state.cursor);
+    if cursor_moved {
         host.0.set_cursor(Some(state.cursor));
         *last_cursor = Some(state.cursor);
     }
+    // Generic transport hook: any inbound blob source feeds here.
     if let Some(blob) = inbound.0.take() {
         let _ = host.0.apply(&blob);
     }
-    // Single-host demo: exchange blobs with the in-process peer.
-    let host_blob = host.0.encode();
-    let peer_blob = demo.0.encode();
-    let _ = host.0.apply(&peer_blob);
-    let _ = demo.0.apply(&host_blob);
-    host.0.remove_outdated();
-    demo.0.remove_outdated();
-    if !*announced {
-        let live = host.0.peers();
-        info!(
-            "presence: {} peer(s) visible (demo: {:?})",
-            live.len(),
-            live.iter().map(|p| p.peer.as_str()).collect::<Vec<_>>()
-        );
-        *announced = true;
+    if let Some(t) = &transport {
+        // Network mode: broadcast our presence on every caret move and
+        // drain the wire into the ephemeral store.
+        if cursor_moved {
+            t.send_presence(&host.0.encode());
+        }
+        while let Some((tag, blob)) = t.recv_frame() {
+            if tag == presence_net::TAG_PRESENCE {
+                let _ = host.0.apply(&blob);
+            }
+        }
+        host.0.remove_outdated();
+        if !*announced {
+            let live = host.0.peers();
+            info!(
+                "presence: connected to {}, {} peer(s) visible ({:?})",
+                t.peer(),
+                live.len(),
+                live.iter()
+                    .map(|p| p.peer.as_str())
+                    .collect::<Vec<_>>()
+            );
+            *announced = true;
+        }
+    } else {
+        // Offline single-host demo: exchange blobs with the in-process
+        // peer (the same channel shape a real transport would use).
+        let host_blob = host.0.encode();
+        let peer_blob = demo.0.encode();
+        let _ = host.0.apply(&peer_blob);
+        let _ = demo.0.apply(&host_blob);
+        host.0.remove_outdated();
+        demo.0.remove_outdated();
+        if !*announced {
+            let live = host.0.peers();
+            info!(
+                "presence: offline demo, {} peer(s) visible ({:?})",
+                live.len(),
+                live.iter()
+                    .map(|p| p.peer.as_str())
+                    .collect::<Vec<_>>()
+            );
+            *announced = true;
+        }
     }
+}
+
+/// Live-collaborator overlay state. Toggled with F3; the overlay lists
+/// who is editing and where their caret is (line:column).
+#[derive(Resource, Default)]
+struct PresenceOverlay {
+    visible: bool,
+    root: Option<Entity>,
+    last_text: String,
+}
+
+/// Marker for the overlay root node (so it can be despawned on toggle).
+#[derive(Component)]
+struct PresenceOverlayRoot;
+
+/// F3 toggles the live-collaborator overlay.
+fn toggle_presence_overlay(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut overlay: ResMut<PresenceOverlay>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        overlay.visible = !overlay.visible;
+    }
+}
+
+/// Render the live peer list (name · caret line:col · seconds since
+/// heartbeat) plus the transport status. Rebuilds the node only when
+/// the text changes.
+fn sync_presence_overlay(
+    mut overlay: ResMut<PresenceOverlay>,
+    host: Res<HostPresence>,
+    transport: Option<Res<PresenceTransport>>,
+    editor: Res<EditorDoc>,
+    mut commands: Commands,
+) {
+    if !overlay.visible {
+        if let Some(e) = overlay.root.take() {
+            commands.entity(e).despawn();
+            overlay.last_text.clear();
+        }
+        return;
+    }
+    let status = match &transport {
+        Some(t) if t.connected() => {
+            format!("presence: connected to {}", t.peer())
+        }
+        Some(t) => format!(
+            "presence: listening on {} (no peer yet)",
+            t.local_addr()
+        ),
+        None => "presence: offline (demo)".to_string(),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let doc = editor.doc.text();
+    let mut lines = vec![status];
+    for p in host.0.peers() {
+        let where_at = match p.cursor {
+            Some(b) => {
+                let (l, c) = line_col(doc, b);
+                format!("caret @{l}:{c}")
+            }
+            None => "away".to_string(),
+        };
+        let age_s = ((now - p.last_seen_ms) / 1000).max(0);
+        lines.push(format!(
+            "{} · {} · {}s ago",
+            p.name, where_at, age_s
+        ));
+    }
+    if lines.len() == 1 {
+        lines.push("(no other peers)".to_string());
+    }
+    let text = lines.join("\n");
+    if overlay.last_text == text {
+        return;
+    }
+    if let Some(e) = overlay.root.take() {
+        commands.entity(e).despawn();
+    }
+    let root = commands
+        .spawn((
+            PresenceOverlayRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(8.0),
+                right: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(8.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.05, 0.05, 0.08, 0.85)),
+            ZIndex(100),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(&text),
+                TextColor(Color::WHITE),
+                Node {
+                    padding: UiRect::all(Val::Px(2.0)),
+                    ..default()
+                },
+            ));
+        })
+        .id();
+    overlay.root = Some(root);
+    overlay.last_text = text;
+}
+
+/// 1-based line:column of `byte` in `doc` (byte clamped to a char
+/// boundary, so a remote caret never panics on slicing).
+fn line_col(doc: &str, byte: usize) -> (usize, usize) {
+    let byte = doc
+        .char_indices()
+        .map(|(i, _)| i)
+        .filter(|&i| i <= byte)
+        .max()
+        .unwrap_or(0);
+    let prefix = &doc[..byte];
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = match prefix.rsplit_once('\n') {
+        Some((_, rest)) => rest.chars().count() + 1,
+        None => prefix.chars().count() + 1,
+    };
+    (line, col)
 }
 
 /// In-progress IME composition text (CJK/composed input), if any — the
