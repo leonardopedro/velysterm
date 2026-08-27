@@ -43,9 +43,13 @@ codes, typed repair hints.
   `docs/mathed/MINI_FRONTEND_PLAN.md`.
 - `crates/mathed_biblio/` — hayagriva citation backend. Resolves `\cite` keys
   from bibliography sources and populates `SemanticIndex.biblio_statements`.
-- `crates/delta_algebra/` / `crates/delta_sirk/` — orphaned GPU (wgpu)
-  experiments. Archived; excluded from default workspace tests. Build with
-  an explicit `-p` flag.
+- `crates/delta_algebra/` / `crates/delta_sirk/` — GPU (wgpu) Hermite-
+  recursion engine for Fock spaces, revived as workspace members (wgpu is
+  already in the build graph via the Bevy `mathed` crate). The engine is
+  differentially tested against a pure-CPU reference oracle
+  (`crates/delta_algebra/src/reference.rs`); without a GPU adapter the GPU
+  tests SKIP gracefully (the Cadabra2 skip pattern). Run them on a GPU box:
+  `scripts/test-delta-gpu.sh`.
 
 ## Conventions
 

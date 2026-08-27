@@ -188,6 +188,9 @@ pub fn describe_segment(
             let n = name.as_deref().unwrap_or(content);
             (AccessRole::Math, format!("skill: {n}"))
         }
+        PropKind::Layout => {
+            (AccessRole::Math, format!("layout claim: {content}"))
+        }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }

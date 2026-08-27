@@ -451,6 +451,21 @@ impl KernelBridge {
                 }
             }
         }
+        // Layout claims (GPU federation T1.2): the verdict is synchronous —
+        // no worker round-trip. Surface a UK-49xx code + `RepairHint` exactly
+        // like a kernel error, or a green `surjective` annotation when the
+        // claim has no parity obstruction.
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Layout)
+        {
+            let result = layout_verdict(&stmt.body_text);
+            if self.results.get(&stmt.span.start) != Some(&result) {
+                self.results.insert(stmt.span.start, result);
+                changed = true;
+            }
+        }
         changed
     }
 
@@ -580,6 +595,123 @@ fn dispatch_error_result(e: &DispatchError) -> KernelResult {
         message: e.to_string(),
         hints: dispatch_error_hints(e),
     }
+}
+
+/// Parse a bank-conflict congruence `ax + by ≡ 0 (mod m)` from a `\layout`
+/// body. Returns `(a, b, m)`. Tolerant of whitespace, `≡`/`=`, `mod`/`Mod`,
+/// `·`/`*` separators, and implicit unit coefficients (`x + 2y` ⇒ a = 1).
+fn parse_congruence(body: &str) -> Option<(i64, i64, i64)> {
+    let mut a: Option<i64> = None;
+    let mut b: Option<i64> = None;
+    let mut m: Option<i64> = None;
+    let mut sign: i64 = 1;
+    let mut seen_mod = false;
+    let mut word = String::new();
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '-' | '−' => sign = -1,
+            '+' => sign = 1,
+            _ if c.is_ascii_digit() => {
+                let mut n = c.to_digit(10).unwrap() as i64;
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        n = n * 10 + d.to_digit(10).unwrap() as i64;
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                n *= sign;
+                sign = 1;
+                if seen_mod && m.is_none() {
+                    m = Some(n);
+                } else if chars.peek() == Some(&'x') || chars.peek() == Some(&'X')
+                {
+                    a = Some(n);
+                    chars.next();
+                } else if chars.peek() == Some(&'y') || chars.peek() == Some(&'Y')
+                {
+                    b = Some(n);
+                    chars.next();
+                } else if n != 0 {
+                    // A nonzero RHS is not a bank-conflict claim.
+                    return None;
+                }
+            }
+            _ if c.is_alphabetic() => {
+                word.push(c.to_ascii_lowercase());
+                if word == "mod" {
+                    seen_mod = true;
+                    word.clear();
+                }
+            }
+            _ => {
+                word.clear();
+            }
+        }
+    }
+    // Bare `x` / `y` with an implicit unit coefficient.
+    if a.is_none() && body.chars().any(|c| c == 'x' || c == 'X') {
+        a = Some(1);
+    }
+    if b.is_none() && body.chars().any(|c| c == 'y' || c == 'Y') {
+        b = Some(1);
+    }
+    Some((a?, b?, m?))
+}
+
+/// Verdict for a `\layout` congruence claim — the parity argument formalized
+/// in timepiece (GPU_FEDERATION_PLAN T2.1): the linear map
+/// `(x, y) ↦ ax + by (mod m)` is bijective only if `gcd(a, b, m) = 1`. When
+/// the gcd exceeds 1 its image lies in a proper subgroup of `Z/mZ`, so a row
+/// of `m` consecutive addresses collides on `m/gcd` banks and no bijective
+/// swizzle can separate them — surface `UK-4907` with a `ReplaceValue` hint.
+fn layout_verdict(body: &str) -> KernelResult {
+    let Some((a, b, m)) = parse_congruence(body) else {
+        return KernelResult::Error {
+            code_name: "layout-parse".to_string(),
+            message: format!(
+                "Unparseable layout claim '{}': expected `ax + by ≡ 0 (mod m)`",
+                body.trim()
+            ),
+            hints: vec![RepairHint::new(
+                HintKind::ReplaceValue,
+                "layout",
+                "write the bank-conflict congruence as `ax + by ≡ 0 (mod m)`"
+                    .to_string(),
+            )],
+        };
+    };
+    let g = gcd(gcd(a.abs(), b.abs()), m);
+    if g > 1 {
+        KernelResult::Error {
+            code_name: "UK-4907".to_string(),
+            message: format!(
+                "Bank conflict: {} has no safe swizzle (gcd({a}, {b}, {m}) = \
+                 {g} > 1; the image lies in a proper subgroup of Z/{m}Z)",
+                body.trim()
+            ),
+            hints: vec![RepairHint::new(
+                HintKind::ReplaceValue,
+                "layout",
+                format!(
+                    "choose coefficients with gcd(a, b, {m}) = 1, e.g. `x + y ≡ 0 (mod {m})`"
+                ),
+            )],
+        }
+    } else {
+        KernelResult::StringValue("surjective".to_string())
+    }
+}
+
+fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a.abs()
 }
 
 /// Map a [`DispatchError`] to concrete [`RepairHint`]s — the machine-readable
@@ -757,6 +889,118 @@ mod tests {
                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
                    #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
         assert!(bridge.refresh(doc));
+    }
+
+    #[test]
+    fn parse_congruence_variants() {
+        assert_eq!(
+            parse_congruence("2x + 4y ≡ 0 (mod 32)"),
+            Some((2, 4, 32))
+        );
+        assert_eq!(
+            parse_congruence("2x+4y=0 mod 32"),
+            Some((2, 4, 32))
+        );
+        // Implicit unit coefficients and a unicode minus.
+        assert_eq!(
+            parse_congruence("x − 2y ≡ 0 (mod 16)"),
+            Some((1, -2, 16))
+        );
+        // A nonzero RHS is not a bank-conflict claim.
+        assert_eq!(parse_congruence("2x + 4y ≡ 6 (mod 32)"), None);
+        // Missing modulus / missing variables are unparseable.
+        assert_eq!(parse_congruence("2x + 4y"), None);
+    }
+
+    #[test]
+    fn layout_claim_swizzle_impossible_surfaces_uk_4907() {
+        // GPU.md's running example: gcd(2, 4, 32) = 2 > 1, so the image of
+        // (x, y) ↦ 2x + 4y (mod 32) lies in a proper subgroup and a row of
+        // 32 consecutive addresses collides on 16 banks — no bijective
+        // swizzle can separate them. Surfaces UK-4907 + a ReplaceValue hint.
+        let doc = "#1 2x + 4y ≡ 0 (mod 32) #2 \\layout(#1,#2)";
+        let mut bridge = KernelBridge::new();
+        assert!(bridge.refresh(doc));
+        let idx = build_index(doc);
+        let key = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Layout)
+            .expect("a layout statement")
+            .span
+            .start;
+        match bridge.results().get(&key) {
+            Some(KernelResult::Error {
+                code_name,
+                message,
+                hints,
+            }) => {
+                assert_eq!(code_name, "UK-4907");
+                assert!(
+                    message.contains("no safe swizzle"),
+                    "message: {message}"
+                );
+                assert_eq!(hints.len(), 1);
+                assert_eq!(hints[0].kind, HintKind::ReplaceValue);
+                assert!(hints[0].suggestion.contains("gcd(a, b, 32) = 1"));
+            }
+            other => panic!("expected UK-4907 error, got {other:?}"),
+        }
+        // The overlay annotation renders the code inline, like any kernel
+        // error (red code name right after the claim).
+        let ann = bridge.result_annotations();
+        let markup = ann.get(&key).expect("annotation for the layout");
+        assert!(markup.contains("UK-4907"), "annotation: {markup}");
+    }
+
+    #[test]
+    fn layout_claim_no_parity_obstruction_is_green() {
+        // gcd(1, 1, 32) = 1: the map is surjective — no parity obstruction,
+        // so the claim renders a benign green annotation.
+        let doc = "#1 x + y ≡ 0 (mod 32) #2 \\layout(#1,#2)";
+        let mut bridge = KernelBridge::new();
+        assert!(bridge.refresh(doc));
+        let idx = build_index(doc);
+        let key = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Layout)
+            .expect("a layout statement")
+            .span
+            .start;
+        match bridge.results().get(&key) {
+            Some(KernelResult::StringValue(s)) => {
+                assert_eq!(s, "surjective");
+            }
+            other => panic!("expected surjective verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layout_claim_unparseable_surfaces_repair_hint() {
+        let doc = "#1 2x + 4y #2 \\layout(#1,#2)";
+        let mut bridge = KernelBridge::new();
+        assert!(bridge.refresh(doc));
+        let idx = build_index(doc);
+        let key = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Layout)
+            .expect("a layout statement")
+            .span
+            .start;
+        match bridge.results().get(&key) {
+            Some(KernelResult::Error {
+                code_name,
+                hints,
+                ..
+            }) => {
+                assert_eq!(code_name, "layout-parse");
+                assert_eq!(hints.len(), 1);
+                assert_eq!(hints[0].target, "layout");
+            }
+            other => panic!("expected layout-parse error, got {other:?}"),
+        }
     }
 
     #[test]

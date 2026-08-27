@@ -1,5 +1,6 @@
 #![expect(missing_docs)]
 
+pub mod reference;
 pub mod types;
 pub use types::*;
 
@@ -16,17 +17,33 @@ pub struct DeltaAlgebraEngine {
 
 impl DeltaAlgebraEngine {
     /// Initialise a new GPU engine.
+    ///
+    /// Panics if no suitable GPU adapter exists. Use [`try_new`]
+    /// (`Self::try_new`) for a graceful skip when a GPU is not available.
     pub async fn new() -> Self {
+        Self::try_new()
+            .await
+            .expect("Failed to find a suitable GPU adapter")
+    }
+
+    /// Initialise a new GPU engine, returning `None` when no suitable adapter
+    /// (or device) is available — the graceful-skip path for CI machines
+    /// without a GPU (same skip pattern as the Cadabra2-dependent tests in
+    /// `unfer/prob_kernel`).
+    pub async fn try_new() -> Option<Self> {
         let instance = wgpu::Instance::default();
+        // wgpu 27 returns `Result<Adapter, RequestAdapterError>` from
+        // `request_adapter` (no `Option` since 24): `.ok()?` returns None on
+        // any adapter failure — the graceful-skip path.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
-            .expect("Failed to find a suitable GPU adapter");
+            .ok()?;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
-            .expect("Failed to create WGPU device");
+            .ok()?;
 
         let shader = device.create_shader_module(
             wgpu::ShaderModuleDescriptor {
@@ -99,12 +116,12 @@ impl DeltaAlgebraEngine {
             },
         );
 
-        Self {
+        Some(Self {
             device,
             queue,
             expand_pipeline,
             bind_group_layout,
-        }
+        })
     }
     /// Applies the action of a Hamiltonian string on an initial state.
     ///
@@ -339,10 +356,26 @@ impl DeltaAlgebraEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reference::{apply_operator_reference, inner_product_reference};
+
+    /// Build the engine, skipping the test (with a clear message) when no GPU
+    /// adapter is available — the CI-without-GPU path, matching the Cadabra2
+    /// skip pattern in `unfer/prob_kernel` (`eprintln!("SKIP..."); return;`).
+    async fn engine_or_skip() -> Option<DeltaAlgebraEngine> {
+        match DeltaAlgebraEngine::try_new().await {
+            Some(engine) => Some(engine),
+            None => {
+                eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
+                None
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_creation_annihilation() {
-        let engine = DeltaAlgebraEngine::new().await;
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
 
         // Initial state |0,0,0,0>
         let vac = vec![HermiteState::vacuum()];
@@ -380,7 +413,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_superposition_and_inner_product() {
-        let engine = DeltaAlgebraEngine::new().await;
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
 
         // |psi> = 1*|1,0,0,0> + 2i*|0,1,0,0>
         let psi = vec![
@@ -403,5 +438,153 @@ mod tests {
         assert_eq!(x_vac[0].n, [1, 0, 0, 0]);
         let expected_amp = 1.0 / 2.0_f32.sqrt();
         assert!((x_vac[0].coeff_re - expected_amp).abs() < 1e-6);
+    }
+
+    /// Differential test: the GPU engine and the CPU reference must agree on
+    /// every operator sequence (correctness oracle — never trust an
+    /// unverified accelerator path).
+    async fn differential_case(
+        engine: &DeltaAlgebraEngine,
+        input: &[HermiteState],
+        terms: &[OperatorTerm],
+    ) {
+        let gpu = engine.apply_operator(input, terms).await;
+        let cpu = apply_operator_reference(input, terms);
+
+        assert_eq!(
+            gpu.len(),
+            cpu.len(),
+            "state-count mismatch: gpu={} cpu={} (input {:?}, terms {:?})",
+            gpu.len(),
+            cpu.len(),
+            input,
+            terms,
+        );
+        for (g, c) in gpu.iter().zip(cpu.iter()) {
+            assert_eq!(
+                g.n, c.n,
+                "quantum-number mismatch for term sequence {:?}",
+                terms,
+            );
+            assert!(
+                (g.coeff_re - c.coeff_re).abs() < 1e-5
+                    && (g.coeff_im - c.coeff_im).abs() < 1e-5,
+                "amplitude mismatch: gpu=({}, {}) cpu=({}, {}) for terms {:?}",
+                g.coeff_re,
+                g.coeff_im,
+                c.coeff_re,
+                c.coeff_im,
+                terms,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn differential_single_operators() {
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
+        let vac = vec![HermiteState::vacuum()];
+        let excited = vec![HermiteState::new([2, 1, 0, 3], 0.5, -0.25)];
+
+        for dim in 0..4 {
+            differential_case(
+                &engine,
+                &vac,
+                &[OperatorTerm::new(OpType::Creation, dim, 1.0, 0.0)],
+            )
+            .await;
+            differential_case(
+                &engine,
+                &excited,
+                &[OperatorTerm::new(OpType::Annihilation, dim, 0.7, 0.3)],
+            )
+            .await;
+            differential_case(
+                &engine,
+                &excited,
+                &[OperatorTerm::new(OpType::Identity, dim, 1.0, 0.0)],
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn differential_position_momentum() {
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
+        let vac = vec![HermiteState::vacuum()];
+        let excited = vec![HermiteState::new([3, 0, 0, 0], 0.25, 0.5)];
+
+        for dim in 0..4 {
+            differential_case(&engine, &vac, &OperatorTerm::position(dim, 1.0)).await;
+            differential_case(&engine, &excited, &OperatorTerm::position(dim, 2.0)).await;
+            differential_case(&engine, &vac, &OperatorTerm::momentum(dim, 1.0)).await;
+            differential_case(&engine, &excited, &OperatorTerm::momentum(dim, 1.5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn differential_number_operator() {
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
+        let vac = vec![HermiteState::vacuum()];
+        let excited = vec![HermiteState::new([4, 0, 0, 0], 1.0, 1.0)];
+
+        for dim in 0..4 {
+            differential_case(&engine, &vac, &OperatorTerm::number_op(dim)).await;
+            differential_case(&engine, &excited, &OperatorTerm::number_op(dim)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn differential_superposition_multi_term() {
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
+        let psi = vec![
+            HermiteState::new([1, 0, 0, 0], 1.0, 0.0),
+            HermiteState::new([0, 2, 0, 0], 0.0, 1.5),
+            HermiteState::new([0, 0, 1, 1], -0.5, 0.25),
+        ];
+        let terms = [
+            OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0),
+            OperatorTerm::new(OpType::Annihilation, 1, 0.5, 0.0),
+            OperatorTerm::new(OpType::Creation, 3, 0.0, 0.75),
+        ];
+        differential_case(&engine, &psi, &terms).await;
+    }
+
+    #[tokio::test]
+    async fn differential_annihilation_on_vacuum() {
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
+        let vac = vec![HermiteState::vacuum()];
+        for dim in 0..4 {
+            let terms = [OperatorTerm::new(OpType::Annihilation, dim, 1.0, 0.0)];
+            let gpu = engine.apply_operator(&vac, &terms).await;
+            let cpu = apply_operator_reference(&vac, &terms);
+            assert!(gpu.is_empty(), "annihilation on vacuum must vanish on GPU");
+            assert!(cpu.is_empty(), "annihilation on vacuum must vanish on CPU");
+        }
+    }
+
+    #[tokio::test]
+    async fn differential_inner_product() {
+        let Some(engine) = engine_or_skip().await else {
+            return;
+        };
+        let psi = vec![
+            HermiteState::new([1, 0, 0, 0], 1.0, 0.0),
+            HermiteState::new([0, 1, 0, 0], 0.0, 2.0),
+            HermiteState::new([0, 0, 1, 0], 0.3, -0.4),
+        ];
+        let (gpu_re, gpu_im) = engine.inner_product(&psi, &psi);
+        let (cpu_re, cpu_im) = inner_product_reference(&psi, &psi);
+        assert!((gpu_re - cpu_re).abs() < 1e-5);
+        assert!((gpu_im - cpu_im).abs() < 1e-5);
     }
 }

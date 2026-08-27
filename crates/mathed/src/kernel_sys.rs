@@ -186,6 +186,46 @@ mod tests {
         );
     }
 
+    /// The layout-claim path (GPU_FEDERATION_PLAN T1.2): a `\layout`
+    /// statement with a bank-conflict congruence renders its UK-4907 verdict
+    /// in the transformed source exactly like a kernel error — the Bevy
+    /// overlay shows the code inline, no window or GPU.
+    #[test]
+    fn kernel_smoke_layout_verdict_in_transformed_source() {
+        let doc = "#1 2x + 4y ≡ 0 (mod 32) #2 \\layout(#1,#2)";
+
+        let mut bridge = mathed_mini::KernelBridge::new();
+        assert!(bridge.refresh(doc));
+
+        let annotations = bridge.result_annotations();
+        assert!(
+            !annotations.is_empty(),
+            "kernel bridge must produce layout annotations"
+        );
+
+        let scan = scan(doc);
+        let segments = resolve_segments(&scan);
+        let render = to_render_text(
+            doc,
+            &scan,
+            &segments,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        );
+        assert!(
+            render.text.contains("UK-4907"),
+            "transformed source must contain the UK-4907 verdict, got:\n{}",
+            render.text
+        );
+        assert!(
+            render.text.contains("#text(rgb(\"#c00000\"))"),
+            "transformed source must contain the red error annotation, got:\n{}",
+            render.text
+        );
+    }
+
     /// The error path: a bad translator produces a red UK-style code in
     /// the transformed source, again with no window or GPU.
     #[test]

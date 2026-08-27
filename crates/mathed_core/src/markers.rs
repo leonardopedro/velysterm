@@ -123,6 +123,13 @@ pub enum PropKind {
     /// surface (scope-owned modules shared by grant); the body names the skill
     /// id, extra-args may carry `scope:` / `grants:` for the catalog panel.
     Skill,
+    /// GPU federation (GPU_FEDERATION_PLAN T1.2): a layout claim — the
+    /// body text is a bank-conflict congruence such as
+    /// `2x + 4y ≡ 0 (mod 32)`. Kernel-bearing: collected into
+    /// `SemanticIndex.kernel_statements` and dispatched by the kernel
+    /// bridge, which surfaces a UK-49xx code + `RepairHint` like any other
+    /// kernel error.
+    Layout,
     /// Unknown property: kept, semantically inert in v1.
     Other,
 }
@@ -152,6 +159,7 @@ impl PropKind {
             "content" => Self::Content,
             "resolve" => Self::Resolve,
             "skill" => Self::Skill,
+            "layout" => Self::Layout,
             _ => Self::Other,
         }
     }
@@ -192,6 +200,7 @@ impl PropKind {
                 | Self::Event
                 | Self::Prob
                 | Self::Translator
+                | Self::Layout
         )
     }
 

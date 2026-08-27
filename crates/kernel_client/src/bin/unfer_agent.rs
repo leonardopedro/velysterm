@@ -51,6 +51,35 @@ use mathed_core::markers::{resolve_segments, scan};
 /// here — edit the shared registry instead.
 const VALID_OPS: &[&str] = unfer_protocol::ops::AGENT_OPS;
 
+/// The `UK-GPU-<CODE>` triage vocabulary emitted by `fock_sirk::device` on
+/// CUDA init failure (GPU_FEDERATION_PLAN T2.2), with the documented
+/// remediation for each. Surfaced via `list_codes` so the agent loop can
+/// react to GPU failures without parsing kernel stderr.
+const GPU_TRIAGE_CODES: &[(&str, &str)] = &[
+    (
+        "UK-GPU-NO_DEVICE",
+        "install the NVIDIA driver and confirm `nvidia-smi` lists a GPU",
+    ),
+    (
+        "UK-GPU-ARCH_MISMATCH",
+        "libcublas/libcuda version conflict with the active GPU — point \
+         LD_LIBRARY_PATH at the CUDA toolkit matching the driver",
+    ),
+    (
+        "UK-GPU-LIBRARY_MISSING",
+        "a CUDA shared library is not loadable — add the toolkit lib dir to \
+         LD_LIBRARY_PATH (e.g. /usr/local/cuda/lib64)",
+    ),
+    (
+        "UK-GPU-OUT_OF_MEMORY",
+        "CUDA ran out of memory — reduce the basis size or the Krylov window",
+    ),
+    (
+        "UK-GPU-OTHER",
+        "see the candle error (RUST_LOG=candle_core=debug for kernel dispatch)",
+    ),
+];
+
 fn unknown_op_diag(op: &str) -> Diagnostic {
     Diagnostic::new(
         Code::BAD_JSON,
@@ -297,9 +326,22 @@ impl AgentState {
                         })
                     })
                     .collect();
+                // GPU triage vocabulary (GPU_FEDERATION_PLAN T2.2): the
+                // `UK-GPU-<CODE>` stderr lines `fock_sirk::device` emits on
+                // CUDA init failure. Surfaced here so the agent loop can
+                // react to GPU failures without parsing kernel stderr.
+                let gpu_triage: Vec<serde_json::Value> = GPU_TRIAGE_CODES
+                    .iter()
+                    .map(|(code, fix)| {
+                        serde_json::json!({
+                            "code": code,
+                            "fix": fix,
+                        })
+                    })
+                    .collect();
                 AgentResponse::ok(
                     &req.id,
-                    serde_json::json!({ "codes": codes }),
+                    serde_json::json!({ "codes": codes, "gpu_triage": gpu_triage }),
                 )
             }
             "create_model" => {
@@ -1786,6 +1828,23 @@ mod tests {
         );
         let resp = state.handle(&req);
         assert!(resp.ok);
+        let result = resp.result.clone().unwrap();
+        // The GPU triage vocabulary rides along (GPU_FEDERATION_PLAN T2.2).
+        let triage = result["gpu_triage"]
+            .as_array()
+            .expect("list_codes carries gpu_triage");
+        assert_eq!(triage.len(), 5);
+        assert!(
+            triage.iter().any(|t| t["code"] == "UK-GPU-ARCH_MISMATCH"),
+            "ARCH_MISMATCH triage present"
+        );
+        assert!(
+            triage.iter().any(|t| t["fix"].as_str().unwrap_or("").contains("LD_LIBRARY_PATH")),
+            "ARCH_MISMATCH fix mentions LD_LIBRARY_PATH"
+        );
+        // The layout codes from T1.2 are in the kernel registry.
+        let codes = result["codes"].as_array().expect("codes array");
+        assert!(codes.iter().any(|c| c["code"] == 4907));
     }
 
     #[test]

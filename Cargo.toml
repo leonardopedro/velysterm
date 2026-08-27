@@ -3,8 +3,6 @@ resolver = "2"
 members = ["crates/*", "examples/*"]
 exclude = [
     "/.github/",
-    "crates/delta_algebra",
-    "crates/delta_sirk",
 ]
 
 [workspace.package]

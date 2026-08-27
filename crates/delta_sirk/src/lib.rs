@@ -135,6 +135,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_qho_shifted_vacuum_energy() {
+        // Skip gracefully without a GPU (Cadabra2 skip pattern in unfer).
+        if DeltaAlgebraEngine::try_new().await.is_none() {
+            eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
+            return;
+        }
         // Shifted vacuum at x0 = 1.0 should have mean energy 1.0
         let (matrix, _) =
             run_symbolic_delta_sirk(1.0, vec![10.0]).await;
@@ -145,5 +150,40 @@ mod tests {
 
         assert!((h00_re - 1.0).abs() < 1e-4);
         assert!(h00_im.abs() < 1e-4);
+    }
+
+    #[tokio::test]
+    async fn gpu_matrix_elements_match_cpu_reference() {
+        // Differential test at the SIRK level: the Krylov-basis matrix
+        // elements <v_i | H | v_j> computed through the wgpu engine must match
+        // the pure-CPU reference inner products (correctness oracle).
+        let Some(engine) = DeltaAlgebraEngine::try_new().await else {
+            eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
+            return;
+        };
+
+        let v0 = coherent_state(0.5, 8);
+        // Normalize on the GPU (as the pipeline does), using the reference
+        // only for the final comparison.
+        let (v0_re, _) = engine.inner_product(&v0, &v0);
+        let v0_norm = v0_re.sqrt();
+        let v0: Vec<HermiteState> = v0
+            .iter()
+            .map(|s| HermiteState::new(s.n, s.coeff_re / v0_norm, s.coeff_im / v0_norm))
+            .collect();
+
+        let v1 = apply_qho_resolvent(&v0, 10.0);
+        let h_v1 = apply_qho_hamiltonian(&v1);
+
+        // GPU matrix element.
+        let (gpu_re, gpu_im) = engine.inner_product(&v0, &h_v1);
+        // CPU reference matrix element.
+        let (cpu_re, cpu_im) =
+            delta_algebra::reference::inner_product_reference(&v0, &h_v1);
+
+        assert!(
+            (gpu_re - cpu_re).abs() < 1e-5 && (gpu_im - cpu_im).abs() < 1e-5,
+            "GPU <v0|H|v1> = ({gpu_re}, {gpu_im}) but CPU reference = ({cpu_re}, {cpu_im})",
+        );
     }
 }
