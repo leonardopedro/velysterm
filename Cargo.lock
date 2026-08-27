@@ -6118,6 +6118,7 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst_imaging",
+ "unfer_ffi",
  "unfer_protocol",
  "winit",
 ]

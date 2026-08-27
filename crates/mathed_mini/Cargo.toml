@@ -20,6 +20,10 @@ serde_json = "1.0"
 # (P3 #11: wire kernel_client into mathed_mini) so a \prob computes a real
 # number off the render thread.
 kernel_client = { path = "../kernel_client" }
+# H4 durable-store status dashboard: the TUI consults the unfer kernel's
+# store read-only (backend, persist counter, stream lengths, corrupt-
+# snapshot recovery report). unfer_ffi is rlib-compatible.
+unfer_ffi = { path = "../../../unfer/unfer_ffi" }
 
 typst = { workspace = true }
 typst-library = { workspace = true }

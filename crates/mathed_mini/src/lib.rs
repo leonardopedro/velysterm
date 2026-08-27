@@ -15,6 +15,7 @@ pub mod a11y;
 pub mod app;
 pub mod cite_popup;
 pub mod dispatch;
+pub mod durable_dashboard;
 pub mod export;
 pub mod kernel_bridge;
 pub mod marker_overlay;

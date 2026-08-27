@@ -7,6 +7,13 @@
 //!   mathed_mini --export-typst <file>   Export to standalone .typ
 //!   mathed_mini --export-json <file>    Export SemanticIndex as JSON
 //!   mathed_mini --export-md <file>      Export as plain Markdown
+//!
+//! Durable dashboard (TUI):
+//!   mathed_mini --dashboard             Open the durable-store status
+//!                                       dashboard (Typst document, citable
+//!                                       sections: Ctrl+1..3 to expand)
+//!   mathed_mini --dashboard-typst <f>   Headless: consult the store and
+//!                                       write the dashboard document
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -20,6 +27,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(flag) = args.get(1) {
         let rest = &args[2..];
         match flag.as_str() {
+            "--dashboard-typst" => {
+                let path = rest
+                    .first()
+                    .ok_or("--dashboard-typst requires a file path")?;
+                let out = mathed_mini::durable_dashboard::dashboard_document();
+                std::fs::write(path, out)?;
+                eprintln!("Exported durable dashboard Typst to {path}");
+                return Ok(());
+            }
+            "--dashboard" => {
+                // Open the editor on the durable-status dashboard document.
+                return mathed_mini::app::run(
+                    &mathed_mini::durable_dashboard::dashboard_document(),
+                );
+            }
             "--export-typst" => {
                 let path = rest
                     .first()

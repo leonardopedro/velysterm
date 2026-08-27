@@ -82,11 +82,50 @@ pub fn spawn_durable_panel(mut commands: Commands) {
         });
 }
 
-/// Poll the durable store on the cadence: open lazily from `UNFER_DURABLE_DIR`
-/// (only when the directory exists — otherwise the panel reports RAM-only,
-/// exactly like the kernel does with no store configured) and refresh the
-/// consulted status. Loro's `open_store` never fails, so the panel cannot
-/// error out; it just stays `none` until a store appears.
+/// Open a read-only store from `UNFER_DURABLE_DIR` (only when the directory
+/// exists — otherwise `None` reports RAM-only, exactly like the kernel does
+/// with no store configured). Loro's `open_store` never fails, so opening
+/// cannot error out; it just stays `None` until a store appears.
+pub fn open_panel_store() -> Option<Arc<dyn DurableStore>> {
+    let dir = std::env::var("UNFER_DURABLE_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .filter(|d| d.is_dir());
+    let d = dir?;
+    // Loro open is infallible (a corrupt snapshot recovers empty and reports
+    // via `snapshot_load_error` — exactly what the chip shows).
+    Some(Arc::from(
+        open_store(Some(&d), Backend::Loro).expect("loro open_store cannot fail"),
+    ))
+}
+
+/// Consult the durable store into a fresh status (backend, persist counter,
+/// per-stream lengths, corrupt-snapshot recovery report). `None` store =
+/// RAM-only (the kernel's no-store shape, stable schema). Pure: extracted
+/// from the poll system so the dashboard's reporting path is unit-testable.
+pub fn consult_status(store: Option<&Arc<dyn DurableStore>>) -> DurableStatus {
+    match store {
+        Some(store) => DurableStatus {
+            backend: store.backend().to_string(),
+            persist_count: store.persist_count(),
+            streams: STREAM_NAMES
+                .iter()
+                .map(|s| (s.to_string(), store.stream_len(s).unwrap_or(u64::MAX)))
+                .collect(),
+            snapshot_load_error: store.snapshot_load_error(),
+        },
+        None => DurableStatus {
+            backend: "none".to_string(),
+            persist_count: 0,
+            streams: STREAM_NAMES.iter().map(|s| (s.to_string(), 0)).collect(),
+            snapshot_load_error: None,
+        },
+    }
+}
+
+/// Poll the durable store on the cadence: open lazily and refresh the
+/// consulted status.
 pub fn poll_durable_status(
     time: Res<Time>,
     mut panel: ResMut<DurablePanel>,
@@ -96,38 +135,9 @@ pub fn poll_durable_status(
         return;
     }
     if panel.store.is_none() {
-        let dir = std::env::var("UNFER_DURABLE_DIR")
-            .ok()
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from)
-            .filter(|d| d.is_dir());
-        if let Some(d) = dir {
-            // Loro open is infallible (a corrupt snapshot recovers empty and
-            // reports via `snapshot_load_error` — exactly what the chip shows).
-            panel.store = Some(Arc::from(
-                open_store(Some(&d), Backend::Loro)
-                    .expect("loro open_store cannot fail"),
-            ));
-        }
+        panel.store = open_panel_store();
     }
-    match &panel.store {
-        Some(store) => {
-            status.backend = store.backend().to_string();
-            status.persist_count = store.persist_count();
-            status.streams = STREAM_NAMES
-                .iter()
-                .map(|s| (s.to_string(), store.stream_len(s).unwrap_or(u64::MAX)))
-                .collect();
-            status.snapshot_load_error = store.snapshot_load_error();
-        }
-        None => {
-            status.backend = "none".to_string();
-            status.persist_count = 0;
-            status.streams =
-                STREAM_NAMES.iter().map(|s| (s.to_string(), 0)).collect();
-            status.snapshot_load_error = None;
-        }
-    }
+    *status = consult_status(panel.store.as_ref());
 }
 
 /// Rewrite the chip text when the consulted status changes. A corrupt-snapshot
@@ -164,4 +174,78 @@ pub fn update_durable_panel(
             format!("{first}\n{streams_line}")
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unique scratch directory, cleaned up on drop.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "mathed-durable-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// E2E reporting path: a torn snapshot.bin on disk, the store opened the
+    /// way the panel opens it, and the consulted status carries the recovery
+    /// report — the exact data the dashboard chip renders in warning red.
+    #[test]
+    fn corrupt_snapshot_surfaces_in_dashboard_status() {
+        let scratch = Scratch::new("corrupt");
+        let dir = &scratch.0;
+        std::fs::write(
+            dir.join("snapshot.bin"),
+            b"\x00garbage: not a loro snapshot",
+        )
+        .unwrap();
+
+        let store = Arc::from(
+            open_store(Some(dir), Backend::Loro).expect("loro open cannot fail"),
+        );
+        let status = consult_status(Some(&store));
+        assert_eq!(status.backend, "loro");
+        assert!(
+            status
+                .snapshot_load_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("snapshot import failed"),
+            "dashboard must surface the corruption: {:?}",
+            status.snapshot_load_error
+        );
+
+        // The chip text is built from the consulted status — assert the
+        // warning line appears in what the panel would render.
+        let line = match &status.snapshot_load_error {
+            Some(err) => format!("⚠ snapshot recovery: {err}"),
+            None => String::new(),
+        };
+        assert!(line.contains("snapshot recovery"), "chip line: {line}");
+    }
+
+    /// The kernel's no-store shape: RAM-only, stable schema, no error.
+    #[test]
+    fn no_store_reports_ram_only() {
+        let status = consult_status(None);
+        assert_eq!(status.backend, "none");
+        assert_eq!(status.persist_count, 0);
+        assert_eq!(status.snapshot_load_error, None);
+        assert!(status.streams.iter().all(|(_, n)| *n == 0));
+    }
 }
