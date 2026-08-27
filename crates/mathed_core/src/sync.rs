@@ -61,7 +61,8 @@ pub struct Presence {
 /// One `PresenceStore` per peer per document. `set_name` / `set_cursor`
 /// publish a heartbeat; `encode` / `encode_all` produce the transport
 /// payload; `apply` merges a remote payload; `remove_outdated` prunes
-/// peers whose heartbeat lapsed past `timeout_ms`.
+/// peers whose heartbeat lapsed past `timeout_ms`, and `peers` skips
+/// them even before a prune pass runs.
 ///
 /// Nothing here touches the document's CRDT history: presence is
 /// ephemeral by construction and disappears when its peers stop
@@ -76,6 +77,10 @@ pub struct PresenceStore {
     /// Millisecond of the last publish, reserved so every publish is
     /// strictly newer than the previous one (see [`Self::publish`]).
     last_set_ms: AtomicI64,
+    /// The inactivity timeout, kept here so `peers` can filter expired
+    /// entries without a `remove_outdated` pass having run (Loro keeps
+    /// expired entries in `get_all_states` until they are purged).
+    timeout_ms: i64,
 }
 
 impl Clone for PresenceStore {
@@ -87,6 +92,7 @@ impl Clone for PresenceStore {
             last_set_ms: AtomicI64::new(
                 self.last_set_ms.load(Ordering::Relaxed),
             ),
+            timeout_ms: self.timeout_ms,
         }
     }
 }
@@ -121,6 +127,7 @@ impl PresenceStore {
                 cursor: None,
             })),
             last_set_ms: AtomicI64::new(0),
+            timeout_ms,
         }
     }
 
@@ -226,6 +233,13 @@ impl PresenceStore {
     }
 
     /// The live peer list, self excluded, sorted by peer id.
+    ///
+    /// Loro's `get_all_states` returns expired entries until an explicit
+    /// `remove_outdated` purges them (in Rust nothing prunes
+    /// automatically), so the view filters on the published heartbeat
+    /// itself: a peer not heard from within the timeout is invisible
+    /// here without requiring a prune pass to have run. An entry with
+    /// no heartbeat field at all counts as long dead.
     pub fn peers(&self) -> Vec<Presence> {
         let mut out: Vec<Presence> = self
             .store
@@ -233,9 +247,17 @@ impl PresenceStore {
             .iter()
             .filter(|(id, _)| id.as_str() != self.peer)
             .filter_map(|(id, v)| decode_presence(id, v))
+            .filter(|p| !self.expired(p.last_seen_ms))
             .collect();
         out.sort_by(|a, b| a.peer.cmp(&b.peer));
         out
+    }
+
+    /// Whether a heartbeat from `last_seen_ms` has lapsed past the
+    /// timeout, mirroring Loro's `now - timestamp > timeout` expiry
+    /// semantics on the same millisecond clock the heartbeat publishes.
+    fn expired(&self, last_seen_ms: i64) -> bool {
+        now_ms() - last_seen_ms > self.timeout_ms
     }
 
     /// Subscribe to this peer's own presence updates.
@@ -417,6 +439,28 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         bob.remove_outdated();
         assert!(bob.peers().is_empty(), "peers: {:?}", bob.peers());
+    }
+
+    #[test]
+    fn presence_peers_skip_expired_without_prune() {
+        let alice = PresenceStore::new("peer-a", "Alice", 1);
+        let bob = PresenceStore::new("peer-b", "Bob", 1);
+
+        alice.set_cursor(Some(3));
+        bob.apply(&alice.encode()).unwrap();
+        assert_eq!(bob.peers().len(), 1);
+
+        // After the timeout lapses the stale peer disappears from the
+        // view even though no `remove_outdated()` pass has run (Loro
+        // keeps expired entries in `get_all_states` until purged).
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(bob.peers().is_empty(), "peers: {:?}", bob.peers());
+
+        // A fresh heartbeat revives the peer.
+        alice.set_cursor(Some(4));
+        bob.apply(&alice.encode()).unwrap();
+        assert_eq!(bob.peers().len(), 1);
+        assert_eq!(bob.peers()[0].cursor, Some(4));
     }
 
     #[test]
