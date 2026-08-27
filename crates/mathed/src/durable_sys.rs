@@ -15,27 +15,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use unfer_ffi::durable::{Backend, open_store};
-use unfer_protocol::durable::{DurableStore, streams};
+use unfer_ffi::durable::{Backend, DurableStatus, consult_status, open_store};
+use unfer_protocol::durable::DurableStore;
 
-/// The well-known stream names in status order (matches
-/// `unfer_ffi::handles::STREAM_NAMES`).
-const STREAM_NAMES: [&str; 6] = [
-    streams::AUDIT,
-    streams::OWNER_LOG,
-    streams::ACTIONS,
-    streams::CONFIG,
-    streams::SESSION,
-    streams::CERTIFICATES,
-];
-
-/// Latest consulted status, refreshed on the poll cadence.
+/// Latest consulted status, refreshed on the poll cadence. The consult
+/// itself (backend, persist counter, per-stream lengths, corrupt-snapshot
+/// recovery report) is `unfer_ffi::durable::consult_status` — the single
+/// implementation shared with the `mathed_mini` TUI dashboard.
 #[derive(Resource, Default)]
-pub struct DurableStatus {
-    pub backend: String,
-    pub persist_count: u64,
-    pub streams: Vec<(String, u64)>,
-    pub snapshot_load_error: Option<String>,
+pub struct DurableStatusResource(pub DurableStatus);
+
+impl std::ops::Deref for DurableStatusResource {
+    type Target = DurableStatus;
+    fn deref(&self) -> &DurableStatus {
+        &self.0
+    }
 }
 
 /// The panel's store handle (opened lazily) and poll cadence.
@@ -100,36 +94,12 @@ pub fn open_panel_store() -> Option<Arc<dyn DurableStore>> {
     ))
 }
 
-/// Consult the durable store into a fresh status (backend, persist counter,
-/// per-stream lengths, corrupt-snapshot recovery report). `None` store =
-/// RAM-only (the kernel's no-store shape, stable schema). Pure: extracted
-/// from the poll system so the dashboard's reporting path is unit-testable.
-pub fn consult_status(store: Option<&Arc<dyn DurableStore>>) -> DurableStatus {
-    match store {
-        Some(store) => DurableStatus {
-            backend: store.backend().to_string(),
-            persist_count: store.persist_count(),
-            streams: STREAM_NAMES
-                .iter()
-                .map(|s| (s.to_string(), store.stream_len(s).unwrap_or(u64::MAX)))
-                .collect(),
-            snapshot_load_error: store.snapshot_load_error(),
-        },
-        None => DurableStatus {
-            backend: "none".to_string(),
-            persist_count: 0,
-            streams: STREAM_NAMES.iter().map(|s| (s.to_string(), 0)).collect(),
-            snapshot_load_error: None,
-        },
-    }
-}
-
 /// Poll the durable store on the cadence: open lazily and refresh the
-/// consulted status.
+/// consulted status (via `unfer_ffi::durable::consult_status`).
 pub fn poll_durable_status(
     time: Res<Time>,
     mut panel: ResMut<DurablePanel>,
-    mut status: ResMut<DurableStatus>,
+    mut status: ResMut<DurableStatusResource>,
 ) {
     if !panel.poll.tick(time.delta()).just_finished() {
         return;
@@ -137,13 +107,13 @@ pub fn poll_durable_status(
     if panel.store.is_none() {
         panel.store = open_panel_store();
     }
-    *status = consult_status(panel.store.as_ref());
+    status.0 = consult_status(panel.store.as_deref());
 }
 
 /// Rewrite the chip text when the consulted status changes. A corrupt-snapshot
 /// recovery is drawn in warning red so the operator cannot miss it.
 pub fn update_durable_panel(
-    status: Res<DurableStatus>,
+    status: Res<DurableStatusResource>,
     mut q: Query<(&mut Text, &mut TextColor), With<DurablePanelText>>,
 ) {
     if !status.is_changed() {
@@ -215,10 +185,10 @@ mod tests {
         )
         .unwrap();
 
-        let store = Arc::from(
+        let store: Arc<dyn DurableStore> = Arc::from(
             open_store(Some(dir), Backend::Loro).expect("loro open cannot fail"),
         );
-        let status = consult_status(Some(&store));
+        let status = consult_status(Some(store.as_ref()));
         assert_eq!(status.backend, "loro");
         assert!(
             status

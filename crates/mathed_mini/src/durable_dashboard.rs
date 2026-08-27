@@ -17,54 +17,20 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use unfer_ffi::durable::{Backend, open_store};
-use unfer_protocol::durable::{DurableStore, streams};
-
-/// The well-known stream names in status order (matches
-/// `unfer_ffi::handles::STREAM_NAMES`).
-const STREAM_NAMES: [&str; 6] = [
-    streams::AUDIT,
-    streams::OWNER_LOG,
-    streams::ACTIONS,
-    streams::CONFIG,
-    streams::SESSION,
-    streams::CERTIFICATES,
-];
-
-/// Latest consulted status (stable schema, RAM-only shape when no store).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct DurableStatus {
-    pub backend: String,
-    pub persist_count: u64,
-    pub streams: Vec<(String, u64)>,
-    pub snapshot_load_error: Option<String>,
-}
+use unfer_ffi::durable::{Backend, DurableStatus, consult_status, open_store};
+use unfer_protocol::durable::DurableStore;
 
 /// Consult the durable store at `dir`. `None` = no store (the RAM-only
 /// shape the kernel reports when `UNFER_DURABLE_DIR` is unset). Pure
 /// read-only: never appends or flushes, so it cannot race the kernel's
-/// writes to the same snapshot.
+/// writes to the same snapshot. The consult itself is
+/// `unfer_ffi::durable::consult_status` — the single implementation shared
+/// with the Bevy status chip.
 pub fn consult_from(dir: Option<&Path>) -> DurableStatus {
     let store: Option<Arc<dyn DurableStore>> = dir.map(|d| {
         Arc::from(open_store(Some(d), Backend::Loro).expect("loro open cannot fail"))
     });
-    match store {
-        Some(store) => DurableStatus {
-            backend: store.backend().to_string(),
-            persist_count: store.persist_count(),
-            streams: STREAM_NAMES
-                .iter()
-                .map(|s| (s.to_string(), store.stream_len(s).unwrap_or(u64::MAX)))
-                .collect(),
-            snapshot_load_error: store.snapshot_load_error(),
-        },
-        None => DurableStatus {
-            backend: "none".to_string(),
-            persist_count: 0,
-            streams: STREAM_NAMES.iter().map(|s| (s.to_string(), 0)).collect(),
-            snapshot_load_error: None,
-        },
-    }
+    consult_status(store.as_deref())
 }
 
 /// Consult the store configured by the environment (`UNFER_DURABLE_DIR`).

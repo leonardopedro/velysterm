@@ -235,7 +235,7 @@ fn main() {
         .init_resource::<Searching>()
         .init_resource::<LastChange>()
         .init_resource::<kernel_sys::KernelBridge>()
-        .init_resource::<durable_sys::DurableStatus>()
+        .init_resource::<durable_sys::DurableStatusResource>()
         .init_resource::<durable_sys::DurablePanel>()
         .init_resource::<cite_refs::CitePopupStack>()
         .init_resource::<cite_refs::ReferencesPanelOpen>()
