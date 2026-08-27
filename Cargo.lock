@@ -6073,6 +6073,8 @@ dependencies = [
  "mathed_core",
  "mathed_mini",
  "typst",
+ "unfer_ffi",
+ "unfer_protocol",
  "velyst",
 ]
 
@@ -10210,6 +10212,21 @@ dependencies = [
  "unfer_consensus",
  "unfer_protocol",
  "x25519-dalek",
+]
+
+[[package]]
+name = "unfer_ffi"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "loro",
+ "ode_sirk",
+ "prob_kernel",
+ "serde",
+ "serde_json",
+ "unfer_consensus",
+ "unfer_data",
+ "unfer_protocol",
 ]
 
 [[package]]

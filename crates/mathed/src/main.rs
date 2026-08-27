@@ -19,6 +19,7 @@
 
 mod blocks_view;
 mod cite_refs;
+mod durable_sys;
 mod kernel_sys;
 mod keymap;
 mod overlay;
@@ -234,10 +235,12 @@ fn main() {
         .init_resource::<Searching>()
         .init_resource::<LastChange>()
         .init_resource::<kernel_sys::KernelBridge>()
+        .init_resource::<durable_sys::DurableStatus>()
+        .init_resource::<durable_sys::DurablePanel>()
         .init_resource::<cite_refs::CitePopupStack>()
         .init_resource::<cite_refs::ReferencesPanelOpen>()
         .init_resource::<ImePreedit>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, (setup, durable_sys::spawn_durable_panel))
         .add_systems(
             PreUpdate,
             (handle_keyboard, handle_mouse, handle_ime),
@@ -257,6 +260,13 @@ fn main() {
                 kernel_sys::apply_kernel_results,
             )
                 .after(sync_blocks),
+        )
+        .add_systems(
+            Update,
+            (
+                durable_sys::poll_durable_status,
+                durable_sys::update_durable_panel,
+            ),
         )
         .add_systems(Update, autosave)
         .add_systems(

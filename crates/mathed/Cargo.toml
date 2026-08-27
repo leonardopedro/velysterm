@@ -18,6 +18,11 @@ bevy = { workspace = true }
 bevy_vello = { workspace = true }
 typst = { workspace = true }
 arboard = "3.6.1"
+# H4 durable-store status dashboard: the mathed GUI consults the unfer
+# kernel's store read-only (backend, persist counter, stream lengths,
+# corrupt-snapshot recovery report). unfer_ffi is rlib-compatible.
+unfer_ffi = { path = "../../../unfer/unfer_ffi" }
+unfer_protocol = { path = "../../../unfer/unfer_protocol" }
 
 [lints]
 workspace = true
