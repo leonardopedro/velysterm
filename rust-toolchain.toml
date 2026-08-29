@@ -1,0 +1,9 @@
+# Pinned Rust toolchain for the velysterm workspace.
+#
+# The CI check/clippy jobs use dtolnay/rust-toolchain@stable; rustup honors
+# this file for every cargo invocation, so the editor and kernel_client build
+# with exactly this compiler. The separate `format` job deliberately uses
+# `cargo +nightly fmt` (via its own @nightly step) — the nightly toolchain is
+# only used for rustfmt, never for the build. Bump deliberately.
+[toolchain]
+channel = "1.97.1"
