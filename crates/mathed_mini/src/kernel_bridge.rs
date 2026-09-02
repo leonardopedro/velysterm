@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 use kernel_client::worker::BlockResponse;
 use kernel_client::{KernelClient, KernelRequest};
@@ -74,6 +75,13 @@ pub struct KernelBridge {
     /// output, …). Consumed by [`translator_errors`](Self::translator_errors)
     /// so the transform can show the error in the expanded panel.
     translator_errors: HashMap<usize, String>,
+    /// Request key → time it was submitted and not yet answered. `poll`
+    /// removes a key when a response arrives and expires entries older than
+    /// [`LOST_RESPONSE_DEADLINE`] into a visible error: a request the worker
+    /// accepted but never answered must not leave the prob silently without
+    /// an annotation forever (only possible via a future worker bug — the
+    /// worker answers every request today).
+    pending: HashMap<usize, Instant>,
 }
 
 impl Default for KernelBridge {
@@ -93,6 +101,7 @@ impl KernelBridge {
             prob_hashes: HashMap::new(),
             translator_errors: HashMap::new(),
             live: HashSet::new(),
+            pending: HashMap::new(),
         }
     }
 
@@ -234,6 +243,47 @@ impl KernelBridge {
                         "kernel.worker",
                         "restart the editor; a panicked worker cannot be \
                          revived in place",
+                    )],
+                },
+            );
+        } else {
+            // Accepted: the worker owes us a response for this key. Track it
+            // so a response that never arrives (a future worker bug — the
+            // worker answers every request today) becomes a visible error
+            // instead of a silently missing annotation forever.
+            self.pending.insert(block_id as usize, Instant::now());
+        }
+    }
+
+    /// How long a submitted-but-unanswered request may stay in flight before
+    /// it is declared lost and surfaced as a visible error.
+    const LOST_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// Expire requests that were accepted but never answered. Called from
+    /// [`poll`] on every drain; `now` is injectable so tests can fabricate a
+    /// clock.
+    fn expire_lost(&mut self, now: Instant) {
+        let expired: Vec<usize> = self
+            .pending
+            .iter()
+            .filter(|(_, t)| now.duration_since(**t) > Self::LOST_RESPONSE_DEADLINE)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in expired {
+            self.pending.remove(&key);
+            self.results.insert(
+                key,
+                KernelResult::Error {
+                    code_name: "kernel-response-lost".to_string(),
+                    message: format!(
+                        "the worker accepted the request but no response \
+                         arrived within {}s; re-edit the statement to retry",
+                        Self::LOST_RESPONSE_DEADLINE.as_secs()
+                    ),
+                    hints: vec![RepairHint::new(
+                        HintKind::ReplaceValue,
+                        "statement",
+                        "re-edit the statement to re-dispatch it",
                     )],
                 },
             );
@@ -550,6 +600,8 @@ impl KernelBridge {
             .retain(|k, _| self.live.contains(k));
         self.prob_names
             .retain(|k, _| self.live.contains(k));
+        self.pending
+            .retain(|k, _| self.live.contains(k));
         changed
     }
 
@@ -557,7 +609,23 @@ impl KernelBridge {
     /// Returns `true` if any result changed (the frontend should redraw).
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
+        // Requests that were accepted but never answered become a visible
+        // error instead of a permanently missing annotation.
+        let before = self.results.len();
+        self.expire_lost(Instant::now());
+        changed |= self.results.len() != before;
         while let Some(resp) = self.client.try_recv() {
+            // Any response settles its request — even one for a statement
+            // that has since been deleted (dropped by the live filter
+            // below). A settled key must not be declared lost later.
+            match &resp {
+                BlockResponse::Value(id, _)
+                | BlockResponse::StringValue(id, _)
+                | BlockResponse::Error(id, _)
+                | BlockResponse::Success(id) => {
+                    self.pending.remove(&(*id as usize));
+                }
+            }
             // A late response for a statement that has since been deleted must
             // not resurrect its stale annotation: the key is not live anymore.
             let key_live = match &resp {
@@ -1386,6 +1454,52 @@ mod tests {
     /// a dead model. The cleanup must also drop the dispatch hash so a
     /// reappearing model recomputes. The prob keeps its byte offset between
     /// the two documents: only the model semantics disappear.
+    /// REGRESSION: a request the worker accepted but never answered must not
+    /// leave the prob silently without an annotation forever. `poll` expires
+    /// entries past the deadline into a visible `kernel-response-lost` error.
+    /// The worker answers every request today, so the loss is simulated at
+    /// the pending map (the contract: fresh submissions stay, answered ones
+    /// are removed and can never be declared lost).
+    #[test]
+    fn lost_response_expires_to_visible_error() {
+        let mut bridge = KernelBridge::new();
+        let now = Instant::now();
+        // Fresh submission: must NOT expire.
+        bridge.pending.insert(1, now);
+        // Stuck submission: must expire into a visible error.
+        bridge.pending.insert(
+            2,
+            now - Duration::from_secs(60),
+        );
+        // Settled submission: removed from pending, cannot be declared lost.
+        bridge.pending.insert(3, now);
+        bridge.pending.remove(&3);
+
+        bridge.expire_lost(now + Duration::from_secs(10));
+
+        assert!(
+            !bridge.results.contains_key(&1),
+            "a fresh request must not expire"
+        );
+        assert!(bridge.pending.contains_key(&1));
+        match bridge.results.get(&2) {
+            Some(KernelResult::Error { code_name, .. }) => {
+                assert_eq!(code_name, "kernel-response-lost");
+                assert!(
+                    !bridge.pending.contains_key(&2),
+                    "expired request must leave the pending map"
+                );
+            }
+            other => panic!(
+                "expected lost-response error, got {other:?}"
+            ),
+        }
+        assert!(
+            !bridge.results.contains_key(&3),
+            "an answered request must never be declared lost"
+        );
+    }
+
     #[test]
     fn stale_prob_result_cleared_when_model_deleted() {
         let doc1 =
