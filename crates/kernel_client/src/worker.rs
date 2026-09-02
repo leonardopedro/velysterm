@@ -46,263 +46,320 @@ impl KernelWorker {
 
     pub fn run(&mut self, rx: Receiver<KernelRequest>) {
         while let Ok(req) = rx.recv() {
-            match req {
-                KernelRequest::DefineModel { block_id, spec } => {
-                    match Session::new(&spec) {
-                        Ok(session) => {
-                            self.sessions.insert(block_id, session);
+            // `Shutdown` terminates the worker loop; every other request goes
+            // to `handle`, invoked here under catch_unwind: a bug that panics
+            // mid-request must never strand it (silent dead-end — the editor
+            // already got `submit() == true`, so it would wait forever for a
+            // response that never arrives). Answer with a visible UK-5000
+            // error and keep the worker alive for later requests — the same
+            // fail-visible discipline as the kernel's own `ffi_entry` guard.
+            if matches!(req, KernelRequest::Shutdown) {
+                break;
+            }
+            let block_id = req.block_id();
+            let outcome = std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| self.handle(req)),
+            );
+            if let Err(payload) = outcome {
+                let reason = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| {
+                        "(non-string panic payload)".to_string()
+                    });
+                let msg = format!(
+                    "kernel worker panicked while handling a request: {reason} \
+                     (internal client bug; the worker stays alive for \
+                     later requests)"
+                );
+                match block_id {
+                    Some(id) => {
+                        let _ = self.tx.send(BlockResponse::Error(
+                            id,
+                            Diagnostic::new(
+                                Code::INTERNAL,
+                                msg,
+                                Severity::Error,
+                            ),
+                        ));
+                    }
+                    None => eprintln!("kernel_client worker: {msg}"),
+                }
+            }
+        }
+    }
+
+    /// Handle one request. Kept separate from [`run`] so a bug that panics
+    /// mid-request is caught at the loop boundary instead of killing the
+    /// worker thread (see [`run`]).
+    fn handle(&mut self, req: KernelRequest) {
+        match req {
+            KernelRequest::DefineModel { block_id, spec } => {
+                match Session::new(&spec) {
+                    Ok(session) => {
+                        self.sessions.insert(block_id, session);
+                        let _ = self.tx.send(
+                            BlockResponse::Success(block_id),
+                        );
+                    }
+                    Err(e) => {
+                        let _ =
+                            self.tx.send(BlockResponse::Error(
+                                block_id,
+                                e.to_diagnostic(),
+                            ));
+                    }
+                }
+            }
+            KernelRequest::Evolve { block_id, t } => {
+                if let Some(session) =
+                    self.sessions.get_mut(&block_id)
+                {
+                    match session.evolve(t) {
+                        Ok(_) => {
                             let _ = self.tx.send(
                                 BlockResponse::Success(block_id),
                             );
                         }
                         Err(e) => {
-                            let _ =
-                                self.tx.send(BlockResponse::Error(
+                            let _ = self.tx.send(
+                                BlockResponse::Error(
                                     block_id,
                                     e.to_diagnostic(),
-                                ));
-                        }
-                    }
-                }
-                KernelRequest::Evolve { block_id, t } => {
-                    if let Some(session) =
-                        self.sessions.get_mut(&block_id)
-                    {
-                        match session.evolve(t) {
-                            Ok(_) => {
-                                let _ = self.tx.send(
-                                    BlockResponse::Success(block_id),
-                                );
-                            }
-                            Err(e) => {
-                                let _ = self.tx.send(
-                                    BlockResponse::Error(
-                                        block_id,
-                                        e.to_diagnostic(),
-                                    ),
-                                );
-                            }
-                        }
-                    } else {
-                        let _ =
-                            self.tx.send(Self::bad_handle(block_id));
-                    }
-                }
-                KernelRequest::Probability {
-                    model_id,
-                    block_id,
-                    event_json,
-                } => {
-                    if let Some(session) =
-                        self.sessions.get(&model_id)
-                    {
-                        match serde_json::from_str::<
-                            unfer_protocol::EventPredicate,
-                        >(&event_json)
-                        {
-                            Ok(pred) => {
-                                match session.probability(&pred) {
-                                    Ok(p) => {
-                                        let _ = self.tx.send(
-                                            BlockResponse::Value(
-                                                block_id, p,
-                                            ),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        let _ = self.tx.send(
-                                            BlockResponse::Error(
-                                                block_id,
-                                                e.to_diagnostic(),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                let _ = self.tx.send(
-                                    BlockResponse::Error(
-                                        block_id,
-                                        Diagnostic::new(
-                                            Code(1003),
-                                            "Invalid event JSON"
-                                                .to_string(),
-                                            Severity::Error,
-                                        ),
-                                    ),
-                                );
-                            }
-                        }
-                    } else {
-                        let _ =
-                            self.tx.send(Self::bad_handle(block_id));
-                    }
-                }
-                KernelRequest::Condition {
-                    model_id,
-                    block_id,
-                    event_json,
-                } => {
-                    if let Some(session) =
-                        self.sessions.get_mut(&model_id)
-                    {
-                        match serde_json::from_str::<
-                            unfer_protocol::EventPredicate,
-                        >(&event_json)
-                        {
-                            Ok(pred) => {
-                                match session.condition(&pred) {
-                                    Ok(p) => {
-                                        let _ = self.tx.send(
-                                            BlockResponse::Value(
-                                                block_id, p,
-                                            ),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        let _ = self.tx.send(
-                                            BlockResponse::Error(
-                                                block_id,
-                                                e.to_diagnostic(),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(_) => {
-                                let _ = self.tx.send(
-                                    BlockResponse::Error(
-                                        block_id,
-                                        Diagnostic::new(
-                                            Code(1003),
-                                            "Invalid event JSON"
-                                                .to_string(),
-                                            Severity::Error,
-                                        ),
-                                    ),
-                                );
-                            }
-                        }
-                    } else {
-                        let _ =
-                            self.tx.send(Self::bad_handle(block_id));
-                    }
-                }
-                KernelRequest::CloseModel { block_id } => {
-                    if self.sessions.remove(&block_id).is_some() {
-                        let _ = self
-                            .tx
-                            .send(BlockResponse::Success(block_id));
-                    } else {
-                        let _ =
-                            self.tx.send(Self::bad_handle(block_id));
-                    }
-                }
-                KernelRequest::CloseModelById { model_id } => {
-                    if self.sessions.remove(&model_id).is_some() {
-                        let _ = self
-                            .tx
-                            .send(BlockResponse::Success(model_id));
-                    } else {
-                        let _ =
-                            self.tx.send(Self::bad_handle(model_id));
-                    }
-                }
-                KernelRequest::DidCreate {
-                    block_id,
-                    service_endpoint,
-                } => {
-                    let mut mgr = unfer_identity::DidManager::new(
-                        &mut self.consensus,
-                    );
-                    match mgr
-                        .create_did(&self.keypair, service_endpoint)
-                    {
-                        Ok(did) => {
-                            self.did = Some(did.clone());
-                            let _ = self.tx.send(
-                                BlockResponse::StringValue(
-                                    block_id, did,
                                 ),
                             );
                         }
-                        Err(e) => {
-                            let _ =
-                                self.tx.send(BlockResponse::Error(
+                    }
+                } else {
+                    let _ =
+                        self.tx.send(Self::bad_handle(block_id));
+                }
+            }
+            KernelRequest::Probability {
+                model_id,
+                block_id,
+                event_json,
+            } => {
+                if let Some(session) =
+                    self.sessions.get(&model_id)
+                {
+                    match serde_json::from_str::<
+                        unfer_protocol::EventPredicate,
+                    >(&event_json)
+                    {
+                        Ok(pred) => {
+                            match session.probability(&pred) {
+                                Ok(p) => {
+                                    let _ = self.tx.send(
+                                        BlockResponse::Value(
+                                            block_id, p,
+                                        ),
+                                    );
+                                }
+                                Err(e) => {
+                                    let _ = self.tx.send(
+                                        BlockResponse::Error(
+                                            block_id,
+                                            e.to_diagnostic(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let _ = self.tx.send(
+                                BlockResponse::Error(
                                     block_id,
                                     Diagnostic::new(
-                                        Code(6001),
-                                        format!(
-                                            "DID creation failed: {e}"
-                                        ),
+                                        Code(1003),
+                                        "Invalid event JSON"
+                                            .to_string(),
                                         Severity::Error,
                                     ),
-                                ));
-                        }
-                    }
-                }
-                KernelRequest::ContentPublish {
-                    block_id,
-                    data,
-                    mime_type,
-                    display_name,
-                } => {
-                    let kp = self.keypair.clone();
-                    let mut pub_ = unfer_data::DataPublisher::new(
-                        &mut self.consensus,
-                    );
-                    match pub_.publish(
-                        &kp,
-                        &data,
-                        &mime_type,
-                        display_name.as_deref(),
-                    ) {
-                        Ok(content_ref) => {
-                            let _ = self.tx.send(
-                                BlockResponse::StringValue(
-                                    block_id,
-                                    content_ref.cid,
                                 ),
                             );
                         }
-                        Err(e) => {
-                            let _ = self.tx.send(BlockResponse::Error(
+                    }
+                } else {
+                    let _ =
+                        self.tx.send(Self::bad_handle(block_id));
+                }
+            }
+            KernelRequest::Condition {
+                model_id,
+                block_id,
+                event_json,
+            } => {
+                if let Some(session) =
+                    self.sessions.get_mut(&model_id)
+                {
+                    match serde_json::from_str::<
+                        unfer_protocol::EventPredicate,
+                    >(&event_json)
+                    {
+                        Ok(pred) => {
+                            match session.condition(&pred) {
+                                Ok(p) => {
+                                    let _ = self.tx.send(
+                                        BlockResponse::Value(
+                                            block_id, p,
+                                        ),
+                                    );
+                                }
+                                Err(e) => {
+                                    let _ = self.tx.send(
+                                        BlockResponse::Error(
+                                            block_id,
+                                            e.to_diagnostic(),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            let _ = self.tx.send(
+                                BlockResponse::Error(
+                                    block_id,
+                                    Diagnostic::new(
+                                        Code(1003),
+                                        "Invalid event JSON"
+                                            .to_string(),
+                                        Severity::Error,
+                                    ),
+                                ),
+                            );
+                        }
+                    }
+                } else {
+                    let _ =
+                        self.tx.send(Self::bad_handle(block_id));
+                }
+            }
+            KernelRequest::CloseModel { block_id } => {
+                if self.sessions.remove(&block_id).is_some() {
+                    let _ = self
+                        .tx
+                        .send(BlockResponse::Success(block_id));
+                } else {
+                    let _ =
+                        self.tx.send(Self::bad_handle(block_id));
+                }
+            }
+            KernelRequest::CloseModelById { model_id } => {
+                if self.sessions.remove(&model_id).is_some() {
+                    let _ = self
+                        .tx
+                        .send(BlockResponse::Success(model_id));
+                } else {
+                    let _ =
+                        self.tx.send(Self::bad_handle(model_id));
+                }
+            }
+            KernelRequest::DidCreate {
+                block_id,
+                service_endpoint,
+            } => {
+                let mut mgr = unfer_identity::DidManager::new(
+                    &mut self.consensus,
+                );
+                match mgr
+                    .create_did(&self.keypair, service_endpoint)
+                {
+                    Ok(did) => {
+                        self.did = Some(did.clone());
+                        let _ = self.tx.send(
+                            BlockResponse::StringValue(
+                                block_id, did,
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        let _ =
+                            self.tx.send(BlockResponse::Error(
                                 block_id,
                                 Diagnostic::new(
-                                    Code(6002),
-                                    format!("content publish failed: {e}"),
+                                    Code(6001),
+                                    format!(
+                                        "DID creation failed: {e}"
+                                    ),
                                     Severity::Error,
                                 ),
                             ));
-                        }
                     }
                 }
-                KernelRequest::ContentResolve { block_id, cid } => {
-                    match self.consensus.content(&cid) {
-                        Some(content_ref) => {
-                            let _ = self.tx.send(
-                                BlockResponse::StringValue(
-                                    block_id,
-                                    content_ref.cid.clone(),
-                                ),
-                            );
-                        }
-                        None => {
-                            let _ =
-                                self.tx.send(BlockResponse::Error(
-                                    block_id,
-                                    Diagnostic::new(
-                                        Code(6003),
-                                        format!(
-                                            "content not found: {cid}"
-                                        ),
-                                        Severity::Error,
+            }
+            KernelRequest::ContentPublish {
+                block_id,
+                data,
+                mime_type,
+                display_name,
+            } => {
+                let kp = self.keypair.clone();
+                let mut pub_ = unfer_data::DataPublisher::new(
+                    &mut self.consensus,
+                );
+                match pub_.publish(
+                    &kp,
+                    &data,
+                    &mime_type,
+                    display_name.as_deref(),
+                ) {
+                    Ok(content_ref) => {
+                        let _ = self.tx.send(
+                            BlockResponse::StringValue(
+                                block_id,
+                                content_ref.cid,
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = self.tx.send(BlockResponse::Error(
+                            block_id,
+                            Diagnostic::new(
+                                Code(6002),
+                                format!("content publish failed: {e}"),
+                                Severity::Error,
+                            ),
+                        ));
+                    }
+                }
+            }
+            KernelRequest::ContentResolve { block_id, cid } => {
+                match self.consensus.content(&cid) {
+                    Some(content_ref) => {
+                        let _ = self.tx.send(
+                            BlockResponse::StringValue(
+                                block_id,
+                                content_ref.cid.clone(),
+                            ),
+                        );
+                    }
+                    None => {
+                        let _ =
+                            self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code(6003),
+                                    format!(
+                                        "content not found: {cid}"
                                     ),
-                                ));
-                        }
+                                    Severity::Error,
+                                ),
+                            ));
                     }
                 }
-                KernelRequest::Shutdown => break,
+            }
+            KernelRequest::Shutdown => {
+                unreachable!(
+                    "run() breaks on Shutdown before dispatching"
+                )
+            }
+            #[cfg(test)]
+            KernelRequest::PanicTest { .. } => {
+                panic!(
+                    "worker panic injected by a PanicTest request (test only)"
+                )
             }
         }
     }
@@ -360,6 +417,54 @@ mod tests {
                 assert_eq!(diag.code, Code(1004));
             }
             _ => panic!("expected Error, got {:?}", resp),
+        }
+    }
+
+    /// REGRESSION: a panic while handling ONE request must not strand it. The
+    /// editor already got `submit() == true` for that request, so it would
+    /// otherwise wait forever for a response that never arrives. The worker
+    /// must answer with a visible UK-5000 error carrying the panic payload,
+    /// and must stay alive for the next request.
+    #[test]
+    fn panicked_request_gets_visible_error_and_worker_survives() {
+        let h = Harness::new();
+        // Inject a deterministic panic into the worker's request handling.
+        let resp = h.send(KernelRequest::PanicTest { block_id: 42 });
+        match resp {
+            BlockResponse::Error(id, diag) => {
+                assert_eq!(id, 42, "the panicked request must be answered");
+                assert_eq!(diag.code, Code::INTERNAL);
+                assert!(
+                    diag.message
+                        .contains("injected by a PanicTest request"),
+                    "message must carry the panic payload: {}",
+                    diag.message
+                );
+                assert!(
+                    diag.message.contains("worker stays alive"),
+                    "message must state the recovery contract: {}",
+                    diag.message
+                );
+            }
+            _ => panic!(
+                "expected Error for the panicked request, got {resp:?}"
+            ),
+        }
+        // The worker must have survived the panic: a later request still
+        // reaches the session table (bad-handle answer proves the loop is
+        // processing again).
+        let resp = h.send(KernelRequest::Evolve {
+            block_id: 999,
+            t: 0.1,
+        });
+        match resp {
+            BlockResponse::Error(id, diag) => {
+                assert_eq!(id, 999);
+                assert_eq!(diag.code, Code(1004));
+            }
+            _ => panic!(
+                "expected Error for unknown model, got {resp:?}"
+            ),
         }
     }
 

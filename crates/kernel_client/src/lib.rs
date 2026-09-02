@@ -52,6 +52,40 @@ pub enum KernelRequest {
         cid: String,
     },
     Shutdown,
+    /// Test-only: injects a deterministic panic into the worker's request
+    /// handling, so tests can pin the "a panicked request gets a visible
+    /// error and the worker survives" contract without relying on a real bug.
+    #[cfg(test)]
+    PanicTest {
+        block_id: BlockId,
+    },
+}
+
+impl KernelRequest {
+    /// The result key the worker will (or would) echo in the response, if the
+    /// request has one. `Shutdown` has none. The worker uses this to answer a
+    /// request whose handling panicked, so the editor never waits forever for
+    /// a response that will not arrive.
+    pub fn block_id(&self) -> Option<BlockId> {
+        match self {
+            KernelRequest::DefineModel { block_id, .. }
+            | KernelRequest::Evolve { block_id, .. }
+            | KernelRequest::Probability { block_id, .. }
+            | KernelRequest::Condition { block_id, .. }
+            | KernelRequest::CloseModel { block_id, .. }
+            | KernelRequest::DidCreate { block_id, .. }
+            | KernelRequest::ContentPublish { block_id, .. }
+            | KernelRequest::ContentResolve { block_id, .. } => {
+                Some(*block_id)
+            }
+            KernelRequest::CloseModelById { model_id } => {
+                Some(*model_id)
+            }
+            KernelRequest::Shutdown => None,
+            #[cfg(test)]
+            KernelRequest::PanicTest { block_id } => Some(*block_id),
+        }
+    }
 }
 
 pub struct KernelClient {
