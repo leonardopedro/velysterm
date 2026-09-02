@@ -18,7 +18,7 @@ pub struct DeltaAlgebraEngine {
 impl DeltaAlgebraEngine {
     /// Initialise a new GPU engine.
     ///
-    /// Panics if no suitable GPU adapter exists. Use [`try_new`]
+    /// Panics if no suitable GPU adapter exists. Use [`Self::try_new`]
     /// (`Self::try_new`) for a graceful skip when a GPU is not available.
     pub async fn new() -> Self {
         Self::try_new()

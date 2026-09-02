@@ -279,18 +279,17 @@ fn update_fast_text(
                     fast_text.0 = diff.to_string();
                     text_color.0 = Color::srgb(0.9, 0.9, 0.2);
 
-                    if let Some(f) = &frame.0 {
-                        if let Some((pos, _)) =
+                    if let Some(f) = &frame.0
+                        && let Some((pos, _)) =
                             get_glyph_position_at_byte_index(
                                 f,
                                 Vec2::ZERO,
                                 range.start,
                                 &world,
                             )
-                        {
-                            node.left = px(pos.x);
-                            node.top = px(pos.y - 19.5);
-                        }
+                    {
+                        node.left = px(pos.x);
+                        node.top = px(pos.y - 19.5);
                     }
                     continue;
                 }
@@ -313,19 +312,18 @@ fn update_fast_text(
             let target_byte =
                 std::cmp::min(current.len(), rendered.len());
 
-            if let Some(f) = &frame.0 {
-                if let Some((pos, end_x)) =
+            if let Some(f) = &frame.0
+                && let Some((pos, end_x)) =
                     get_glyph_position_at_byte_index(
                         f,
                         Vec2::ZERO,
                         target_byte,
                         &world,
                     )
-                {
-                    offset_x = pos.x;
-                    render_end_x = end_x;
-                    offset_y = pos.y - 19.5;
-                }
+            {
+                offset_x = pos.x;
+                render_end_x = end_x;
+                offset_y = pos.y - 19.5;
             }
 
             if current.len() > rendered.len()
@@ -375,19 +373,17 @@ fn handle_clicks(
                             && local_pos.y >= 0.0
                             && local_pos.x <= node.size.x
                             && local_pos.y <= node.size.y
-                        {
-                            if let Some((index, math_range)) =
+                            && let Some((index, math_range)) =
                                 find_text_index_in_frame(
                                     frame, local_pos, &world,
                                 )
-                            {
-                                info!(
-                                    "Clicked at source byte index: {}, math: {:?}",
-                                    index, math_range
-                                );
-                                editor.cursor_index = index;
-                                editor.active_math_range = math_range;
-                            }
+                        {
+                            info!(
+                                "Clicked at source byte index: {}, math: {:?}",
+                                index, math_range
+                            );
+                            editor.cursor_index = index;
+                            editor.active_math_range = math_range;
                         }
                     }
                 }
@@ -434,18 +430,17 @@ fn update_cursor(
 ) -> Result {
     for (editor, frame) in &editor_query {
         for mut node in &mut cursor_query {
-            if let Some(f) = &frame.0 {
-                if let Some((pos, _)) =
+            if let Some(f) = &frame.0
+                && let Some((pos, _)) =
                     get_glyph_position_at_byte_index(
                         f,
                         Vec2::ZERO,
                         editor.cursor_index,
                         &world,
                     )
-                {
-                    node.left = px(pos.x);
-                    node.top = px(pos.y - 19.5);
-                }
+            {
+                node.left = px(pos.x);
+                node.top = px(pos.y - 19.5);
             }
         }
     }
@@ -473,11 +468,11 @@ fn find_text_index_in_frame(
                         let width = glyph.x_advance.at(text.size);
                         if target.x >= x && target.x <= x + width {
                             let span = glyph.span.0;
-                            if let Some(id) = span.id() {
-                                if let Ok(source) = world.source(id) {
-                                    if let Some(node) =
-                                        source.find(span)
-                                    {
+                            if let Some(id) = span.id()
+                                && let Ok(source) = world.source(id)
+                                && let Some(node) =
+                                    source.find(span)
+                            {
                                         let index = node
                                             .range()
                                             .start
@@ -505,8 +500,6 @@ fn find_text_index_in_frame(
                                         return Some((
                                             index, math_range,
                                         ));
-                                    }
-                                }
                             }
                         }
                         x += width;
@@ -591,9 +584,10 @@ fn get_glyph_position_at_byte_index(
 
     for (pos, size, y, (span_id, span_offset), advance) in &all_glyphs
     {
-        if let Some(id) = span_id.id() {
-            if let Ok(source) = world.source(id) {
-                if let Some(node) = source.find(*span_id) {
+        if let Some(id) = span_id.id()
+            && let Ok(source) = world.source(id)
+            && let Some(node) = source.find(*span_id)
+        {
                     let range = node.range();
                     let exact_byte =
                         range.start + (*span_offset as usize);
@@ -614,8 +608,6 @@ fn get_glyph_position_at_byte_index(
                             ));
                         }
                     }
-                }
-            }
         }
     }
 

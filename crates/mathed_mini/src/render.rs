@@ -1,5 +1,5 @@
 //! The Bevy-free render pipeline: mathed document → Typst markup → laid-out
-//! [`Frame`](typst::layout::Frame) → CPU-rasterized RGBA8 image.
+//! [`Frame`] → CPU-rasterized RGBA8 image.
 
 use imaging::RgbaImage;
 use imaging_vello_cpu::VelloCpuRenderer;
@@ -260,7 +260,7 @@ pub fn render_markup(
 }
 
 /// Lay out a single block's range into its own cached [`DocLayout`] — the
-/// per-block counterpart to [`layout_doc_inner`]. No footer (the footer is
+/// per-block counterpart to `layout_doc_inner`. No footer (the footer is
 /// a separate, always-last virtual block; see [`layout_footer`]).
 pub fn layout_block(
     doc_text: &str,

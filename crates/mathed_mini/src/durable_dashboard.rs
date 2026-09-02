@@ -4,7 +4,7 @@
 //! kernel uses, Loro backend — and renders the status as a Typst document
 //! for the mathed editor. Every section is a citable segment
 //! (`#N body #M \cite(#N, #M)`) with an auto-assigned number, so
-//! **Ctrl+<digit> pops that section open** and Esc closes it: the
+//! **Ctrl+`<digit>` pops that section open** and Esc closes it: the
 //! collapsible/reference interaction mathed already has, no new GUI.
 //!
 //! The same consult is exposed headless (`--dashboard-typst <file>`), so an
@@ -72,7 +72,7 @@ pub fn consult() -> DurableStatus {
 
 /// Render the status as a Typst document for the mathed editor. Each section
 /// is a citable segment (`#N body #M \cite(#N, #M)`) — the editor assigns it
-/// a number, so typing Ctrl+<digit> pops that section's body open (the
+/// a number, so typing Ctrl+`<digit>` pops that section's body open (the
 /// collapsible/reference interaction mathed already has). Markers are
 /// literal ids 1..=6; a fresh dashboard document owns them.
 pub fn render_document(status: &DurableStatus) -> String {

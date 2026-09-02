@@ -77,7 +77,8 @@ pub struct KernelBridge {
     translator_errors: HashMap<usize, String>,
     /// Request key → time it was submitted and not yet answered. `poll`
     /// removes a key when a response arrives and expires entries older than
-    /// [`LOST_RESPONSE_DEADLINE`] into a visible error: a request the worker
+    /// [`Self::LOST_RESPONSE_DEADLINE`] into a visible error: a request the
+    /// worker
     /// accepted but never answered must not leave the prob silently without
     /// an annotation forever (only possible via a future worker bug — the
     /// worker answers every request today).
@@ -260,7 +261,8 @@ impl KernelBridge {
     const LOST_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
 
     /// Expire requests that were accepted but never answered. Called from
-    /// [`poll`] on every drain; `now` is injectable so tests can fabricate a
+    /// [`Self::poll`] on every drain; `now` is injectable so tests can
+    /// fabricate a
     /// clock.
     fn expire_lost(&mut self, now: Instant) {
         let expired: Vec<usize> = self

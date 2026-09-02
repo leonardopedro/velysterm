@@ -531,7 +531,7 @@ pub struct ReferencesEntry {
 
 /// All segments whose body contains `cursor_byte` (inclusive on both
 /// ends, matching [`crate::transform::TransformOptions::reveal`] and
-/// [`crate::render::active_translator_span`]). Segments with
+/// `active_translator_span` in mathed_mini). Segments with
 /// `span: None` (dangling) are excluded.
 ///
 /// The tag is derived from the *rendered* body (markers hidden, cite

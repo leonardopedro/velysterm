@@ -41,14 +41,13 @@ fn normalize_line(line: &str) -> String {
                 obj.remove("timing_ms");
                 // The saved session blob carries wall-clock provenance on
                 // events (`ts`) — strip it so the golden is keyless.
-                if let Some(result) = obj.get_mut("result") {
-                    if let Some(blob) = result.get_mut("events") {
-                        if let Some(events) = blob.as_array_mut() {
-                            for ev in events.iter_mut() {
-                                if let Some(e) = ev.as_object_mut() {
-                                    e.remove("ts");
-                                }
-                            }
+                if let Some(result) = obj.get_mut("result")
+                    && let Some(blob) = result.get_mut("events")
+                    && let Some(events) = blob.as_array_mut()
+                {
+                    for ev in events.iter_mut() {
+                        if let Some(e) = ev.as_object_mut() {
+                            e.remove("ts");
                         }
                     }
                 }
@@ -102,7 +101,7 @@ fn keyless_snapshot_replay_matches_golden() {
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
         let dir = golden_path().parent().expect("golden dir").to_path_buf();
         std::fs::create_dir_all(&dir).expect("golden dir");
-        std::fs::write(&golden_path(), &canonical).expect("write golden");
+        std::fs::write(golden_path(), &canonical).expect("write golden");
         eprintln!(
             "UPDATE_GOLDEN=1: regenerated {}",
             golden_path().display()
@@ -110,7 +109,7 @@ fn keyless_snapshot_replay_matches_golden() {
         return;
     }
 
-    let golden = std::fs::read_to_string(&golden_path()).unwrap_or_else(|_| {
+    let golden = std::fs::read_to_string(golden_path()).unwrap_or_else(|_| {
         panic!(
             "missing golden {} — run with UPDATE_GOLDEN=1 to generate",
             golden_path().display()

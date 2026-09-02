@@ -6,7 +6,7 @@
 //! contains the caret. Each entry shows a 10-character alphanumeric
 //! tag (derived from the body) and a small rendered preview of the
 //! body. An initial one-line header enumerates the references as
-//! "tag1 [1], tag2 [2], ...".
+//! "tag1 \[1], tag2 \[2], ...".
 //!
 //! The panel is a render-time overlay on top of the buffer; the
 //! base document is not re-laid-out when the panel toggles. The
@@ -144,7 +144,7 @@ pub fn render_entry_body(
 
 /// Compute the panel's total pixel height based on the current
 /// entries. The header is fixed at 25 px; each entry gets 5 px
-/// padding + its body's height (capped at [`BODY_MAX_HEIGHT_PX`]).
+/// padding + its body's height (capped at `BODY_MAX_HEIGHT_PX`).
 /// The total is capped at `min(PANEL_MAX_PX, win_h * PANEL_MAX_FRAC)`.
 pub fn panel_height(
     panel: &ReferencesPanelData,

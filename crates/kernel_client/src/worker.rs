@@ -90,9 +90,9 @@ impl KernelWorker {
         }
     }
 
-    /// Handle one request. Kept separate from [`run`] so a bug that panics
-    /// mid-request is caught at the loop boundary instead of killing the
-    /// worker thread (see [`run`]).
+    /// Handle one request. Kept separate from [`Self::run`] so a bug that
+    /// panics mid-request is caught at the loop boundary instead of killing
+    /// the worker thread (see [`Self::run`]).
     fn handle(&mut self, req: KernelRequest) {
         match req {
             KernelRequest::DefineModel { block_id, spec } => {
