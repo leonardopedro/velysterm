@@ -1,4 +1,5 @@
-/// RFC1751 word list (2048 words) sorted by length and then alphabetically.
+/// RFC1751 word list (2048 words) sorted by length and then
+/// alphabetically.
 const RFC1751_WORDS: &[&str] = &[
     "a", "i", "o", "ad", "am", "an", "as", "at", "ax", "be", "by",
     "do", "ed", "em", "go", "ha", "he", "hi", "ho", "if", "io", "iq",
@@ -254,8 +255,9 @@ const RFC1751_WORDS: &[&str] = &[
 ///
 /// The sequence consists of 6 words (for u64).
 /// The words are concatenated into a single string.
-/// When two words are concatenated, the first letter of the second word is Uppercase (CamelCase).
-/// The words in the sequence appear in order from smaller to bigger words and then alphabetically.
+/// When two words are concatenated, the first letter of the second
+/// word is Uppercase (CamelCase). The words in the sequence appear in
+/// order from smaller to bigger words and then alphabetically.
 pub fn u64_to_rfc1751(val: u64) -> String {
     let mut indices = Vec::new();
     let mut remaining = val;

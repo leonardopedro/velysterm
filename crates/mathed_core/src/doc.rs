@@ -1,15 +1,16 @@
 //! Loro-backed document: the single source of truth is a `LoroText`
-//! containing Typst-flavored source *plus* hidden markers and property
-//! statements (see [`crate::markers`]).
+//! containing Typst-flavored source *plus* hidden markers and
+//! property statements (see [`crate::markers`]).
 //!
-//! All public positions are UTF-8 byte offsets (loro's `*_utf8` APIs are
-//! used throughout). A mirror `String` is kept in lockstep for cheap reads;
-//! in debug builds every mutation re-validates the mirror against loro.
+//! All public positions are UTF-8 byte offsets (loro's `*_utf8` APIs
+//! are used throughout). A mirror `String` is kept in lockstep for
+//! cheap reads; in debug builds every mutation re-validates the
+//! mirror against loro.
 //!
-//! Undo/redo go through loro's [`UndoManager`] so they also restore marks;
-//! the resulting text change is reported as a minimal [`ByteDelta`]
-//! computed by prefix/suffix trimming (the editor only needs damage
-//! ranges, not the exact operation history).
+//! Undo/redo go through loro's [`UndoManager`] so they also restore
+//! marks; the resulting text change is reported as a minimal
+//! [`ByteDelta`] computed by prefix/suffix trimming (the editor only
+//! needs damage ranges, not the exact operation history).
 //!
 //! Use the `S` method to sync marks.
 
@@ -20,7 +21,8 @@ use loro::{
     UndoManager,
 };
 
-/// One contiguous text replacement, expressed against the *pre-edit* text.
+/// One contiguous text replacement, expressed against the *pre-edit*
+/// text.
 ///
 /// `range` is the replaced byte range (empty for pure insertion) and
 /// `inserted` the text now occupying it (empty for pure deletion).
@@ -37,7 +39,8 @@ impl ByteDelta {
     }
 }
 
-/// A replacement to apply as part of a batch (see [`MathDoc::replace_many`]).
+/// A replacement to apply as part of a batch (see
+/// [`MathDoc::replace_many`]).
 #[derive(Debug, Clone)]
 pub struct ReplaceOp {
     pub range: Range<usize>,
@@ -256,11 +259,13 @@ impl MathDoc {
             .expect("loro unmark failed");
     }
 
-    /// All current `prop:*` marks as (byte range, key), sorted by start.
+    /// All current `prop:*` marks as (byte range, key), sorted by
+    /// start.
     ///
-    /// Walks the richtext delta runs; a mark spans consecutive runs that
-    /// all carry its key, and ends at the first run that doesn't (so two
-    /// equal-key marks separated by unmarked text stay separate).
+    /// Walks the richtext delta runs; a mark spans consecutive runs
+    /// that all carry its key, and ends at the first run that
+    /// doesn't (so two equal-key marks separated by unmarked text
+    /// stay separate).
     pub fn segment_marks(&self) -> Vec<(Range<usize>, String)> {
         let mut marks: Vec<(Range<usize>, String)> = Vec::new();
         let mut open: Vec<(Range<usize>, String)> = Vec::new();

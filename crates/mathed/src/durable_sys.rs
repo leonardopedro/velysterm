@@ -1,27 +1,32 @@
-//! Durable-store status dashboard (operator surface for the unfer H4 store).
+//! Durable-store status dashboard (operator surface for the unfer H4
+//! store).
 //!
-//! Polls the kernel's durable store — opened **read-only** from the same
-//! `UNFER_DURABLE_DIR` the kernel uses (Loro backend) — and renders a small
-//! Bevy-UI status chip in the top-right corner: backend, persist counter,
-//! per-stream record counts, and the fail-visible corrupt-snapshot recovery
+//! Polls the kernel's durable store — opened **read-only** from the
+//! same `UNFER_DURABLE_DIR` the kernel uses (Loro backend) — and
+//! renders a small Bevy-UI status chip in the top-right corner:
+//! backend, persist counter, per-stream record counts, and the
+//! fail-visible corrupt-snapshot recovery
 //! report (`snapshot_load_error`).
 //!
-//! The panel is a pure consult: it never appends or flushes, so it cannot
-//! race the kernel's own writes to the same snapshot. Everything GUI lives
-//! in the mathed Bevy stack (per the GUI convention); `kernel_client` and
-//! `mathed_mini` stay headless.
+//! The panel is a pure consult: it never appends or flushes, so it
+//! cannot race the kernel's own writes to the same snapshot.
+//! Everything GUI lives in the mathed Bevy stack (per the GUI
+//! convention); `kernel_client` and `mathed_mini` stay headless.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use unfer_ffi::durable::{Backend, DurableStatus, consult_status, open_store};
+use unfer_ffi::durable::{
+    Backend, DurableStatus, consult_status, open_store,
+};
 use unfer_protocol::durable::DurableStore;
 
-/// Latest consulted status, refreshed on the poll cadence. The consult
-/// itself (backend, persist counter, per-stream lengths, corrupt-snapshot
-/// recovery report) is `unfer_ffi::durable::consult_status` — the single
-/// implementation shared with the `mathed_mini` TUI dashboard.
+/// Latest consulted status, refreshed on the poll cadence. The
+/// consult itself (backend, persist counter, per-stream lengths,
+/// corrupt-snapshot recovery report) is
+/// `unfer_ffi::durable::consult_status` — the single implementation
+/// shared with the `mathed_mini` TUI dashboard.
 #[derive(Resource, Default)]
 pub struct DurableStatusResource(pub DurableStatus);
 
@@ -48,12 +53,13 @@ impl Default for DurablePanel {
     }
 }
 
-/// Marker on the dashboard text node so the update system can find it.
+/// Marker on the dashboard text node so the update system can find
+/// it.
 #[derive(Component)]
 pub(crate) struct DurablePanelText;
 
-/// Spawn the status chip (top-right corner). Spawned once at startup; the
-/// update system rewrites its text.
+/// Spawn the status chip (top-right corner). Spawned once at startup;
+/// the update system rewrites its text.
 pub fn spawn_durable_panel(mut commands: Commands) {
     commands
         .spawn((
@@ -76,10 +82,11 @@ pub fn spawn_durable_panel(mut commands: Commands) {
         });
 }
 
-/// Open a read-only store from `UNFER_DURABLE_DIR` (only when the directory
-/// exists — otherwise `None` reports RAM-only, exactly like the kernel does
-/// with no store configured). Loro's `open_store` never fails, so opening
-/// cannot error out; it just stays `None` until a store appears.
+/// Open a read-only store from `UNFER_DURABLE_DIR` (only when the
+/// directory exists — otherwise `None` reports RAM-only, exactly like
+/// the kernel does with no store configured). Loro's `open_store`
+/// never fails, so opening cannot error out; it just stays `None`
+/// until a store appears.
 pub fn open_panel_store() -> Option<Arc<dyn DurableStore>> {
     let dir = std::env::var("UNFER_DURABLE_DIR")
         .ok()
@@ -87,10 +94,12 @@ pub fn open_panel_store() -> Option<Arc<dyn DurableStore>> {
         .map(PathBuf::from)
         .filter(|d| d.is_dir());
     let d = dir?;
-    // Loro open is infallible (a corrupt snapshot recovers empty and reports
-    // via `snapshot_load_error` — exactly what the chip shows).
+    // Loro open is infallible (a corrupt snapshot recovers empty and
+    // reports via `snapshot_load_error` — exactly what the chip
+    // shows).
     Some(Arc::from(
-        open_store(Some(&d), Backend::Loro).expect("loro open_store cannot fail"),
+        open_store(Some(&d), Backend::Loro)
+            .expect("loro open_store cannot fail"),
     ))
 }
 
@@ -110,8 +119,9 @@ pub fn poll_durable_status(
     status.0 = consult_status(panel.store.as_deref());
 }
 
-/// Rewrite the chip text when the consulted status changes. A corrupt-snapshot
-/// recovery is drawn in warning red so the operator cannot miss it.
+/// Rewrite the chip text when the consulted status changes. A
+/// corrupt-snapshot recovery is drawn in warning red so the operator
+/// cannot miss it.
 pub fn update_durable_panel(
     status: Res<DurableStatusResource>,
     mut q: Query<(&mut Text, &mut TextColor), With<DurablePanelText>>,
@@ -132,12 +142,17 @@ pub fn update_durable_panel(
     let first = if status.backend == "none" {
         "durable: none (RAM-only)".to_string()
     } else {
-        format!("durable: {} persist {}", status.backend, status.persist_count)
+        format!(
+            "durable: {} persist {}",
+            status.backend, status.persist_count
+        )
     };
     text.0 = match &status.snapshot_load_error {
         Some(err) => {
             color.0 = Color::srgb(0.95, 0.45, 0.40);
-            format!("{first}\n⚠ snapshot recovery: {err}\n{streams_line}")
+            format!(
+                "{first}\n⚠ snapshot recovery: {err}\n{streams_line}"
+            )
         }
         None => {
             color.0 = Color::srgb(0.72, 0.78, 0.85);
@@ -172,9 +187,10 @@ mod tests {
         }
     }
 
-    /// E2E reporting path: a torn snapshot.bin on disk, the store opened the
-    /// way the panel opens it, and the consulted status carries the recovery
-    /// report — the exact data the dashboard chip renders in warning red.
+    /// E2E reporting path: a torn snapshot.bin on disk, the store
+    /// opened the way the panel opens it, and the consulted
+    /// status carries the recovery report — the exact data the
+    /// dashboard chip renders in warning red.
     #[test]
     fn corrupt_snapshot_surfaces_in_dashboard_status() {
         let scratch = Scratch::new("corrupt");
@@ -186,7 +202,8 @@ mod tests {
         .unwrap();
 
         let store: Arc<dyn DurableStore> = Arc::from(
-            open_store(Some(dir), Backend::Loro).expect("loro open cannot fail"),
+            open_store(Some(dir), Backend::Loro)
+                .expect("loro open cannot fail"),
         );
         let status = consult_status(Some(store.as_ref()));
         assert_eq!(status.backend, "loro");
@@ -200,16 +217,21 @@ mod tests {
             status.snapshot_load_error
         );
 
-        // The chip text is built from the consulted status — assert the
-        // warning line appears in what the panel would render.
+        // The chip text is built from the consulted status — assert
+        // the warning line appears in what the panel would
+        // render.
         let line = match &status.snapshot_load_error {
             Some(err) => format!("⚠ snapshot recovery: {err}"),
             None => String::new(),
         };
-        assert!(line.contains("snapshot recovery"), "chip line: {line}");
+        assert!(
+            line.contains("snapshot recovery"),
+            "chip line: {line}"
+        );
     }
 
-    /// The kernel's no-store shape: RAM-only, stable schema, no error.
+    /// The kernel's no-store shape: RAM-only, stable schema, no
+    /// error.
     #[test]
     fn no_store_reports_ram_only() {
         let status = consult_status(None);

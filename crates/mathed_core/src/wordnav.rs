@@ -1,8 +1,9 @@
-//! Word navigation: classify characters, detect math context, and walk
-//! to word boundaries (foot `selection.c:346-528`).
+//! Word navigation: classify characters, detect math context, and
+//! walk to word boundaries (foot `selection.c:346-528`).
 //!
-//! An "atomic" range is treated as a single word: if `pos` lies strictly
-//! inside one, the boundary snaps to the range's edge immediately.
+//! An "atomic" range is treated as a single word: if `pos` lies
+//! strictly inside one, the boundary snaps to the range's edge
+//! immediately.
 
 use std::ops::Range;
 
@@ -135,7 +136,8 @@ pub fn word_boundary_left(
             break;
         }
         let next_p = p - c.len_utf8();
-        // Atomic snap: if stepping lands strictly inside an atomic range.
+        // Atomic snap: if stepping lands strictly inside an atomic
+        // range.
         if let Some(r) =
             atomic.iter().find(|r| r.start < next_p && next_p < r.end)
         {

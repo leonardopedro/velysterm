@@ -46,13 +46,16 @@ impl KernelWorker {
 
     pub fn run(&mut self, rx: Receiver<KernelRequest>) {
         while let Ok(req) = rx.recv() {
-            // `Shutdown` terminates the worker loop; every other request goes
-            // to `handle`, invoked here under catch_unwind: a bug that panics
-            // mid-request must never strand it (silent dead-end — the editor
-            // already got `submit() == true`, so it would wait forever for a
-            // response that never arrives). Answer with a visible UK-5000
-            // error and keep the worker alive for later requests — the same
-            // fail-visible discipline as the kernel's own `ffi_entry` guard.
+            // `Shutdown` terminates the worker loop; every other
+            // request goes to `handle`, invoked here
+            // under catch_unwind: a bug that panics
+            // mid-request must never strand it (silent dead-end — the
+            // editor already got `submit() == true`, so
+            // it would wait forever for a response that
+            // never arrives). Answer with a visible UK-5000
+            // error and keep the worker alive for later requests —
+            // the same fail-visible discipline as the
+            // kernel's own `ffi_entry` guard.
             if matches!(req, KernelRequest::Shutdown) {
                 break;
             }
@@ -64,7 +67,9 @@ impl KernelWorker {
                 let reason = payload
                     .downcast_ref::<&str>()
                     .map(|s| (*s).to_string())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .or_else(|| {
+                        payload.downcast_ref::<String>().cloned()
+                    })
                     .unwrap_or_else(|| {
                         "(non-string panic payload)".to_string()
                     });
@@ -90,25 +95,24 @@ impl KernelWorker {
         }
     }
 
-    /// Handle one request. Kept separate from [`Self::run`] so a bug that
-    /// panics mid-request is caught at the loop boundary instead of killing
-    /// the worker thread (see [`Self::run`]).
+    /// Handle one request. Kept separate from [`Self::run`] so a bug
+    /// that panics mid-request is caught at the loop boundary
+    /// instead of killing the worker thread (see [`Self::run`]).
     fn handle(&mut self, req: KernelRequest) {
         match req {
             KernelRequest::DefineModel { block_id, spec } => {
                 match Session::new(&spec) {
                     Ok(session) => {
                         self.sessions.insert(block_id, session);
-                        let _ = self.tx.send(
-                            BlockResponse::Success(block_id),
-                        );
+                        let _ = self
+                            .tx
+                            .send(BlockResponse::Success(block_id));
                     }
                     Err(e) => {
-                        let _ =
-                            self.tx.send(BlockResponse::Error(
-                                block_id,
-                                e.to_diagnostic(),
-                            ));
+                        let _ = self.tx.send(BlockResponse::Error(
+                            block_id,
+                            e.to_diagnostic(),
+                        ));
                     }
                 }
             }
@@ -123,17 +127,15 @@ impl KernelWorker {
                             );
                         }
                         Err(e) => {
-                            let _ = self.tx.send(
-                                BlockResponse::Error(
+                            let _ =
+                                self.tx.send(BlockResponse::Error(
                                     block_id,
                                     e.to_diagnostic(),
-                                ),
-                            );
+                                ));
                         }
                     }
                 } else {
-                    let _ =
-                        self.tx.send(Self::bad_handle(block_id));
+                    let _ = self.tx.send(Self::bad_handle(block_id));
                 }
             }
             KernelRequest::Probability {
@@ -141,9 +143,7 @@ impl KernelWorker {
                 block_id,
                 event_json,
             } => {
-                if let Some(session) =
-                    self.sessions.get(&model_id)
-                {
+                if let Some(session) = self.sessions.get(&model_id) {
                     match serde_json::from_str::<
                         unfer_protocol::EventPredicate,
                     >(&event_json)
@@ -168,8 +168,8 @@ impl KernelWorker {
                             }
                         }
                         Err(_) => {
-                            let _ = self.tx.send(
-                                BlockResponse::Error(
+                            let _ =
+                                self.tx.send(BlockResponse::Error(
                                     block_id,
                                     Diagnostic::new(
                                         Code(1003),
@@ -177,13 +177,11 @@ impl KernelWorker {
                                             .to_string(),
                                         Severity::Error,
                                     ),
-                                ),
-                            );
+                                ));
                         }
                     }
                 } else {
-                    let _ =
-                        self.tx.send(Self::bad_handle(block_id));
+                    let _ = self.tx.send(Self::bad_handle(block_id));
                 }
             }
             KernelRequest::Condition {
@@ -198,28 +196,24 @@ impl KernelWorker {
                         unfer_protocol::EventPredicate,
                     >(&event_json)
                     {
-                        Ok(pred) => {
-                            match session.condition(&pred) {
-                                Ok(p) => {
-                                    let _ = self.tx.send(
-                                        BlockResponse::Value(
-                                            block_id, p,
-                                        ),
-                                    );
-                                }
-                                Err(e) => {
-                                    let _ = self.tx.send(
-                                        BlockResponse::Error(
-                                            block_id,
-                                            e.to_diagnostic(),
-                                        ),
-                                    );
-                                }
+                        Ok(pred) => match session.condition(&pred) {
+                            Ok(p) => {
+                                let _ = self.tx.send(
+                                    BlockResponse::Value(block_id, p),
+                                );
                             }
-                        }
+                            Err(e) => {
+                                let _ = self.tx.send(
+                                    BlockResponse::Error(
+                                        block_id,
+                                        e.to_diagnostic(),
+                                    ),
+                                );
+                            }
+                        },
                         Err(_) => {
-                            let _ = self.tx.send(
-                                BlockResponse::Error(
+                            let _ =
+                                self.tx.send(BlockResponse::Error(
                                     block_id,
                                     Diagnostic::new(
                                         Code(1003),
@@ -227,13 +221,11 @@ impl KernelWorker {
                                             .to_string(),
                                         Severity::Error,
                                     ),
-                                ),
-                            );
+                                ));
                         }
                     }
                 } else {
-                    let _ =
-                        self.tx.send(Self::bad_handle(block_id));
+                    let _ = self.tx.send(Self::bad_handle(block_id));
                 }
             }
             KernelRequest::CloseModel { block_id } => {
@@ -242,8 +234,7 @@ impl KernelWorker {
                         .tx
                         .send(BlockResponse::Success(block_id));
                 } else {
-                    let _ =
-                        self.tx.send(Self::bad_handle(block_id));
+                    let _ = self.tx.send(Self::bad_handle(block_id));
                 }
             }
             KernelRequest::CloseModelById { model_id } => {
@@ -252,8 +243,7 @@ impl KernelWorker {
                         .tx
                         .send(BlockResponse::Success(model_id));
                 } else {
-                    let _ =
-                        self.tx.send(Self::bad_handle(model_id));
+                    let _ = self.tx.send(Self::bad_handle(model_id));
                 }
             }
             KernelRequest::DidCreate {
@@ -263,29 +253,23 @@ impl KernelWorker {
                 let mut mgr = unfer_identity::DidManager::new(
                     &mut self.consensus,
                 );
-                match mgr
-                    .create_did(&self.keypair, service_endpoint)
+                match mgr.create_did(&self.keypair, service_endpoint)
                 {
                     Ok(did) => {
                         self.did = Some(did.clone());
                         let _ = self.tx.send(
-                            BlockResponse::StringValue(
-                                block_id, did,
-                            ),
+                            BlockResponse::StringValue(block_id, did),
                         );
                     }
                     Err(e) => {
-                        let _ =
-                            self.tx.send(BlockResponse::Error(
-                                block_id,
-                                Diagnostic::new(
-                                    Code(6001),
-                                    format!(
-                                        "DID creation failed: {e}"
-                                    ),
-                                    Severity::Error,
-                                ),
-                            ));
+                        let _ = self.tx.send(BlockResponse::Error(
+                            block_id,
+                            Diagnostic::new(
+                                Code(6001),
+                                format!("DID creation failed: {e}"),
+                                Severity::Error,
+                            ),
+                        ));
                     }
                 }
             }
@@ -306,19 +290,20 @@ impl KernelWorker {
                     display_name.as_deref(),
                 ) {
                     Ok(content_ref) => {
-                        let _ = self.tx.send(
-                            BlockResponse::StringValue(
+                        let _ =
+                            self.tx.send(BlockResponse::StringValue(
                                 block_id,
                                 content_ref.cid,
-                            ),
-                        );
+                            ));
                     }
                     Err(e) => {
                         let _ = self.tx.send(BlockResponse::Error(
                             block_id,
                             Diagnostic::new(
                                 Code(6002),
-                                format!("content publish failed: {e}"),
+                                format!(
+                                    "content publish failed: {e}"
+                                ),
                                 Severity::Error,
                             ),
                         ));
@@ -328,25 +313,21 @@ impl KernelWorker {
             KernelRequest::ContentResolve { block_id, cid } => {
                 match self.consensus.content(&cid) {
                     Some(content_ref) => {
-                        let _ = self.tx.send(
-                            BlockResponse::StringValue(
+                        let _ =
+                            self.tx.send(BlockResponse::StringValue(
                                 block_id,
                                 content_ref.cid.clone(),
-                            ),
-                        );
+                            ));
                     }
                     None => {
-                        let _ =
-                            self.tx.send(BlockResponse::Error(
-                                block_id,
-                                Diagnostic::new(
-                                    Code(6003),
-                                    format!(
-                                        "content not found: {cid}"
-                                    ),
-                                    Severity::Error,
-                                ),
-                            ));
+                        let _ = self.tx.send(BlockResponse::Error(
+                            block_id,
+                            Diagnostic::new(
+                                Code(6003),
+                                format!("content not found: {cid}"),
+                                Severity::Error,
+                            ),
+                        ));
                     }
                 }
             }
@@ -378,7 +359,8 @@ mod tests {
     use crossbeam_channel::unbounded;
     use unfer_protocol::ModelSpec;
 
-    /// A test harness that sequences requests through a single worker.
+    /// A test harness that sequences requests through a single
+    /// worker.
     struct Harness {
         req_tx: Sender<KernelRequest>,
         resp_rx: Receiver<BlockResponse>,
@@ -389,8 +371,8 @@ mod tests {
             let (req_tx, req_rx) = unbounded::<KernelRequest>();
             let (resp_tx, resp_rx) = unbounded::<BlockResponse>();
             let worker = KernelWorker::new(resp_tx.clone());
-            // Spawn the worker on a thread so it processes sequentially
-            // without blocking the test.
+            // Spawn the worker on a thread so it processes
+            // sequentially without blocking the test.
             std::thread::spawn(move || {
                 let mut w = worker;
                 w.run(req_rx);
@@ -420,19 +402,24 @@ mod tests {
         }
     }
 
-    /// REGRESSION: a panic while handling ONE request must not strand it. The
-    /// editor already got `submit() == true` for that request, so it would
-    /// otherwise wait forever for a response that never arrives. The worker
-    /// must answer with a visible UK-5000 error carrying the panic payload,
-    /// and must stay alive for the next request.
+    /// REGRESSION: a panic while handling ONE request must not strand
+    /// it. The editor already got `submit() == true` for that
+    /// request, so it would otherwise wait forever for a response
+    /// that never arrives. The worker must answer with a visible
+    /// UK-5000 error carrying the panic payload, and must stay
+    /// alive for the next request.
     #[test]
     fn panicked_request_gets_visible_error_and_worker_survives() {
         let h = Harness::new();
-        // Inject a deterministic panic into the worker's request handling.
+        // Inject a deterministic panic into the worker's request
+        // handling.
         let resp = h.send(KernelRequest::PanicTest { block_id: 42 });
         match resp {
             BlockResponse::Error(id, diag) => {
-                assert_eq!(id, 42, "the panicked request must be answered");
+                assert_eq!(
+                    id, 42,
+                    "the panicked request must be answered"
+                );
                 assert_eq!(diag.code, Code::INTERNAL);
                 assert!(
                     diag.message
@@ -450,9 +437,9 @@ mod tests {
                 "expected Error for the panicked request, got {resp:?}"
             ),
         }
-        // The worker must have survived the panic: a later request still
-        // reaches the session table (bad-handle answer proves the loop is
-        // processing again).
+        // The worker must have survived the panic: a later request
+        // still reaches the session table (bad-handle answer
+        // proves the loop is processing again).
         let resp = h.send(KernelRequest::Evolve {
             block_id: 999,
             t: 0.1,
@@ -711,7 +698,8 @@ mod tests {
             _ => panic!("expected Success, got {:?}", close),
         }
 
-        // Subsequent op on that handle → UK-1004 (worker still returns bad_handle).
+        // Subsequent op on that handle → UK-1004 (worker still
+        // returns bad_handle).
         let evolve = h.send(KernelRequest::Evolve {
             block_id: 42,
             t: 0.1,
@@ -749,14 +737,14 @@ mod tests {
             w.run(req_rx);
         });
 
-        // Close the session handle from within the worker so the thread
-        // can observe Shutdown + join.
+        // Close the session handle from within the worker so the
+        // thread can observe Shutdown + join.
         let _ = req_tx.send(KernelRequest::Shutdown);
         drop(req_tx);
         let joined = handle.join();
         assert!(joined.is_ok(), "worker thread panicked on shutdown");
-        // After the thread exits, the worker (and its resp_tx clone) drop,
-        // so the channel disconnects.
+        // After the thread exits, the worker (and its resp_tx clone)
+        // drop, so the channel disconnects.
         assert!(
             resp_rx.recv().is_err(),
             "no response expected after shutdown"
@@ -790,14 +778,16 @@ mod tests {
                 _drained += 1;
             }
         }
-        // The ring is 64 capacity, so after 70 events we should have drained 64 (filled),
-        // then the remaining 6 overflow and leave events_dropped 6 (with one per overflow).
+        // The ring is 64 capacity, so after 70 events we should have
+        // drained 64 (filled), then the remaining 6 overflow
+        // and leave events_dropped 6 (with one per overflow).
         let _ = req_tx
             .send(KernelRequest::CloseModelById { model_id: 1 });
         let resp = resp_rx.recv().unwrap();
         assert!(matches!(resp, BlockResponse::Success(1)));
         drop(req_tx);
         handle.join().unwrap();
-        // Worker drops its own internal tx after loop exit; resp_rx now is disconnected.
+        // Worker drops its own internal tx after loop exit; resp_rx
+        // now is disconnected.
     }
 }

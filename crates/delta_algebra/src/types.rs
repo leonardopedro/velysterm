@@ -5,7 +5,8 @@ use bytemuck::{Pod, Zeroable};
 // A single basis state in the multi-dimensional Hermite (Fock) basis:
 //   |n0, n1, n2, n3⟩  with complex amplitude (coeff_re + i*coeff_im).
 //
-// Layout: 4×u32 + 2×f32 + 2×u32-pad = 32 bytes (16-byte aligned for WGSL).
+// Layout: 4×u32 + 2×f32 + 2×u32-pad = 32 bytes (16-byte aligned for
+// WGSL).
 // ---------------------------------------------------------------------------
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq)]
@@ -37,8 +38,8 @@ impl HermiteState {
         Self::new([0; 4], 1.0, 0.0)
     }
 
-    /// Returns a canonical sort key built from the four quantum numbers.
-    /// Used for the CPU-side reduction step.
+    /// Returns a canonical sort key built from the four quantum
+    /// numbers. Used for the CPU-side reduction step.
     #[inline]
     pub fn sort_key(&self) -> u128 {
         (self.n[0] as u128)
@@ -62,8 +63,9 @@ pub enum OpType {
 // ---------------------------------------------------------------------------
 // OperatorTerm — one monomial in the Hamiltonian, e.g. α·a†_0·a_1
 //
-// The full Hamiltonian is a Vec<OperatorTerm>; they are applied sequentially
-// (each term is a *separate* linear pass over the state buffer).
+// The full Hamiltonian is a Vec<OperatorTerm>; they are applied
+// sequentially (each term is a *separate* linear pass over the state
+// buffer).
 // ---------------------------------------------------------------------------
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -96,8 +98,9 @@ impl OperatorTerm {
     // Convenience constructors for common QHO operators
     // -----------------------------------------------------------------------
 
-    /// Number operator N_i = a†_i a_i  →  represented as two sequential terms.
-    /// Returns (annihilation, creation) to be applied in order.
+    /// Number operator N_i = a†_i a_i  →  represented as two
+    /// sequential terms. Returns (annihilation, creation) to be
+    /// applied in order.
     pub fn number_op(dim: u32) -> [Self; 2] {
         [
             Self::new(OpType::Annihilation, dim, 1.0, 0.0),
@@ -119,8 +122,9 @@ impl OperatorTerm {
         let f = scale / std::f32::consts::SQRT_2;
         [
             Self::new(OpType::Annihilation, dim, 0.0, -f), //  -i * a
-            Self::new(OpType::Creation, dim, 0.0, f),      //  +i * a†
-            // padding duplicates (identity, zero weight) to keep array len = 4
+            Self::new(OpType::Creation, dim, 0.0, f), //  +i * a†
+            // padding duplicates (identity, zero weight) to keep
+            // array len = 4
             Self::new(OpType::Identity, dim, 0.0, 0.0),
             Self::new(OpType::Identity, dim, 0.0, 0.0),
         ]

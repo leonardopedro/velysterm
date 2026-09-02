@@ -1,20 +1,25 @@
-//! Headless bridge from the document to the probability kernel (P3 #11).
+//! Headless bridge from the document to the probability kernel (P3
+//! #11).
 //!
-//! [`KernelBridge`] builds the semantic index, runs each `\model` / `\prob`
-//! statement through the translator pipeline ([`crate::dispatch`]), drives the
-//! [`KernelClient`] worker thread, and collects results so a frontend can
-//! overlay a probability (or a UK-#### error) next to each `\prob`.
+//! [`KernelBridge`] builds the semantic index, runs each `\model` /
+//! `\prob` statement through the translator pipeline
+//! ([`crate::dispatch`]), drives the [`KernelClient`] worker thread,
+//! and collects results so a frontend can overlay a probability (or a
+//! UK-#### error) next to each `\prob`.
 //!
 //! Identity & association:
-//! - Each statement is keyed by its body's **doc byte offset** (`span.start`) —
-//!   unique per statement, independent of block splitting.
+//! - Each statement is keyed by its body's **doc byte offset**
+//!   (`span.start`) — unique per statement, independent of block
+//!   splitting.
 //! - A `\model` becomes a kernel session keyed by its offset.
-//! - Each `\prob` / `\event` is evaluated against its **nearest preceding
-//!   `\model`** (by document order); the result is keyed by the prob's offset.
+//! - Each `\prob` / `\event` is evaluated against its **nearest
+//!   preceding `\model`** (by document order); the result is keyed by
+//!   the prob's offset.
 //!
-//! Change detection: a model is re-dispatched when its body changes; a prob is
-//! re-dispatched when its body or its associated model's body changes. So
-//! editing a model recomputes the probabilities that depend on it.
+//! Change detection: a model is re-dispatched when its body changes;
+//! a prob is re-dispatched when its body or its associated model's
+//! body changes. So editing a model recomputes the probabilities that
+//! depend on it.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -23,11 +28,15 @@ use std::time::{Duration, Instant};
 use kernel_client::worker::BlockResponse;
 use kernel_client::{KernelClient, KernelRequest};
 use mathed_core::PropKind;
-use mathed_core::markers::{resolve_segments, scan, MarkerScan, Segment};
+use mathed_core::markers::{
+    MarkerScan, Segment, resolve_segments, scan,
+};
 use mathed_core::semantics::{
     KernelStatement, SemanticIndex, TranslatorDef,
 };
-use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
+use mathed_core::transform::{
+    RenderOutput, TransformOptions, to_render_text,
+};
 
 use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src,
@@ -43,9 +52,10 @@ pub enum KernelResult {
     Value(f64),
     /// A string result (DID, CID) from federation ops (C12).
     StringValue(String),
-    /// An error: a short code/name, a human-readable message, and zero or more
-    /// machine-readable [`RepairHint`]s (the Zero-language agent surface — a
-    /// concrete fix the user/agent can apply, not just a string).
+    /// An error: a short code/name, a human-readable message, and
+    /// zero or more machine-readable [`RepairHint`]s (the
+    /// Zero-language agent surface — a concrete fix the
+    /// user/agent can apply, not just a string).
     Error {
         code_name: String,
         message: String,
@@ -63,25 +73,27 @@ pub struct KernelBridge {
     prob_names: HashMap<usize, Option<String>>,
     /// model offset → hash of the last-dispatched body.
     model_hashes: HashMap<usize, u64>,
-    /// prob offset → hash of the last-dispatched (prob body, model body) pair.
+    /// prob offset → hash of the last-dispatched (prob body, model
+    /// body) pair.
     prob_hashes: HashMap<usize, u64>,
-    /// Statement offsets present in the last-refreshed index. `poll` drops
-    /// any late response whose key is not live so a deleted statement can
-    /// never resurrect a stale annotation, and refresh prunes every scratch
-    /// map against it.
+    /// Statement offsets present in the last-refreshed index. `poll`
+    /// drops any late response whose key is not live so a
+    /// deleted statement can never resurrect a stale annotation,
+    /// and refresh prunes every scratch map against it.
     live: HashSet<usize>,
-    /// translator offset → error message (P5 #28). Populated during refresh
-    /// when a dispatch error involves a translator (bad Typst code, wrong JSON
-    /// output, …). Consumed by [`translator_errors`](Self::translator_errors)
+    /// translator offset → error message (P5 #28). Populated during
+    /// refresh when a dispatch error involves a translator (bad
+    /// Typst code, wrong JSON output, …). Consumed by
+    /// [`translator_errors`](Self::translator_errors)
     /// so the transform can show the error in the expanded panel.
     translator_errors: HashMap<usize, String>,
-    /// Request key → time it was submitted and not yet answered. `poll`
-    /// removes a key when a response arrives and expires entries older than
-    /// [`Self::LOST_RESPONSE_DEADLINE`] into a visible error: a request the
-    /// worker
-    /// accepted but never answered must not leave the prob silently without
-    /// an annotation forever (only possible via a future worker bug — the
-    /// worker answers every request today).
+    /// Request key → time it was submitted and not yet answered.
+    /// `poll` removes a key when a response arrives and expires
+    /// entries older than [`Self::LOST_RESPONSE_DEADLINE`] into
+    /// a visible error: a request the worker
+    /// accepted but never answered must not leave the prob silently
+    /// without an annotation forever (only possible via a future
+    /// worker bug — the worker answers every request today).
     pending: HashMap<usize, Instant>,
 }
 
@@ -111,16 +123,18 @@ impl KernelBridge {
         &self.results
     }
 
-    /// Inline annotations keyed by each prob's body offset: small coloured
-    /// Typst markup (green value / red error code) the transform splices in
-    /// right after the `\prob`'s rendered body. Feed this to
+    /// Inline annotations keyed by each prob's body offset: small
+    /// coloured Typst markup (green value / red error code) the
+    /// transform splices in right after the `\prob`'s rendered
+    /// body. Feed this to
     /// [`TransformOptions::annotations`](mathed_core::transform::TransformOptions).
     pub fn result_annotations(&self) -> HashMap<usize, String> {
         self.results
             .iter()
             .map(|(&k, r)| {
                 let markup = match r {
-                    // Escape `=` so Typst does not read it as a heading.
+                    // Escape `=` so Typst does not read it as a
+                    // heading.
                     KernelResult::Value(p) => format!(
                         " #text(rgb(\"#138000\"))[\\= {p:.4}]"
                     ),
@@ -136,8 +150,8 @@ impl KernelBridge {
             .collect()
     }
 
-    /// Typst markup for the results panel footer, summarizing kernel status.
-    /// Returns `None` when there are no results to show.
+    /// Typst markup for the results panel footer, summarizing kernel
+    /// status. Returns `None` when there are no results to show.
     pub fn result_panel_markup(&self) -> Option<String> {
         if self.results.is_empty() {
             return None;
@@ -178,9 +192,10 @@ impl KernelBridge {
         Some(parts.join("  │  "))
     }
 
-    /// Summary panel for multi-model documents (C11). Returns `None` when
-    /// fewer than 2 models are present. Lists each model's name (or offset)
-    /// so the reader can see which models are in scope.
+    /// Summary panel for multi-model documents (C11). Returns `None`
+    /// when fewer than 2 models are present. Lists each model's
+    /// name (or offset) so the reader can see which models are in
+    /// scope.
     pub fn models_overview(&self, doc_text: &str) -> Option<String> {
         let idx = build_index(doc_text);
         let models: Vec<&KernelStatement> = idx
@@ -202,34 +217,33 @@ impl KernelBridge {
         Some(format!("models: {}", names.join(", ")))
     }
 
-    /// Translator error messages keyed by the translator segment's body start
-    /// offset (P5 #28). Feed this to
+    /// Translator error messages keyed by the translator segment's
+    /// body start offset (P5 #28). Feed this to
     /// [`TransformOptions::translator_errors`](mathed_core::transform::TransformOptions)
-    /// so the expanded translator panel shows the error in red below the code.
+    /// so the expanded translator panel shows the error in red below
+    /// the code.
     pub fn translator_errors(&self) -> &HashMap<usize, String> {
         &self.translator_errors
     }
 
-    /// Re-scan `doc_text` and submit changed `\model`/`\prob` statements to the
-    /// worker. Cheap when nothing changed (hash short-circuits). Results arrive
-    /// asynchronously — call [`poll`](Self::poll) to collect them.
+    /// Re-scan `doc_text` and submit changed `\model`/`\prob`
+    /// statements to the worker. Cheap when nothing changed (hash
+    /// short-circuits). Results arrive asynchronously — call
+    /// [`poll`](Self::poll) to collect them.
     ///
-    /// Returns `true` if a **synchronous** result was inserted (a dispatch
-    /// error from a bad translator / missing model / unparseable prior or
-    /// solver). Async worker responses are reported by [`poll`](Self::poll).
-    /// A frontend that renders inline annotations should re-transform the
-    /// affected blocks when this returns `true` (or when `poll` does).
-    /// Submit a kernel request, keyed by `block_id` (the statement's doc
-    /// offset). If the worker thread is gone (channel disconnected — a
-    /// panicked worker), record a visible error at the block instead of
-    /// silently dropping the request and waiting forever for a response that
-    /// will never arrive (no dead-ends: the UI shows why the annotation is
-    /// missing).
-    fn submit_or_error(
-        &mut self,
-        block_id: u64,
-        req: KernelRequest,
-    ) {
+    /// Returns `true` if a **synchronous** result was inserted (a
+    /// dispatch error from a bad translator / missing model /
+    /// unparseable prior or solver). Async worker responses are
+    /// reported by [`poll`](Self::poll). A frontend that renders
+    /// inline annotations should re-transform the affected blocks
+    /// when this returns `true` (or when `poll` does).
+    /// Submit a kernel request, keyed by `block_id` (the statement's
+    /// doc offset). If the worker thread is gone (channel
+    /// disconnected — a panicked worker), record a visible error
+    /// at the block instead of silently dropping the request and
+    /// waiting forever for a response that will never arrive (no
+    /// dead-ends: the UI shows why the annotation is missing).
+    fn submit_or_error(&mut self, block_id: u64, req: KernelRequest) {
         if !self.client.submit(req) {
             self.results.insert(
                 block_id as usize,
@@ -248,27 +262,31 @@ impl KernelBridge {
                 },
             );
         } else {
-            // Accepted: the worker owes us a response for this key. Track it
-            // so a response that never arrives (a future worker bug — the
-            // worker answers every request today) becomes a visible error
+            // Accepted: the worker owes us a response for this key.
+            // Track it so a response that never arrives
+            // (a future worker bug — the worker answers
+            // every request today) becomes a visible error
             // instead of a silently missing annotation forever.
             self.pending.insert(block_id as usize, Instant::now());
         }
     }
 
-    /// How long a submitted-but-unanswered request may stay in flight before
-    /// it is declared lost and surfaced as a visible error.
+    /// How long a submitted-but-unanswered request may stay in flight
+    /// before it is declared lost and surfaced as a visible
+    /// error.
     const LOST_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
 
-    /// Expire requests that were accepted but never answered. Called from
-    /// [`Self::poll`] on every drain; `now` is injectable so tests can
-    /// fabricate a
+    /// Expire requests that were accepted but never answered. Called
+    /// from [`Self::poll`] on every drain; `now` is injectable so
+    /// tests can fabricate a
     /// clock.
     fn expire_lost(&mut self, now: Instant) {
         let expired: Vec<usize> = self
             .pending
             .iter()
-            .filter(|(_, t)| now.duration_since(**t) > Self::LOST_RESPONSE_DEADLINE)
+            .filter(|(_, t)| {
+                now.duration_since(**t) > Self::LOST_RESPONSE_DEADLINE
+            })
             .map(|(k, _)| *k)
             .collect();
         for key in expired {
@@ -296,21 +314,27 @@ impl KernelBridge {
         self.refresh_with_index(&build_index(doc_text))
     }
 
-    /// Re-dispatch kernel statements from an already-built index. The editor
-    /// computes the pipeline ONCE per edit and hands the same index to the
-    /// kernel refresh AND the accessibility tree, so a keystroke scans the
-    /// document a single time instead of once per consumer (openclaw
-    /// doctrine: latency is work, not round-trips).
-    pub fn refresh_with_index(&mut self, idx: &SemanticIndex) -> bool {
+    /// Re-dispatch kernel statements from an already-built index. The
+    /// editor computes the pipeline ONCE per edit and hands the
+    /// same index to the kernel refresh AND the accessibility
+    /// tree, so a keystroke scans the document a single time
+    /// instead of once per consumer (openclaw doctrine: latency
+    /// is work, not round-trips).
+    pub fn refresh_with_index(
+        &mut self,
+        idx: &SemanticIndex,
+    ) -> bool {
         let mut changed = false;
 
-        // Clear stale translator errors from the previous scan (P5 #28).
-        // They're re-populated below if dispatch errors recur.
+        // Clear stale translator errors from the previous scan (P5
+        // #28). They're re-populated below if dispatch errors
+        // recur.
         self.translator_errors.clear();
 
-        // The set of statements actually present in THIS scan. Used at the
-        // end to prune scratch maps (a deleted `\prob`/`\model` must not keep
-        // displaying its old annotation) and by `poll` to drop late responses
+        // The set of statements actually present in THIS scan. Used
+        // at the end to prune scratch maps (a deleted
+        // `\prob`/`\model` must not keep displaying its old
+        // annotation) and by `poll` to drop late responses
         // for statements that no longer exist.
         self.live = idx
             .kernel_statements
@@ -326,10 +350,12 @@ impl KernelBridge {
             .collect();
         models.sort_by_key(|s| s.span.start);
 
-        // Resolve `\prior` / `\solver` segments to their bound model (explicit
-        // `model: "name"` or nearest-preceding) and parse them. Keyed by model
-        // offset; last binding wins. A parse error is surfaced at the
-        // prior/solver's own offset, leaving the model on its previous spec.
+        // Resolve `\prior` / `\solver` segments to their bound model
+        // (explicit `model: "name"` or nearest-preceding) and
+        // parse them. Keyed by model offset; last binding
+        // wins. A parse error is surfaced at the
+        // prior/solver's own offset, leaving the model on its
+        // previous spec.
         let mut priors: HashMap<usize, (PriorSpec, String)> =
             HashMap::new();
         let mut solvers: HashMap<usize, (SolverSpec, String)> =
@@ -380,12 +406,14 @@ impl KernelBridge {
             }
         }
 
-        // Dispatch each model whose body, translator, prior, or solver
-        // changed. The translator source is resolved exactly as the dispatcher
-        // resolves it (named → unnamed `""` default → builtin), so editing the
-        // *resolved* translator — including an unnamed block-local default —
-        // changes the hash and triggers a redispatch. The bound prior/solver
-        // bodies are folded into the same hash so editing a `\prior`/`\solver`
+        // Dispatch each model whose body, translator, prior, or
+        // solver changed. The translator source is resolved
+        // exactly as the dispatcher resolves it (named →
+        // unnamed `""` default → builtin), so editing the
+        // *resolved* translator — including an unnamed block-local
+        // default — changes the hash and triggers a
+        // redispatch. The bound prior/solver bodies are
+        // folded into the same hash so editing a `\prior`/`\solver`
         // re-dispatches its model.
         for m in &models {
             let trans_src = resolve_translator_src(
@@ -479,13 +507,17 @@ impl KernelBridge {
             let Some(model) =
                 resolve_model(&models, stmt, &mut self.results)
             else {
-                // The prob's model binding is gone. `resolve_model` replaces
-                // the entry with a `model-not-found` error when a *named*
-                // model vanished; in the nearest-preceding case it leaves the
-                // previous VALUE in place — a stale number computed under the
-                // dead model must not keep annotating the document. Drop only
-                // a computed value (keep the named-case error), and clear the
-                // dispatch hash so a later reappearing model recomputes.
+                // The prob's model binding is gone. `resolve_model`
+                // replaces the entry with a
+                // `model-not-found` error when a *named*
+                // model vanished; in the nearest-preceding case it
+                // leaves the previous VALUE in place
+                // — a stale number computed under the
+                // dead model must not keep annotating the document.
+                // Drop only a computed value (keep
+                // the named-case error), and clear the
+                // dispatch hash so a later reappearing model
+                // recomputes.
                 if matches!(
                     self.results.get(&stmt.span.start),
                     Some(
@@ -583,9 +615,10 @@ impl KernelBridge {
                 }
             }
         }
-        // Layout claims (GPU federation T1.2): the verdict is synchronous —
-        // no worker round-trip. Surface a UK-49xx code + `RepairHint` exactly
-        // like a kernel error, or a green `surjective` annotation when the
+        // Layout claims (GPU federation T1.2): the verdict is
+        // synchronous — no worker round-trip. Surface a
+        // UK-49xx code + `RepairHint` exactly like a kernel
+        // error, or a green `surjective` annotation when the
         // claim has no parity obstruction.
         for stmt in idx
             .kernel_statements
@@ -599,34 +632,33 @@ impl KernelBridge {
             }
         }
 
-        // Reconcile every scratch map against the statements now in the
-        // document. A deleted statement's stale annotation (or dispatch hash)
-        // must not persist across refreshes.
-        self.results
-            .retain(|k, _| self.live.contains(k));
-        self.prob_hashes
-            .retain(|k, _| self.live.contains(k));
-        self.model_hashes
-            .retain(|k, _| self.live.contains(k));
-        self.prob_names
-            .retain(|k, _| self.live.contains(k));
-        self.pending
-            .retain(|k, _| self.live.contains(k));
+        // Reconcile every scratch map against the statements now in
+        // the document. A deleted statement's stale
+        // annotation (or dispatch hash) must not persist
+        // across refreshes.
+        self.results.retain(|k, _| self.live.contains(k));
+        self.prob_hashes.retain(|k, _| self.live.contains(k));
+        self.model_hashes.retain(|k, _| self.live.contains(k));
+        self.prob_names.retain(|k, _| self.live.contains(k));
+        self.pending.retain(|k, _| self.live.contains(k));
         changed
     }
 
-    /// Drain completed worker responses into [`results`](Self::results).
-    /// Returns `true` if any result changed (the frontend should redraw).
+    /// Drain completed worker responses into
+    /// [`results`](Self::results). Returns `true` if any result
+    /// changed (the frontend should redraw).
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        // Requests that were accepted but never answered become a visible
-        // error instead of a permanently missing annotation.
+        // Requests that were accepted but never answered become a
+        // visible error instead of a permanently missing
+        // annotation.
         let before = self.results.len();
         self.expire_lost(Instant::now());
         changed |= self.results.len() != before;
         while let Some(resp) = self.client.try_recv() {
-            // Any response settles its request — even one for a statement
-            // that has since been deleted (dropped by the live filter
+            // Any response settles its request — even one for a
+            // statement that has since been deleted
+            // (dropped by the live filter
             // below). A settled key must not be declared lost later.
             match &resp {
                 BlockResponse::Value(id, _)
@@ -636,8 +668,9 @@ impl KernelBridge {
                     self.pending.remove(&(*id as usize));
                 }
             }
-            // A late response for a statement that has since been deleted must
-            // not resurrect its stale annotation: the key is not live anymore.
+            // A late response for a statement that has since been
+            // deleted must not resurrect its stale
+            // annotation: the key is not live anymore.
             let key_live = match &resp {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
@@ -656,7 +689,8 @@ impl KernelBridge {
                         .insert(id as usize, KernelResult::Value(v));
                     changed = true;
                 }
-                // A model session was (re)defined: no displayed result.
+                // A model session was (re)defined: no displayed
+                // result.
                 BlockResponse::Success(_) => {}
                 BlockResponse::StringValue(id, s) => {
                     self.results.insert(
@@ -682,10 +716,10 @@ impl KernelBridge {
     }
 }
 
-/// The full scan pipeline for `doc_text` (whole document as one block): scan
-/// → segments → render → semantic index. The kernel refresh and the
-/// accessibility tree consume the SAME result, so an edit runs this once,
-/// never once per consumer.
+/// The full scan pipeline for `doc_text` (whole document as one
+/// block): scan → segments → render → semantic index. The kernel
+/// refresh and the accessibility tree consume the SAME result, so an
+/// edit runs this once, never once per consumer.
 pub fn scan_pipeline(
     doc_text: &str,
 ) -> (MarkerScan, Vec<Segment>, RenderOutput, SemanticIndex) {
@@ -702,17 +736,19 @@ pub fn scan_pipeline(
     (scan, segments, render, idx)
 }
 
-/// Build the semantic index for `doc_text` (whole document as one block).
+/// Build the semantic index for `doc_text` (whole document as one
+/// block).
 fn build_index(doc_text: &str) -> SemanticIndex {
     scan_pipeline(doc_text).3
 }
 
-/// A document scan pipeline cached against the text it was built from. The
-/// kernel refresh and the accessibility tree consume the SAME pipeline per
-/// edit, so a keystroke scans the document once, never once per consumer.
-/// `for_text` rebuilds only when the text actually changed, making a stale
-/// reuse impossible by construction (repeated calls on an unchanged doc —
-/// cursor moves, marker toggles, repeated a11y pushes — hit the cache).
+/// A document scan pipeline cached against the text it was built
+/// from. The kernel refresh and the accessibility tree consume the
+/// SAME pipeline per edit, so a keystroke scans the document once,
+/// never once per consumer. `for_text` rebuilds only when the text
+/// actually changed, making a stale reuse impossible by construction
+/// (repeated calls on an unchanged doc — cursor moves, marker
+/// toggles, repeated a11y pushes — hit the cache).
 #[derive(Default)]
 pub struct PipelineCache {
     text: String,
@@ -722,9 +758,9 @@ pub struct PipelineCache {
 }
 
 impl PipelineCache {
-    /// The pipeline for `text`, rebuilding the full scan when the cached
-    /// text differs. Shared borrows keep the cached pieces alive for both
-    /// consumers without copying.
+    /// The pipeline for `text`, rebuilding the full scan when the
+    /// cached text differs. Shared borrows keep the cached pieces
+    /// alive for both consumers without copying.
     pub fn for_text(&mut self, text: &str) -> &Self {
         if self.text != text {
             let (scan, segments, _render, idx) = scan_pipeline(text);
@@ -751,9 +787,9 @@ impl PipelineCache {
 
 /// Resolve which `\model` a `\prob`/`\event` statement applies to.
 ///
-/// - If the statement carries a `model: "name"` arg, bind to the `\model`
-///   whose `name` matches. If no such model exists, record an error
-///   result under the prob's offset and return `None`.
+/// - If the statement carries a `model: "name"` arg, bind to the
+///   `\model` whose `name` matches. If no such model exists, record
+///   an error result under the prob's offset and return `None`.
 /// - Otherwise, bind to the model nearest before the statement's body
 ///   offset (or the first model if none precede it).
 fn resolve_model<'a>(
@@ -799,7 +835,8 @@ fn resolve_model<'a>(
     nearest_preceding_model(models, stmt.span.start)
 }
 
-/// The model nearest before `pos` (or the first model if none precede it).
+/// The model nearest before `pos` (or the first model if none precede
+/// it).
 fn nearest_preceding_model<'a>(
     models: &[&'a KernelStatement],
     pos: usize,
@@ -825,9 +862,10 @@ fn dispatch_error_result(e: &DispatchError) -> KernelResult {
     }
 }
 
-/// Parse a bank-conflict congruence `ax + by ≡ 0 (mod m)` from a `\layout`
-/// body. Returns `(a, b, m)`. Tolerant of whitespace, `≡`/`=`, `mod`/`Mod`,
-/// `·`/`*` separators, and implicit unit coefficients (`x + 2y` ⇒ a = 1).
+/// Parse a bank-conflict congruence `ax + by ≡ 0 (mod m)` from a
+/// `\layout` body. Returns `(a, b, m)`. Tolerant of whitespace,
+/// `≡`/`=`, `mod`/`Mod`, `·`/`*` separators, and implicit unit
+/// coefficients (`x + 2y` ⇒ a = 1).
 fn parse_congruence(body: &str) -> Option<(i64, i64, i64)> {
     let mut a: Option<i64> = None;
     let mut b: Option<i64> = None;
@@ -854,11 +892,13 @@ fn parse_congruence(body: &str) -> Option<(i64, i64, i64)> {
                 sign = 1;
                 if seen_mod && m.is_none() {
                     m = Some(n);
-                } else if chars.peek() == Some(&'x') || chars.peek() == Some(&'X')
+                } else if chars.peek() == Some(&'x')
+                    || chars.peek() == Some(&'X')
                 {
                     a = Some(n);
                     chars.next();
-                } else if chars.peek() == Some(&'y') || chars.peek() == Some(&'Y')
+                } else if chars.peek() == Some(&'y')
+                    || chars.peek() == Some(&'Y')
                 {
                     b = Some(n);
                     chars.next();
@@ -889,12 +929,13 @@ fn parse_congruence(body: &str) -> Option<(i64, i64, i64)> {
     Some((a?, b?, m?))
 }
 
-/// Verdict for a `\layout` congruence claim — the parity argument formalized
-/// in timepiece (GPU_FEDERATION_PLAN T2.1): the linear map
-/// `(x, y) ↦ ax + by (mod m)` is bijective only if `gcd(a, b, m) = 1`. When
-/// the gcd exceeds 1 its image lies in a proper subgroup of `Z/mZ`, so a row
-/// of `m` consecutive addresses collides on `m/gcd` banks and no bijective
-/// swizzle can separate them — surface `UK-4907` with a `ReplaceValue` hint.
+/// Verdict for a `\layout` congruence claim — the parity argument
+/// formalized in timepiece (GPU_FEDERATION_PLAN T2.1): the linear map
+/// `(x, y) ↦ ax + by (mod m)` is bijective only if `gcd(a, b, m) =
+/// 1`. When the gcd exceeds 1 its image lies in a proper subgroup of
+/// `Z/mZ`, so a row of `m` consecutive addresses collides on `m/gcd`
+/// banks and no bijective swizzle can separate them — surface
+/// `UK-4907` with a `ReplaceValue` hint.
 fn layout_verdict(body: &str) -> KernelResult {
     let Some((a, b, m)) = parse_congruence(body) else {
         return KernelResult::Error {
@@ -942,11 +983,12 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
     a.abs()
 }
 
-/// Map a [`DispatchError`] to concrete [`RepairHint`]s — the machine-readable
-/// half of the Zero-language agent surface. Every error the user/agent can
-/// trigger from the editor carries at least one actionable suggestion (the
-/// internal [`WrongKind`](DispatchError::WrongKind) misuse, which a frontend
-/// never produces, is the sole exception).
+/// Map a [`DispatchError`] to concrete [`RepairHint`]s — the
+/// machine-readable half of the Zero-language agent surface. Every
+/// error the user/agent can trigger from the editor carries at least
+/// one actionable suggestion (the
+/// internal [`WrongKind`](DispatchError::WrongKind) misuse, which a
+/// frontend never produces, is the sole exception).
 fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
     let hint = |target: &str, suggestion: String| {
         vec![RepairHint::new(
@@ -992,8 +1034,8 @@ fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
     }
 }
 
-/// First non-empty line of a (possibly multi-line) diagnostic, trimmed — keeps
-/// a `RepairHint` suggestion to one readable line.
+/// First non-empty line of a (possibly multi-line) diagnostic,
+/// trimmed — keeps a `RepairHint` suggestion to one readable line.
 fn first_line(msg: &str) -> &str {
     msg.lines()
         .map(str::trim)
@@ -1009,11 +1051,13 @@ fn hash_many(strs: &[&str]) -> u64 {
     h.finish()
 }
 
-/// Body-start offset of the translator resolved for a statement (P5 #28).
+/// Body-start offset of the translator resolved for a statement (P5
+/// #28).
 ///
-/// Mirrors [`resolve_translator_src`]: tries the named translator first, then
-/// the unnamed default. Returns `None` when the builtin is the fallback (it
-/// has no expanded panel in the document to annotate).
+/// Mirrors [`resolve_translator_src`]: tries the named translator
+/// first, then the unnamed default. Returns `None` when the builtin
+/// is the fallback (it has no expanded panel in the document to
+/// annotate).
 fn translator_offset(
     translators: &HashMap<String, TranslatorDef>,
     name: Option<&str>,
@@ -1060,9 +1104,10 @@ mod tests {
 
     #[test]
     fn prob_computes_real_probability_end_to_end() {
-        // Model: builtin translator (mode-0 number operator, vacuum prior).
-        // Prob: an event translator emitting the Vacuum predicate. The prior
-        // state is vacuum, so P(vacuum) == 1.0 — a real kernel computation.
+        // Model: builtin translator (mode-0 number operator, vacuum
+        // prior). Prob: an event translator emitting the
+        // Vacuum predicate. The prior state is vacuum, so
+        // P(vacuum) == 1.0 — a real kernel computation.
         let doc = "#1 a #2 \\model(#1,#2)\n\n\
                    #5 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
                    #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
@@ -1080,10 +1125,11 @@ mod tests {
             }
             other => panic!("expected a Value result, got {other:?}"),
         }
-        // The inline annotation carries the value, keyed by prob offset —
-        // the only place a computed result is shown, right next to the
-        // `\prob` it belongs to (this is a WYSIWYG editor: no separate,
-        // non-document results display).
+        // The inline annotation carries the value, keyed by prob
+        // offset — the only place a computed result is shown,
+        // right next to the `\prob` it belongs to (this is a
+        // WYSIWYG editor: no separate, non-document results
+        // display).
         let ann = bridge.result_annotations();
         let markup = ann.get(&key).expect("annotation for the prob");
         assert!(markup.contains("1.0000"), "annotation: {markup}");
@@ -1095,44 +1141,49 @@ mod tests {
         let doc = "#1 a #2 \\model(#1,#2)";
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc);
-        // The model's hash is now recorded; a second refresh submits nothing
-        // new (no panic, no duplicate session churn).
+        // The model's hash is now recorded; a second refresh submits
+        // nothing new (no panic, no duplicate session churn).
         bridge.refresh(doc);
         assert_eq!(bridge.model_hashes.len(), 1);
     }
 
     #[test]
     fn refresh_reports_sync_dispatch_errors() {
-        // `refresh` returns `true` only when a *synchronous* result is
-        // inserted (a dispatch error); successful submissions go to the
-        // worker and are reported later by `poll`. This lets the Bevy
-        // frontend re-dirty the owning block so the inline `code_name`
-        // annotation renders without waiting for the next doc edit (P5 #24).
+        // `refresh` returns `true` only when a *synchronous* result
+        // is inserted (a dispatch error); successful
+        // submissions go to the worker and are reported later
+        // by `poll`. This lets the Bevy frontend re-dirty the
+        // owning block so the inline `code_name` annotation
+        // renders without waiting for the next doc edit (P5 #24).
         let mut bridge = KernelBridge::new();
-        // No kernel statements: nothing submitted, no synchronous error.
+        // No kernel statements: nothing submitted, no synchronous
+        // error.
         assert!(!bridge.refresh("#1 hello #2"));
-        // A prob whose translator emits invalid EventPredicate JSON inserts
-        // a dispatch error synchronously (see bad_event_translator_surfaces_error).
+        // A prob whose translator emits invalid EventPredicate JSON
+        // inserts a dispatch error synchronously (see
+        // bad_event_translator_surfaces_error).
         let doc = "#1 a #2 \\model(#1,#2)\n\
                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
                    #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
         assert!(bridge.refresh(doc));
     }
 
-    /// REGRESSION (round 14): the index-parameterized refresh must dispatch
-    /// EXACTLY like the text-based one — the editor now builds the pipeline
-    /// once per edit and feeds the SAME index to the kernel refresh and the
-    /// accessibility tree, so any drift between the two entry points would
-    /// silently change which `\model`/`\prob` get submitted.
+    /// REGRESSION (round 14): the index-parameterized refresh must
+    /// dispatch EXACTLY like the text-based one — the editor now
+    /// builds the pipeline once per edit and feeds the SAME index
+    /// to the kernel refresh and the accessibility tree, so any
+    /// drift between the two entry points would silently change
+    /// which `\model`/`\prob` get submitted.
     #[test]
     fn refresh_with_index_dispatches_identically_to_refresh() {
         let doc = "#1 a #2 \\model(#1,#2)\n\
                    #3 vac #4 \\prob(#3,#4)\n\
                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
                    #7 v #8 \\prob(#7,#8, translator: \"bad\")";
-        // Second scan WITHOUT the bad translator: the stale dispatch error
-        // from scan 1 must be cleared on scan 2 (P5 #28). Running the same
-        // two-scan sequence through both entry points pins their full state
+        // Second scan WITHOUT the bad translator: the stale dispatch
+        // error from scan 1 must be cleared on scan 2 (P5
+        // #28). Running the same two-scan sequence through
+        // both entry points pins their full state
         // equivalence, including the cross-scan lifecycle.
         let clean = "#1 a #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)";
 
@@ -1150,19 +1201,24 @@ mod tests {
 
         assert_eq!(via_index.model_hashes, via_text.model_hashes);
         assert_eq!(via_index.live, via_text.live);
-        assert_eq!(via_index.translator_errors, via_text.translator_errors);
+        assert_eq!(
+            via_index.translator_errors,
+            via_text.translator_errors
+        );
         assert_eq!(via_index.results, via_text.results);
     }
 
-    /// The shared pipeline is the same content the bridge used to build
-    /// internally, and the cache rebuilds exactly when the text changes
-    /// (a stale reuse is impossible by construction: the text key gates it).
+    /// The shared pipeline is the same content the bridge used to
+    /// build internally, and the cache rebuilds exactly when the
+    /// text changes (a stale reuse is impossible by construction:
+    /// the text key gates it).
     #[test]
     fn scan_pipeline_and_cache_guard() {
         let doc = "#1 a #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)";
         let (pipe_scan, segments, _render, idx) = scan_pipeline(doc);
-        // Seam: the pipeline's index is byte-for-byte the old build_index
-        // output (same kernel statements collected).
+        // Seam: the pipeline's index is byte-for-byte the old
+        // build_index output (same kernel statements
+        // collected).
         assert_eq!(
             idx.kernel_statements.len(),
             build_index(doc).kernel_statements.len()
@@ -1177,7 +1233,9 @@ mod tests {
         assert_eq!(cache.text, doc);
         cache.for_text(doc);
         assert_eq!(cache.text, doc);
-        cache.for_text("#1 b #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)");
+        cache.for_text(
+            "#1 b #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)",
+        );
         assert_ne!(cache.text, doc);
         cache.for_text(doc);
         assert_eq!(cache.text, doc);
@@ -1206,10 +1264,11 @@ mod tests {
 
     #[test]
     fn layout_claim_swizzle_impossible_surfaces_uk_4907() {
-        // GPU.md's running example: gcd(2, 4, 32) = 2 > 1, so the image of
-        // (x, y) ↦ 2x + 4y (mod 32) lies in a proper subgroup and a row of
-        // 32 consecutive addresses collides on 16 banks — no bijective
-        // swizzle can separate them. Surfaces UK-4907 + a ReplaceValue hint.
+        // GPU.md's running example: gcd(2, 4, 32) = 2 > 1, so the
+        // image of (x, y) ↦ 2x + 4y (mod 32) lies in a proper
+        // subgroup and a row of 32 consecutive addresses
+        // collides on 16 banks — no bijective swizzle can
+        // separate them. Surfaces UK-4907 + a ReplaceValue hint.
         let doc = "#1 2x + 4y ≡ 0 (mod 32) #2 \\layout(#1,#2)";
         let mut bridge = KernelBridge::new();
         assert!(bridge.refresh(doc));
@@ -1234,21 +1293,25 @@ mod tests {
                 );
                 assert_eq!(hints.len(), 1);
                 assert_eq!(hints[0].kind, HintKind::ReplaceValue);
-                assert!(hints[0].suggestion.contains("gcd(a, b, 32) = 1"));
+                assert!(
+                    hints[0].suggestion.contains("gcd(a, b, 32) = 1")
+                );
             }
             other => panic!("expected UK-4907 error, got {other:?}"),
         }
-        // The overlay annotation renders the code inline, like any kernel
-        // error (red code name right after the claim).
+        // The overlay annotation renders the code inline, like any
+        // kernel error (red code name right after the claim).
         let ann = bridge.result_annotations();
-        let markup = ann.get(&key).expect("annotation for the layout");
+        let markup =
+            ann.get(&key).expect("annotation for the layout");
         assert!(markup.contains("UK-4907"), "annotation: {markup}");
     }
 
     #[test]
     fn layout_claim_no_parity_obstruction_is_green() {
-        // gcd(1, 1, 32) = 1: the map is surjective — no parity obstruction,
-        // so the claim renders a benign green annotation.
+        // gcd(1, 1, 32) = 1: the map is surjective — no parity
+        // obstruction, so the claim renders a benign green
+        // annotation.
         let doc = "#1 x + y ≡ 0 (mod 32) #2 \\layout(#1,#2)";
         let mut bridge = KernelBridge::new();
         assert!(bridge.refresh(doc));
@@ -1264,7 +1327,9 @@ mod tests {
             Some(KernelResult::StringValue(s)) => {
                 assert_eq!(s, "surjective");
             }
-            other => panic!("expected surjective verdict, got {other:?}"),
+            other => {
+                panic!("expected surjective verdict, got {other:?}")
+            }
         }
     }
 
@@ -1283,24 +1348,24 @@ mod tests {
             .start;
         match bridge.results().get(&key) {
             Some(KernelResult::Error {
-                code_name,
-                hints,
-                ..
+                code_name, hints, ..
             }) => {
                 assert_eq!(code_name, "layout-parse");
                 assert_eq!(hints.len(), 1);
                 assert_eq!(hints[0].target, "layout");
             }
-            other => panic!("expected layout-parse error, got {other:?}"),
+            other => {
+                panic!("expected layout-parse error, got {other:?}")
+            }
         }
     }
 
     #[test]
     fn bad_event_translator_surfaces_error() {
-        // The prob uses a named translator that emits TermSpec[] JSON —
-        // valid JSON but not a valid EventPredicate. The typed validation
-        // in statement_to_event_json catches it (Json error, no worker
-        // round-trip needed).
+        // The prob uses a named translator that emits TermSpec[] JSON
+        // — valid JSON but not a valid EventPredicate. The
+        // typed validation in statement_to_event_json catches
+        // it (Json error, no worker round-trip needed).
         let doc = "#1 a #2 \\model(#1,#2)\n\n\
                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\n\
                    #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
@@ -1320,9 +1385,10 @@ mod tests {
 
     #[test]
     fn translator_error_populates_translator_errors_map() {
-        // P5 #28: when a translator emits bad JSON, the error message is
-        // stored in `translator_errors` keyed by the translator's body
-        // start offset, so the expanded panel can display it in red.
+        // P5 #28: when a translator emits bad JSON, the error message
+        // is stored in `translator_errors` keyed by the
+        // translator's body start offset, so the expanded
+        // panel can display it in red.
         let doc = "#1 a #2 \\model(#1,#2)\n\n\
                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\n\
                    #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
@@ -1347,8 +1413,9 @@ mod tests {
 
     #[test]
     fn translator_error_clears_on_fix() {
-        // P5 #28: once a translator is fixed (new hash → re-dispatch succeeds),
-        // its entry is removed from `translator_errors`.
+        // P5 #28: once a translator is fixed (new hash → re-dispatch
+        // succeeds), its entry is removed from
+        // `translator_errors`.
         let bad_doc = "#1 a #2 \\model(#1,#2)\n\n\
                        #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
                        #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
@@ -1374,10 +1441,12 @@ mod tests {
 
     #[test]
     fn deleted_translator_clears_stale_error() {
-        // When a translator that previously errored is *deleted* from the
-        // document, its stale error entry must not persist (P5 #28: the
-        // refresh() clears translator_errors at the start of each scan, then
-        // re-populates only for translators that still exist and still fail).
+        // When a translator that previously errored is *deleted* from
+        // the document, its stale error entry must not
+        // persist (P5 #28: the refresh() clears
+        // translator_errors at the start of each scan, then
+        // re-populates only for translators that still exist and
+        // still fail).
         let bad_doc = "#1 a #2 \\model(#1,#2)\n\n\
                        #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
                        #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
@@ -1414,10 +1483,11 @@ mod tests {
 
     #[test]
     fn prior_reaches_kernel_and_changes_probability() {
-        // A \prior segment sets a one-boson prior in mode 0, bound to the
-        // model. The event asks P(boson mode-0 total == 1): certain on that
-        // prior, so P == 1.0 — proving the \prior body parses, binds, and is
-        // applied to the real kernel session (not the hardcoded vacuum).
+        // A \prior segment sets a one-boson prior in mode 0, bound to
+        // the model. The event asks P(boson mode-0 total ==
+        // 1): certain on that prior, so P == 1.0 — proving
+        // the \prior body parses, binds, and is applied to
+        // the real kernel session (not the hardcoded vacuum).
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
                    #7 bosons(0:1) #8 \\prior(#7,#8, model: \"m1\")\n\n\
                    #5 #let translate(b) = { \"{\\\"kind\\\":\\\"boson_mode_total\\\",\\\"mode\\\":0,\\\"cmp\\\":\\\"eq\\\",\\\"value\\\":1}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
@@ -1441,8 +1511,9 @@ mod tests {
     #[test]
     fn bad_prior_body_surfaces_parse_error() {
         // The \prior body is neither a known form nor valid JSON: a
-        // prior-solver-parse error is recorded at the prior's offset, and
-        // the model still dispatches (vacuum fallback) without panicking.
+        // prior-solver-parse error is recorded at the prior's offset,
+        // and the model still dispatches (vacuum fallback)
+        // without panicking.
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
                    #7 not_a_prior #8 \\prior(#7,#8, model: \"m1\")";
         let mut bridge = KernelBridge::new();
@@ -1465,21 +1536,23 @@ mod tests {
 
     #[test]
     fn missing_named_model_surfaces_error() {
-        // A prob references model: "nonexistent" — no model has that name.
+        // A prob references model: "nonexistent" — no model has that
+        // name.
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
                    #3 vac #4 \\prob(#3,#4, model: \"nonexistent\")";
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc);
         let key = prob_offset(doc);
-        // The error is recorded synchronously by resolve_model (no worker
-        // round-trip needed).
+        // The error is recorded synchronously by resolve_model (no
+        // worker round-trip needed).
         match bridge.results().get(&key) {
             Some(KernelResult::Error {
                 code_name, hints, ..
             }) => {
                 assert_eq!(code_name, "model-not-found");
-                // The repair hint names the model actually in scope so an
-                // agent can correct the `model:` arg without guessing.
+                // The repair hint names the model actually in scope
+                // so an agent can correct the
+                // `model:` arg without guessing.
                 let h = hints.first().expect("a repair hint");
                 assert_eq!(h.kind, HintKind::ReplaceValue);
                 assert!(
@@ -1496,9 +1569,10 @@ mod tests {
 
     #[test]
     fn dispatch_errors_carry_repair_hints() {
-        // Every user-triggerable DispatchError maps to at least one concrete
-        // RepairHint (the Zero-language agent surface). Only the internal
-        // WrongKind misuse — which a frontend never dispatches — is hint-less.
+        // Every user-triggerable DispatchError maps to at least one
+        // concrete RepairHint (the Zero-language agent
+        // surface). Only the internal WrongKind misuse —
+        // which a frontend never dispatches — is hint-less.
         let eval = DispatchError::Translate(TranslateError::Eval(
             "error: unknown variable\n  at line 2".into(),
         ));
@@ -1550,10 +1624,11 @@ mod tests {
 
     #[test]
     fn prob_binds_to_named_model_not_nearest_preceding() {
-        // Two models: m1 (vacuum) and m2 (vacuum). The prob explicitly
-        // binds to m2 even though m1 is its nearest preceding model.
-        // Both produce vacuum, so P(vacuum) = 1.0 regardless — we just
-        // verify the bridge dispatches the prob (no model-not-found error).
+        // Two models: m1 (vacuum) and m2 (vacuum). The prob
+        // explicitly binds to m2 even though m1 is its
+        // nearest preceding model. Both produce vacuum, so
+        // P(vacuum) = 1.0 regardless — we just verify the
+        // bridge dispatches the prob (no model-not-found error).
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
                    #3 a #4 \\model(#1,#2, m2)\n\n\
                    #7 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #8 \\translator(#7,#8, name: \"ev\")\n\n\
@@ -1574,18 +1649,20 @@ mod tests {
         }
     }
 
-    /// REGRESSION: a prob computed under a model must not keep showing its
-    /// value after the model is deleted (the nearest-preceding binding
-    /// vanishes) — the stale annotation would silently present a number from
-    /// a dead model. The cleanup must also drop the dispatch hash so a
-    /// reappearing model recomputes. The prob keeps its byte offset between
+    /// REGRESSION: a prob computed under a model must not keep
+    /// showing its value after the model is deleted (the
+    /// nearest-preceding binding vanishes) — the stale annotation
+    /// would silently present a number from a dead model. The
+    /// cleanup must also drop the dispatch hash so a reappearing
+    /// model recomputes. The prob keeps its byte offset between
     /// the two documents: only the model semantics disappear.
-    /// REGRESSION: a request the worker accepted but never answered must not
-    /// leave the prob silently without an annotation forever. `poll` expires
-    /// entries past the deadline into a visible `kernel-response-lost` error.
-    /// The worker answers every request today, so the loss is simulated at
-    /// the pending map (the contract: fresh submissions stay, answered ones
-    /// are removed and can never be declared lost).
+    /// REGRESSION: a request the worker accepted but never answered
+    /// must not leave the prob silently without an annotation
+    /// forever. `poll` expires entries past the deadline into a
+    /// visible `kernel-response-lost` error. The worker answers
+    /// every request today, so the loss is simulated at
+    /// the pending map (the contract: fresh submissions stay,
+    /// answered ones are removed and can never be declared lost).
     #[test]
     fn lost_response_expires_to_visible_error() {
         let mut bridge = KernelBridge::new();
@@ -1593,11 +1670,9 @@ mod tests {
         // Fresh submission: must NOT expire.
         bridge.pending.insert(1, now);
         // Stuck submission: must expire into a visible error.
-        bridge.pending.insert(
-            2,
-            now - Duration::from_secs(60),
-        );
-        // Settled submission: removed from pending, cannot be declared lost.
+        bridge.pending.insert(2, now - Duration::from_secs(60));
+        // Settled submission: removed from pending, cannot be
+        // declared lost.
         bridge.pending.insert(3, now);
         bridge.pending.remove(&3);
 
@@ -1616,9 +1691,9 @@ mod tests {
                     "expired request must leave the pending map"
                 );
             }
-            other => panic!(
-                "expected lost-response error, got {other:?}"
-            ),
+            other => {
+                panic!("expected lost-response error, got {other:?}")
+            }
         }
         assert!(
             !bridge.results.contains_key(&3),
@@ -1628,8 +1703,7 @@ mod tests {
 
     #[test]
     fn stale_prob_result_cleared_when_model_deleted() {
-        let doc1 =
-            "#1 m #2 \\model(#1,#2)\n\n\
+        let doc1 = "#1 m #2 \\model(#1,#2)\n\n\
              #7 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } \
              #8 \\translator(#7,#8, name: \"ev\")\n\n\
              #5 vac #6 \\prob(#5,#6, translator: \"ev\")";
@@ -1650,12 +1724,12 @@ mod tests {
             "the value must be displayed before the model is removed"
         );
 
-        // The model statement becomes equal-length inert text so every
-        // subsequent byte offset (incl. the prob) is identical between the
-        // two documents — the stale entry stays keyed by a LIVE offset, and
+        // The model statement becomes equal-length inert text so
+        // every subsequent byte offset (incl. the prob) is
+        // identical between the two documents — the stale
+        // entry stays keyed by a LIVE offset, and
         // only the dangling-binding cleanup can remove it.
-        let doc2 =
-            "#1 m #2 xxxxxxxxxxxxx\n\n\
+        let doc2 = "#1 m #2 xxxxxxxxxxxxx\n\n\
              #7 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } \
              #8 \\translator(#7,#8, name: \"ev\")\n\n\
              #5 vac #6 \\prob(#5,#6, translator: \"ev\")";
@@ -1680,13 +1754,15 @@ mod tests {
 
     #[test]
     fn translator_change_triggers_redispatch() {
-        // First pass: builtin translator (empty terms → vacuum model).
+        // First pass: builtin translator (empty terms → vacuum
+        // model).
         let doc1 = "#1 a #2 \\model(#1,#2)\n\n\
                     #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"ho\")\n\n\
                     #1b a #2b \\model(#1b,#2b, translator: \"ho\")";
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc1);
-        // The model that uses translator "ho" should have a hash recorded.
+        // The model that uses translator "ho" should have a hash
+        // recorded.
         let idx1 = build_index(doc1);
         let ho_model = idx1
             .kernel_statements
@@ -1703,8 +1779,9 @@ mod tests {
         let hash1 =
             *bridge.model_hashes.get(&ho_model.span.start).unwrap();
 
-        // Second pass: same model body, but translator changed to emit
-        // a non-empty term. The model hash MUST change (translator-aware).
+        // Second pass: same model body, but translator changed to
+        // emit a non-empty term. The model hash MUST change
+        // (translator-aware).
         let doc2 = "#1 a #2 \\model(#1,#2)\n\n\
                     #5 #let translate(b) = { \"[{\\\"coeff_re\\\":1.0,\\\"coeff_im\\\":0.0,\\\"ops\\\":[]}]\" } #6 \\translator(#5,#6, name: \"ho\")\n\n\
                     #1b a #2b \\model(#1b,#2b, translator: \"ho\")";
@@ -1728,10 +1805,11 @@ mod tests {
 
     #[test]
     fn unnamed_default_translator_change_triggers_redispatch() {
-        // The model names no translator, so it resolves the unnamed (`""`)
-        // block-local default. Editing that default must change the model's
-        // hash — the gap closed by routing hashing through
-        // `resolve_translator_src` (which honours the `""` fallback) rather
+        // The model names no translator, so it resolves the unnamed
+        // (`""`) block-local default. Editing that default
+        // must change the model's hash — the gap closed by
+        // routing hashing through `resolve_translator_src`
+        // (which honours the `""` fallback) rather
         // than looking up a literal "builtin" key.
         let doc1 = "#5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6)\n\n\
                     #1 a #2 \\model(#1,#2)";
@@ -1747,7 +1825,8 @@ mod tests {
         };
         let hash1 = *bridge.model_hashes.get(&model1).unwrap();
 
-        // Same model body; the unnamed default translator body changes.
+        // Same model body; the unnamed default translator body
+        // changes.
         let doc2 = "#5 #let translate(b) = { \"[{\\\"coeff_re\\\":1.0,\\\"coeff_im\\\":0.0,\\\"ops\\\":[]}]\" } #6 \\translator(#5,#6)\n\n\
                     #1 a #2 \\model(#1,#2)";
         bridge.refresh(doc2);
@@ -1766,13 +1845,14 @@ mod tests {
         );
     }
 
-    /// P1 #5 overlay GUI smoke: the full visual pipeline — document → kernel
-    /// bridge → coloured annotation → Typst layout → rasterized RGBA8 image —
-    /// must produce green pixels for a successful prob and red pixels for an
-    /// error. This is the headless verification of the on-screen render that
+    /// P1 #5 overlay GUI smoke: the full visual pipeline — document →
+    /// kernel bridge → coloured annotation → Typst layout →
+    /// rasterized RGBA8 image — must produce green pixels for a
+    /// successful prob and red pixels for an error. This is the
+    /// headless verification of the on-screen render that
     /// S16 left unverified (the inline `result_annotations()` →
-    /// `TransformOptions.annotations` → `layout_doc_with` → `RgbaImage` path
-    /// that the mini frontend's `redraw` uses).
+    /// `TransformOptions.annotations` → `layout_doc_with` →
+    /// `RgbaImage` path that the mini frontend's `redraw` uses).
     #[test]
     fn overlay_renders_green_for_success_and_red_for_error() {
         use crate::render::layout_doc_with;
@@ -1803,7 +1883,8 @@ mod tests {
             (green, red)
         }
 
-        // --- Success case: vacuum model + vacuum prob → P = 1.0 (green) ---
+        // --- Success case: vacuum model + vacuum prob → P = 1.0
+        // (green) ---
         let doc_ok = "#1 a #2 \\model(#1,#2)\n\n\
             #5 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } #6 \\translator(#5,#6, name: \"ev\")\n\n\
             #3 vac #4 \\prob(#3,#4, translator: \"ev\")";
@@ -1838,7 +1919,8 @@ mod tests {
         let mut bridge2 = KernelBridge::new();
         bridge2.refresh(doc_err);
         let key_err = prob_offset(doc_err);
-        // The error is synchronous (typed EventPredicate validation fails).
+        // The error is synchronous (typed EventPredicate validation
+        // fails).
         wait_for(&mut bridge2, key_err, Duration::from_secs(5));
         let annotations_err = bridge2.result_annotations();
         assert!(
@@ -1900,7 +1982,8 @@ mod tests {
     #[test]
     fn two_named_models_produce_different_probabilities() {
         // m1: vacuum prior (default). m2: one-boson prior in mode 0.
-        // P(vacuum) on m1 = 1.0; P(vacuum) on m2 = 0.0 (one boson present).
+        // P(vacuum) on m1 = 1.0; P(vacuum) on m2 = 0.0 (one boson
+        // present).
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n\
                    #3 b #4 \\model(#3,#4, m2)\n\n\
                    #7 bosons(0:1) #8 \\prior(#7,#8, model: \"m2\")\n\n\
@@ -1942,9 +2025,10 @@ mod tests {
 
     #[test]
     fn hundred_block_document_refresh_under_16ms() {
-        // C14 benchmark: a 100-block document with one model and 99 plain
-        // text blocks. A single-block edit (changing one text block) should
-        // refresh in < 16 ms (60 fps target).
+        // C14 benchmark: a 100-block document with one model and 99
+        // plain text blocks. A single-block edit (changing
+        // one text block) should refresh in < 16 ms (60 fps
+        // target).
         let mut blocks: Vec<String> = Vec::new();
         blocks.push("#1 a #2 \\model(#1,#2)".to_string());
         for i in 1..100 {

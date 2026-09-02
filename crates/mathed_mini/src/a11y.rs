@@ -1,24 +1,28 @@
-//! AccessKit bridge: converts `mathed_core::accessibility::AccessNode`s into
-//! an `accesskit::TreeUpdate` so screen readers and other assistive technology
-//! can announce the document's semantic structure (models, priors, probs,
-//! translators, …) instead of reading raw Typst source.
+//! AccessKit bridge: converts
+//! `mathed_core::accessibility::AccessNode`s into
+//! an `accesskit::TreeUpdate` so screen readers and other assistive
+//! technology can announce the document's semantic structure (models,
+//! priors, probs, translators, …) instead of reading raw Typst
+//! source.
 //!
-//! The mapping is intentionally flat: the root `Document` node owns all
-//! segment nodes as children. Each segment node carries its `AccessRole`
-//! (mapped to an `accesskit::Role`), a human-readable label, and optionally
-//! its source value and bounds.
+//! The mapping is intentionally flat: the root `Document` node owns
+//! all segment nodes as children. Each segment node carries its
+//! `AccessRole` (mapped to an `accesskit::Role`), a human-readable
+//! label, and optionally its source value and bounds.
 
 use accesskit::{Action, Node, NodeId, Rect, Role, Tree, TreeUpdate};
 use mathed_core::accessibility::{AccessNode, AccessRole};
 
-/// A stable root node ID (the document root, not tied to a byte offset).
+/// A stable root node ID (the document root, not tied to a byte
+/// offset).
 const ROOT_ID: u64 = u64::MAX;
 
-/// Extract the document byte offset encoded in a segment node's ID, or `None`
-/// for the root node (which carries no caret target). Segment node IDs are
-/// `NodeId(range.start as u64)` (see [`build_tree_update`]); an `ActionRequest`
-/// targeting such a node carries the byte offset directly. Used by the
-/// `ActionRequested` handler in `app.rs` to place the caret (P5 #27).
+/// Extract the document byte offset encoded in a segment node's ID,
+/// or `None` for the root node (which carries no caret target).
+/// Segment node IDs are `NodeId(range.start as u64)` (see
+/// [`build_tree_update`]); an `ActionRequest` targeting such a node
+/// carries the byte offset directly. Used by the `ActionRequested`
+/// handler in `app.rs` to place the caret (P5 #27).
 pub fn byte_offset_for_node(id: NodeId) -> Option<usize> {
     if id.0 == ROOT_ID {
         return None;
@@ -47,8 +51,9 @@ fn role_for(role: AccessRole) -> Role {
         AccessRole::Statement => Role::Paragraph,
         AccessRole::Function => Role::Group,
         AccessRole::Variable => Role::ListItem,
-        // A citation is a referential link to a bibliography entry, same as
-        // `Reference`'s mapping to a document-internal definition.
+        // A citation is a referential link to a bibliography entry,
+        // same as `Reference`'s mapping to a
+        // document-internal definition.
         AccessRole::Reference | AccessRole::Citation => Role::Link,
         AccessRole::Emphasis => Role::Emphasis,
     }
@@ -56,11 +61,12 @@ fn role_for(role: AccessRole) -> Role {
 
 /// Build an `accesskit::TreeUpdate` from a list of `AccessNode`s.
 ///
-/// Each access node becomes a child of the root `Document` node. The node ID
-/// is derived from the access node's byte-range start (or a synthetic
-/// incrementing ID for nodes without a range). Bounds are left unset (the
-/// mini frontend doesn't track pixel-perfect segment geometry yet — a future
-/// improvement can set `Rect` from `GlyphIndex::rects_for_range`).
+/// Each access node becomes a child of the root `Document` node. The
+/// node ID is derived from the access node's byte-range start (or a
+/// synthetic incrementing ID for nodes without a range). Bounds are
+/// left unset (the mini frontend doesn't track pixel-perfect segment
+/// geometry yet — a future improvement can set `Rect` from
+/// `GlyphIndex::rects_for_range`).
 pub fn build_tree_update(nodes: &[AccessNode]) -> TreeUpdate {
     let root_id = NodeId(ROOT_ID);
     let mut root = Node::new(Role::Document);
@@ -80,9 +86,10 @@ pub fn build_tree_update(nodes: &[AccessNode]) -> TreeUpdate {
         if let Some(value) = &node.value {
             a11y_node.set_value(value.clone());
         }
-        // Declare the actions an AT can request on this segment. Focus/Click
-        // both place the caret at the segment's byte offset (P5 #27); only
-        // segments with a real byte range are actionable.
+        // Declare the actions an AT can request on this segment.
+        // Focus/Click both place the caret at the segment's
+        // byte offset (P5 #27); only segments with a real
+        // byte range are actionable.
         if node.range.is_some() {
             a11y_node.add_action(Action::Focus);
             a11y_node.add_action(Action::Click);
@@ -100,9 +107,9 @@ pub fn build_tree_update(nodes: &[AccessNode]) -> TreeUpdate {
     }
 }
 
-/// Placeholder bounds — the full window rect must be set by the caller who
-/// knows the pixel geometry. For now, nodes have no bounds (screen readers
-/// still announce labels).
+/// Placeholder bounds — the full window rect must be set by the
+/// caller who knows the pixel geometry. For now, nodes have no bounds
+/// (screen readers still announce labels).
 #[allow(dead_code)]
 fn unused_rect() -> Rect {
     Rect::default()
@@ -164,7 +171,8 @@ mod tests {
 
     #[test]
     fn byte_offset_for_node_round_trips_segment_ids() {
-        // Segment node IDs encode range.start; the root is filtered out.
+        // Segment node IDs encode range.start; the root is filtered
+        // out.
         assert_eq!(byte_offset_for_node(NodeId(42)), Some(42));
         assert_eq!(byte_offset_for_node(NodeId(0)), Some(0));
         assert_eq!(byte_offset_for_node(NodeId(ROOT_ID)), None);
@@ -190,8 +198,9 @@ mod tests {
 
     #[test]
     fn translator_role_maps_to_group() {
-        // The translator panel is a content span, not a math expression;
-        // screen readers should announce it as a group container, not as math.
+        // The translator panel is a content span, not a math
+        // expression; screen readers should announce it as a
+        // group container, not as math.
         let nodes = vec![AccessNode {
             role: AccessRole::Translator,
             label: "translator: identity".into(),
@@ -210,8 +219,9 @@ mod tests {
 
     #[test]
     fn reference_role_maps_to_link() {
-        // Unresolved references (P5 #28) surface as warnings to AT users; the
-        // Link role hints that the segment is a pointer, not text content.
+        // Unresolved references (P5 #28) surface as warnings to AT
+        // users; the Link role hints that the segment is a
+        // pointer, not text content.
         let nodes = vec![AccessNode {
             role: AccessRole::Reference,
             label: "unresolved reference x".into(),
@@ -229,21 +239,23 @@ mod tests {
 
     #[test]
     fn end_to_end_pipeline_builds_tree_from_document_text() {
-        // Run the full pipeline that `push_a11y_update` uses in app.rs:
-        // doc text -> markers::scan -> resolve_segments -> to_render_text
-        // -> build_access_nodes -> build_tree_update. The resulting tree
-        // must contain a Document root plus one child per resolved segment,
-        // and every child node ID must round-trip through
-        // `byte_offset_for_node`.
+        // Run the full pipeline that `push_a11y_update` uses in
+        // app.rs: doc text -> markers::scan ->
+        // resolve_segments -> to_render_text
+        // -> build_access_nodes -> build_tree_update. The resulting
+        // tree must contain a Document root plus one child
+        // per resolved segment, and every child node ID must
+        // round-trip through `byte_offset_for_node`.
         use mathed_core::markers::{resolve_segments, scan};
         use mathed_core::semantics::SemanticIndex;
         use mathed_core::transform::{
             TransformOptions, to_render_text,
         };
 
-        // Fixture: a model + a prob. The `#N` markers are placeholders that
-        // `markers::scan` resolves to actual byte offsets; the surrounding
-        // names (`a` and `vacuum`) are segment content.
+        // Fixture: a model + a prob. The `#N` markers are
+        // placeholders that `markers::scan` resolves to
+        // actual byte offsets; the surrounding names (`a` and
+        // `vacuum`) are segment content.
         let doc = "#1 a #2 \\model(#1,#2)\n\n\
                    #3 vac #4 \\prob(#3,#4)";
         let scan = scan(doc);
@@ -272,8 +284,8 @@ mod tests {
         let update = build_tree_update(&nodes);
         // Root + N children.
         assert_eq!(update.nodes.len(), nodes.len() + 1);
-        // Every child node's ID must round-trip back to a byte offset that
-        // lies inside the document.
+        // Every child node's ID must round-trip back to a byte offset
+        // that lies inside the document.
         for (id, _) in &update.nodes {
             if id.0 == ROOT_ID {
                 continue;

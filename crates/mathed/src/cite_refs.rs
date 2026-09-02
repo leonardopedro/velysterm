@@ -1,9 +1,9 @@
 //! Cite popups (`Ctrl+<digit>`) and the references panel (`Ctrl+0`).
 //!
 //! Both features reuse the shared [`mathed_core::markers`] reference
-//! machinery (cite numbering, document-ref/bib-key classification, the
-//! "references at cursor" query) and render their results as Bevy UI
-//! text panels. Drawing is done with Bevy's retained UI node graph
+//! machinery (cite numbering, document-ref/bib-key classification,
+//! the "references at cursor" query) and render their results as Bevy
+//! UI text panels. Drawing is done with Bevy's retained UI node graph
 //! (not the softbuffer CPU-pixel path used by `mathed_mini`), so the
 //! boxes/panel are ordinary `Text` rows positioned over the document.
 //!
@@ -29,8 +29,8 @@ pub struct CitePopupStack(pub Vec<u32>);
 #[derive(Resource, Default)]
 pub struct ReferencesPanelOpen(pub bool);
 
-/// Component marker for spawned cite/reference UI nodes (despawned each
-/// sync pass, like `popup::PopupRoot`).
+/// Component marker for spawned cite/reference UI nodes (despawned
+/// each sync pass, like `popup::PopupRoot`).
 #[derive(Component)]
 pub struct CiteRefsRoot;
 
@@ -41,8 +41,8 @@ pub struct CiteRow {
     pub detail: String,
 }
 
-/// Build the rows for an open cite popup stack from the document text.
-/// Returns `None` when the stack is empty or no cite resolves.
+/// Build the rows for an open cite popup stack from the document
+/// text. Returns `None` when the stack is empty or no cite resolves.
 pub fn cite_popup_rows(
     doc_text: &str,
     stack: &[u32],
@@ -139,7 +139,8 @@ pub fn sync_cite_refs_ui(
         .map(|w| w.resolution.height())
         .unwrap_or(600.0);
 
-    // Caret root-space pixel position (same lookup as `draw_overlay`).
+    // Caret root-space pixel position (same lookup as
+    // `draw_overlay`).
     let caret_px = blocks
         .block_for_cursor(state.cursor)
         .and_then(|b| blocks.entities.get(&b.id).copied())

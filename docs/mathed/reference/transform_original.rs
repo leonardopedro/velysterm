@@ -4,16 +4,17 @@
 //! - **Hide** marker and property-statement tokens (plus one trailing
 //!   space, as the terminal example does) unless the caret/selection
 //!   intersects them or show-hidden is on.
-//! - **Reveal** non-hidden tokens *literally*: every `#` and `\` inside a
-//!   revealed token gets a Typst escape backslash so the raw token text
-//!   is displayed instead of being executed as Typst code.
+//! - **Reveal** non-hidden tokens *literally*: every `#` and `\`
+//!   inside a revealed token gets a Typst escape backslash so the raw
+//!   token text is displayed instead of being executed as Typst code.
 //! - **Apply visual segment properties** (bold/italic/underline) by
 //!   wrapping each uniform run of visible text in `#strong[..]` /
-//!   `#emph[..]` / `#underline[..]`. Runs inside math (`$..$`) are left
-//!   unwrapped in v1 (Typst math styling needs different wrappers).
-//! - Produce an [`OffsetMap`] of verbatim-copied spans so byte positions
-//!   convert between doc and render coordinates in both directions
-//!   (caret placement, click hit-testing).
+//!   `#emph[..]` / `#underline[..]`. Runs inside math (`$..$`) are
+//!   left unwrapped in v1 (Typst math styling needs different
+//!   wrappers).
+//! - Produce an [`OffsetMap`] of verbatim-copied spans so byte
+//!   positions convert between doc and render coordinates in both
+//!   directions (caret placement, click hit-testing).
 
 use std::ops::Range;
 
@@ -38,8 +39,8 @@ pub struct OffsetMap {
 impl OffsetMap {
     /// Map a doc byte position to a render position. Positions inside
     /// hidden regions snap to the surrounding rendered byte; on exact
-    /// span boundaries the *later* span wins, so a caret placed after a
-    /// hidden token lands after it visually too.
+    /// span boundaries the *later* span wins, so a caret placed after
+    /// a hidden token lands after it visually too.
     pub fn doc_to_render(&self, pos: usize) -> usize {
         Self::lookup(
             &self.spans,
@@ -83,8 +84,9 @@ impl OffsetMap {
 
 #[derive(Debug, Default, Clone)]
 pub struct TransformOptions {
-    /// Doc byte ranges whose tokens must stay visible (caret, selection).
-    /// An empty range (caret) reveals tokens it touches.
+    /// Doc byte ranges whose tokens must stay visible (caret,
+    /// selection). An empty range (caret) reveals tokens it
+    /// touches.
     pub reveal: Vec<Range<usize>>,
     /// Reveal everything (the Ctrl+Shift "show hidden" chord).
     pub show_hidden: bool,
@@ -148,8 +150,9 @@ pub fn to_render_text(
     let revealed = |tok: &Range<usize>| {
         opts.show_hidden
             || opts.reveal.iter().any(|r| {
-                // Inclusive touch: a caret directly before/after the token
-                // keeps it visible, matching the terminal example.
+                // Inclusive touch: a caret directly before/after the
+                // token keeps it visible, matching
+                // the terminal example.
                 r.start <= tok.end && tok.start <= r.end
             })
     };
@@ -209,20 +212,23 @@ pub fn to_render_text(
                 match seg.kind {
                     crate::markers::PropKind::Bold => v.bold += 1,
                     crate::markers::PropKind::Italic => v.italic += 1,
-                    crate::markers::PropKind::Underline => v.underline += 1,
+                    crate::markers::PropKind::Underline => {
+                        v.underline += 1
+                    }
                     _ => {}
                 }
             }
         }
         v
     };
-    let math_at = |pos: usize| {
-        toggles.partition_point(|&t| t <= pos) % 2 == 1
+    let math_at =
+        |pos: usize| toggles.partition_point(|&t| t <= pos) % 2 == 1;
+    let hidden_at = |pos: usize| {
+        hidden.iter().any(|r| r.start <= pos && pos < r.end)
     };
-    let hidden_at =
-        |pos: usize| hidden.iter().any(|r| r.start <= pos && pos < r.end);
-    let shown_token_at =
-        |pos: usize| shown.iter().any(|r| r.start <= pos && pos < r.end);
+    let shown_token_at = |pos: usize| {
+        shown.iter().any(|r| r.start <= pos && pos < r.end)
+    };
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
@@ -231,13 +237,15 @@ pub fn to_render_text(
         }
         let chunk = &doc_text[start..end];
         if shown_token_at(start) {
-            // Revealed token: copy with Typst escapes before `#` and `\`.
+            // Revealed token: copy with Typst escapes before `#` and
+            // `\`.
             emit_escaped(chunk, start, &mut out, &mut map);
             continue;
         }
         let v = visual_at(start);
-        // Whitespace-only chunks need no styling; math chunks keep their
-        // own syntax (v1: visual props are not applied inside `$..$`).
+        // Whitespace-only chunks need no styling; math chunks keep
+        // their own syntax (v1: visual props are not applied
+        // inside `$..$`).
         let wrap = v.any()
             && !math_at(start)
             && !chunk.chars().all(char::is_whitespace);
@@ -256,8 +264,9 @@ pub fn to_render_text(
 }
 
 /// Byte offsets where math state toggles (each unescaped `$` outside
-/// hidden/shown token ranges). The opening `$` toggles at its own index,
-/// the closing `$` right after itself, so both delimiters count as math.
+/// hidden/shown token ranges). The opening `$` toggles at its own
+/// index, the closing `$` right after itself, so both delimiters
+/// count as math.
 fn math_toggles(
     text: &str,
     hidden: &[Range<usize>],
@@ -333,7 +342,12 @@ fn emit_escaped(
     let mut run_start = 0;
     for (i, c) in chunk.char_indices() {
         if c == '#' || c == '\\' {
-            push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
+            push_copy(
+                &chunk[run_start..i],
+                doc_start + run_start,
+                out,
+                map,
+            );
             out.push('\\'); // render-only escape byte, not in the map
             run_start = i;
         }
@@ -375,7 +389,10 @@ mod tests {
         let text = "#1 f(x) #2 ok";
         let out = render(
             text,
-            &TransformOptions { reveal: vec![1..1], show_hidden: false },
+            &TransformOptions {
+                reveal: vec![1..1],
+                show_hidden: false,
+            },
         );
         // First marker revealed (escaped), second still hidden.
         assert_eq!(out.text, "\\#1 f(x) ok");
@@ -386,7 +403,10 @@ mod tests {
         let text = "#1 x \\b(#1,#1)";
         let out = render(
             text,
-            &TransformOptions { reveal: vec![], show_hidden: true },
+            &TransformOptions {
+                reveal: vec![],
+                show_hidden: true,
+            },
         );
         assert_eq!(out.text, "\\#1 x \\\\b(\\#1,\\#1)");
     }
@@ -420,7 +440,8 @@ mod tests {
         // Doc byte of 'f' is 3; it must map to render byte 0.
         assert_eq!(out.map.doc_to_render(3), 0);
         assert_eq!(out.map.render_to_doc(0), 3);
-        // Doc position inside the hidden leading marker snaps forward.
+        // Doc position inside the hidden leading marker snaps
+        // forward.
         assert_eq!(out.map.doc_to_render(1), 0);
         // 't' of tail: doc byte 11, render byte 5.
         assert_eq!(out.map.doc_to_render(11), 5);

@@ -1,19 +1,20 @@
-//! Real presence transport (C13): a std-only TCP channel between mathed
-//! instances carrying presence blobs over the same frame format that
-//! would carry document deltas.
+//! Real presence transport (C13): a std-only TCP channel between
+//! mathed instances carrying presence blobs over the same frame
+//! format that would carry document deltas.
 //!
 //! Framing: `[tag: u8][len: u32 big-endian][payload]`. `TAG_PRESENCE`
-//! (`b'P'`) marks a presence blob (a `PresenceStore::encode()` payload);
-//! the tag leaves room for a future `b'D'` delta frame on the same
-//! socket without a breaking change.
+//! (`b'P'`) marks a presence blob (a `PresenceStore::encode()`
+//! payload); the tag leaves room for a future `b'D'` delta frame on
+//! the same socket without a breaking change.
 //!
 //! Two background threads per connection: a reader that unframes the
-//! wire into an inbox (`recv_frame` drains it), and a writer that frames
-//! the outbox (`send_frame` feeds it). `--listen` accepts the first peer
-//! in the background, so the editor starts immediately; `--connect`
-//! dials a listener. The host drains the inbox in `sync_presence` and
-//! feeds the payloads to `PresenceStore::apply`. Dropping the transport
-//! sets a shutdown flag and closes the socket, so the peer observes EOF.
+//! wire into an inbox (`recv_frame` drains it), and a writer that
+//! frames the outbox (`send_frame` feeds it). `--listen` accepts the
+//! first peer in the background, so the editor starts immediately;
+//! `--connect` dials a listener. The host drains the inbox in
+//! `sync_presence` and feeds the payloads to `PresenceStore::apply`.
+//! Dropping the transport sets a shutdown flag and closes the socket,
+//! so the peer observes EOF.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -32,16 +33,17 @@ const HEADER_LEN: usize = 5;
 /// A live TCP presence channel to one peer.
 ///
 /// `send_frame` / `recv_frame` are the host surface; the threads are
-/// detached and the socket is kept alive for the transport's lifetime.
-/// `connected` flips to `false` when the reader hits EOF (peer gone).
+/// detached and the socket is kept alive for the transport's
+/// lifetime. `connected` flips to `false` when the reader hits EOF
+/// (peer gone).
 #[derive(Debug, Resource)]
 pub struct PresenceTransport {
     /// Frames from the wire (tag, payload), drained by the host.
     /// Wrapped so the resource is `Sync` (a bare `Receiver` is not).
     inbox: Mutex<Receiver<(u8, Vec<u8>)>>,
     /// The outbound half of the inbox channel (cloned into reader
-    /// threads; kept here so `listen`'s accept thread can spawn a reader
-    /// over the same channel).
+    /// threads; kept here so `listen`'s accept thread can spawn a
+    /// reader over the same channel).
     inbox_tx: Sender<(u8, Vec<u8>)>,
     /// Frames to write to the wire.
     outbox: Sender<(u8, Vec<u8>)>,
@@ -51,7 +53,8 @@ pub struct PresenceTransport {
     outbox_rx: Mutex<Option<Receiver<(u8, Vec<u8>)>>>,
     /// Our end's address.
     local_addr: String,
-    /// Peer's address, once connected (empty until a listener accepts).
+    /// Peer's address, once connected (empty until a listener
+    /// accepts).
     peer: Arc<Mutex<String>>,
     /// The live socket (a listener transport fills it on accept).
     /// Held so `Drop` can close it and unblock the reader thread.
@@ -63,7 +66,8 @@ pub struct PresenceTransport {
 }
 
 impl PresenceTransport {
-    /// Dial `addr` (`host:port`) as a client. Fails if nothing listens.
+    /// Dial `addr` (`host:port`) as a client. Fails if nothing
+    /// listens.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
         let stream = Arc::new(TcpStream::connect(addr)?);
         let local = stream.local_addr()?.to_string();
@@ -74,8 +78,9 @@ impl PresenceTransport {
     }
 
     /// Bind `addr` and accept the first peer in the background. The
-    /// editor starts immediately; `connected()` reports `false` until a
-    /// peer arrives. Fails if the bind fails (e.g. port in use).
+    /// editor starts immediately; `connected()` reports `false` until
+    /// a peer arrives. Fails if the bind fails (e.g. port in
+    /// use).
     pub fn listen(addr: &str) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let local = listener.local_addr()?.to_string();
@@ -168,7 +173,8 @@ impl PresenceTransport {
         );
     }
 
-    /// Send one frame to the peer (buffered; the writer thread flushes).
+    /// Send one frame to the peer (buffered; the writer thread
+    /// flushes).
     pub fn send_frame(&self, tag: u8, payload: &[u8]) {
         let _ = self.outbox.send((tag, payload.to_vec()));
     }
@@ -236,7 +242,8 @@ fn placeholder_stream() -> TcpStream {
     stream
 }
 
-/// Spawn the reader (wire → inbox) and writer (outbox → wire) threads.
+/// Spawn the reader (wire → inbox) and writer (outbox → wire)
+/// threads.
 fn spawn_reader_writer(
     stream: Arc<TcpStream>,
     outbox_rx: Receiver<(u8, Vec<u8>)>,
@@ -328,17 +335,18 @@ mod tests {
     }
 
     /// Two transports over a loopback connection exchange presence
-    /// blobs in both directions; dropping the client closes the socket
-    /// and the server observes EOF.
+    /// blobs in both directions; dropping the client closes the
+    /// socket and the server observes EOF.
     #[test]
     fn presence_roundtrip_over_loopback() {
         let addr = free_port();
         let server = PresenceTransport::listen(&addr).unwrap();
         let client = PresenceTransport::connect(&addr).unwrap();
 
-        // The server accepts in the background; `connected` starts true
-        // and flips false only on EOF, so wait for the accept to land by
-        // polling until the peer address is recorded.
+        // The server accepts in the background; `connected` starts
+        // true and flips false only on EOF, so wait for the
+        // accept to land by polling until the peer address is
+        // recorded.
         wait_until(|| !server.peer().is_empty());
         assert!(
             !server.peer().is_empty(),

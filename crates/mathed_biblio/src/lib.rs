@@ -1,15 +1,18 @@
-//! `mathed_biblio` — bibliography & citation backend for velysterm's math editor
-//! (P11.21), wrapping `../hayagriva::Library` + its CSL formatting machinery. Both
-//! velysterm and `hayagriva` are `MIT OR Apache-2.0`, so — unlike the MPL/AGPL
-//! `pattern_unfer` bridge or the arms-length `arctic_authority` sibling crate —
-//! hayagriva is a direct Cargo dependency, not an arms-length protocol bridge.
+//! `mathed_biblio` — bibliography & citation backend for velysterm's
+//! math editor (P11.21), wrapping `../hayagriva::Library` + its CSL
+//! formatting machinery. Both velysterm and `hayagriva` are `MIT OR
+//! Apache-2.0`, so — unlike the MPL/AGPL `pattern_unfer` bridge or
+//! the arms-length `arctic_authority` sibling crate — hayagriva is a
+//! direct Cargo dependency, not an arms-length protocol bridge.
 //!
-//! Authors attach a bibliography (YAML or BibTeX) via a `\bibliography(#1,#2, name,
-//! format: "yaml", style: "apa")` segment and insert in-text citations via
-//! `\cite(#1,#2, "key-a", "key-b", bib: "name", style: "apa")`. Per the P3.10
-//! translator pivot, these markers are emitted by a translator, never
-//! hand-written Typst-math directly. `resolve_citations` is the bridge from
-//! `mathed_core::semantics::SemanticIndex.biblio_statements` to rendered strings.
+//! Authors attach a bibliography (YAML or BibTeX) via a
+//! `\bibliography(#1,#2, name, format: "yaml", style: "apa")` segment
+//! and insert in-text citations via `\cite(#1,#2, "key-a", "key-b",
+//! bib: "name", style: "apa")`. Per the P3.10 translator pivot, these
+//! markers are emitted by a translator, never hand-written Typst-math
+//! directly. `resolve_citations` is the bridge from
+//! `mathed_core::semantics::SemanticIndex.biblio_statements` to
+//! rendered strings.
 
 use hayagriva::archive::ArchivedStyle;
 use hayagriva::citationberg::{IndependentStyle, Style};
@@ -41,8 +44,8 @@ pub enum BiblioError {
     Render(String),
 }
 
-/// The CSL style used when a `\bibliography`/`\cite` segment does not name one
-/// via `style:`.
+/// The CSL style used when a `\bibliography`/`\cite` segment does not
+/// name one via `style:`.
 pub const DEFAULT_STYLE: &str = "apa";
 
 /// Parse a YAML (Hayagriva-native) bibliography source.
@@ -63,9 +66,10 @@ pub fn load_bibtex(s: &str) -> Result<Library, BiblioError> {
     })
 }
 
-/// A bundled CSL style, resolved to the `IndependentStyle` `hayagriva`'s driver
-/// needs (dependent styles, which only override locale/terms, are rejected —
-/// pass the underlying independent style's name instead).
+/// A bundled CSL style, resolved to the `IndependentStyle`
+/// `hayagriva`'s driver needs (dependent styles, which only override
+/// locale/terms, are rejected — pass the underlying independent
+/// style's name instead).
 pub struct CitationStyle(IndependentStyle);
 
 impl CitationStyle {
@@ -98,8 +102,9 @@ impl Bibliography {
         &self.library
     }
 
-    /// Render a single in-text citation covering `keys`, in the order given
-    /// (multiple keys produce one grouped citation, e.g. `(Doe 2020; Roe 2021)`).
+    /// Render a single in-text citation covering `keys`, in the order
+    /// given (multiple keys produce one grouped citation, e.g.
+    /// `(Doe 2020; Roe 2021)`).
     pub fn cite(
         &self,
         keys: &[String],
@@ -131,8 +136,8 @@ impl Bibliography {
         Ok(out)
     }
 
-    /// Render the full reference list, in the citation style's bibliography
-    /// order, as `(key, formatted_text)` pairs.
+    /// Render the full reference list, in the citation style's
+    /// bibliography order, as `(key, formatted_text)` pairs.
     pub fn reference_list(
         &self,
     ) -> Result<Vec<(String, String)>, BiblioError> {
@@ -172,15 +177,16 @@ impl Bibliography {
     }
 }
 
-/// Resolve a document's `\bibliography`/`\cite` statements (as collected by
-/// `mathed_core::semantics::SemanticIndex::build_index` into
-/// `SemanticIndex.biblio_statements`) into rendered in-text citation strings,
-/// keyed by each `\cite` statement's document span start.
+/// Resolve a document's `\bibliography`/`\cite` statements (as
+/// collected by `mathed_core::semantics::SemanticIndex::build_index`
+/// into `SemanticIndex.biblio_statements`) into rendered in-text
+/// citation strings, keyed by each `\cite` statement's document span
+/// start.
 ///
 /// Each `\bibliography` is parsed once per call (its `format:` picks
-/// YAML vs. BibTeX, defaulting to YAML); each `\cite` resolves against the
-/// `\bibliography` named by its `bib:` binding, or — when exactly one
-/// bibliography is in scope — that one implicitly.
+/// YAML vs. BibTeX, defaulting to YAML); each `\cite` resolves
+/// against the `\bibliography` named by its `bib:` binding, or — when
+/// exactly one bibliography is in scope — that one implicitly.
 pub fn resolve_citations(
     statements: &[BiblioStatement],
 ) -> HashMap<usize, Result<String, BiblioError>> {

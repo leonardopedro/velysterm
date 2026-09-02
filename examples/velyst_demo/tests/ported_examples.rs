@@ -80,7 +80,8 @@ fn terminal_assets_present() {
 
 #[test]
 fn rfc1751_demo_uses_mathed_core_helper() {
-    // The example must reference `mathed_core::rfc1751::u64_to_rfc1751`
+    // The example must reference
+    // `mathed_core::rfc1751::u64_to_rfc1751`
     // (i.e. the mathed_core home, not a local re-implementation).
     // `rfc1751` moved from `velyst` to `mathed_core` so the Bevy-free
     // `mathed_mini` frontend can use it.

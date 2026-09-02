@@ -15,10 +15,10 @@ use velyst::prelude::*;
 /// This is a streamlined re-implementation of the original velysterm
 /// `terminal.rs` example (1600+ lines) that was deleted in the rev 21
 /// velysterm merge as triply-stale. The bespoke ANSI marker-chain
-/// autocomplete logic and shift+arrow selection are not re-implemented
-/// here; the goal of P9.15.1 was to **port the example to the new
-/// velyst 0.15 + typst 0.15 API surface**, not to preserve every
-/// velysterm-fork-specific behaviour. The architectural pattern
+/// autocomplete logic and shift+arrow selection are not
+/// re-implemented here; the goal of P9.15.1 was to **port the example
+/// to the new velyst 0.15 + typst 0.15 API surface**, not to preserve
+/// every velysterm-fork-specific behaviour. The architectural pattern
 /// (PTY -> alacritty grid -> Typst rendering) and the new API calls
 /// (`VelystFunc::new`, `VelystSource` asset, `register_typst_func`)
 /// are exercised end-to-end.
@@ -51,7 +51,8 @@ struct TerminalView;
 struct TerminalEmulator {
     term: Arc<Mutex<Term<DummyListener>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    /// Number of "dirty" redraws to skip so the PTY has time to flush.
+    /// Number of "dirty" redraws to skip so the PTY has time to
+    /// flush.
     pending_ticks: Arc<Mutex<u32>>,
 }
 
@@ -210,7 +211,8 @@ fn update_terminal_render(
     // Decrement the pending-tick counter. We only redraw if either:
     // 1) the shell has produced new output (pending_ticks > 0), or
     // 2) the user has pressed a key in the last frame (handled
-    //    implicitly by always updating at least once after a keypress).
+    //    implicitly by always updating at least once after a
+    //    keypress).
     {
         let mut p = emulator.pending_ticks.lock().unwrap();
         if *p == 0 {
@@ -245,7 +247,8 @@ fn update_terminal_render(
         plain.push('\n');
     }
 
-    // Strip trailing whitespace-only lines so the rendering stays compact.
+    // Strip trailing whitespace-only lines so the rendering stays
+    // compact.
     while plain.ends_with("\n   \n") || plain.ends_with("\n\n") {
         plain.pop();
     }

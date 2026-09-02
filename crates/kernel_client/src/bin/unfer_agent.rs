@@ -9,24 +9,24 @@
 //! {"id":"1","ok":true,"result":{"version":1},"timing_ms":0}
 //! ```
 //!
-//! Ops: the full 38-op registry lives in `unfer_protocol::ops::AGENT_OPS`.
-//! Namespaces:
-//! - kernel session: `version`, `create_model`, `set_prior`, `evolve`,
-//!   `condition`, `probability`, `snapshot`, `bayesian_update`,
-//!   `belief_propagation`, `list_codes`.
+//! Ops: the full 38-op registry lives in
+//! `unfer_protocol::ops::AGENT_OPS`. Namespaces:
+//! - kernel session: `version`, `create_model`, `set_prior`,
+//!   `evolve`, `condition`, `probability`, `snapshot`,
+//!   `bayesian_update`, `belief_propagation`, `list_codes`.
 //! - identity + content: `did_create`, `did_resolve`, `did_update`,
 //!   `did_revoke`, `content_publish`, `content_resolve`.
-//! - consensus + certificate ledger: `consensus_sync`, `consensus_status`,
-//!   `cert_set_authority`, `cert_mint`, `cert_transfer`, `cert_burn`,
-//!   `cert_status`, `cert_root`.
+//! - consensus + certificate ledger: `consensus_sync`,
+//!   `consensus_status`, `cert_set_authority`, `cert_mint`,
+//!   `cert_transfer`, `cert_burn`, `cert_status`, `cert_root`.
 //! - unified auction: `auction_open`, `auction_bid`, `auction_close`,
 //!   `auction_report`.
 //! - agent-local: `save_session`, `restore_session`, `poll_events`,
 //!   `close_model`, `logos_compile`, `ode_to_hamiltonian`,
 //!   `export_html`, `export_tex`.
 //!
-//! Unknown ops return `ok:false` with code UK-1001 and a `ReplaceValue`
-//! hint listing the valid op names.
+//! Unknown ops return `ok:false` with code UK-1001 and a
+//! `ReplaceValue` hint listing the valid op names.
 //!
 //! All responses include `timing_ms` (wall-clock ms for the op).
 
@@ -47,14 +47,15 @@ use unfer_protocol::{
 
 use mathed_core::markers::{resolve_segments, scan};
 
-/// Single source of truth: `unfer_protocol::ops::AGENT_OPS`. Do not add ops
-/// here — edit the shared registry instead.
+/// Single source of truth: `unfer_protocol::ops::AGENT_OPS`. Do not
+/// add ops here — edit the shared registry instead.
 const VALID_OPS: &[&str] = unfer_protocol::ops::AGENT_OPS;
 
-/// The `UK-GPU-<CODE>` triage vocabulary emitted by `fock_sirk::device` on
-/// CUDA init failure (GPU_FEDERATION_PLAN T2.2), with the documented
-/// remediation for each. Surfaced via `list_codes` so the agent loop can
-/// react to GPU failures without parsing kernel stderr.
+/// The `UK-GPU-<CODE>` triage vocabulary emitted by
+/// `fock_sirk::device` on CUDA init failure (GPU_FEDERATION_PLAN
+/// T2.2), with the documented remediation for each. Surfaced via
+/// `list_codes` so the agent loop can react to GPU failures without
+/// parsing kernel stderr.
 const GPU_TRIAGE_CODES: &[(&str, &str)] = &[
     (
         "UK-GPU-NO_DEVICE",
@@ -101,11 +102,12 @@ fn bad_json_diag(msg: &str) -> Diagnostic {
     )
 }
 
-// ── Plan R: certificate-ledger helpers ────────────────────────────────
-// The `cert_*` ops drive the in-process `ConsensusNode`'s certificate ledger
-// (the same state-transition engine a QuePaxa node applies a `CertificateOp`
-// with). The agent signs each op with the actor's keypair so the node's
-// signature check passes.
+// ── Plan R: certificate-ledger helpers
+// ──────────────────────────────── The `cert_*` ops drive the
+// in-process `ConsensusNode`'s certificate ledger
+// (the same state-transition engine a QuePaxa node applies a
+// `CertificateOp` with). The agent signs each op with the actor's
+// keypair so the node's signature check passes.
 
 fn parse_hex32(s: &str, field: &str) -> Result<[u8; 32], Diagnostic> {
     let bytes = hex::decode(s).map_err(|e| {
@@ -159,8 +161,9 @@ struct AgentState {
     next_id: u64,
     consensus: ConsensusNode,
     keypairs: HashMap<String, Keypair>,
-    /// H10: named GrantSet presets (roster directory `UNFER_PRESETS_DIR`, or
-    /// none). `preset_list`/`preset_set` resolve against this.
+    /// H10: named GrantSet presets (roster directory
+    /// `UNFER_PRESETS_DIR`, or none). `preset_list`/`preset_set`
+    /// resolve against this.
     roster: unfer_protocol::preset::Roster,
 }
 
@@ -170,7 +173,9 @@ impl AgentState {
             .ok()
             .map(|dir| {
                 unfer_protocol::preset::Roster::from_entries(
-                    unfer_protocol::preset::discover_roster(Path::new(&dir)),
+                    unfer_protocol::preset::discover_roster(
+                        Path::new(&dir),
+                    ),
                 )
             })
             .unwrap_or_default();
@@ -210,9 +215,9 @@ impl AgentState {
             .unwrap_or_default()
     }
 
-    /// A keypair for `did`, creating + storing one on first use (mirrors
-    /// `did_create`). The certificate ops sign with the actor's keypair so the
-    /// node's signature check passes.
+    /// A keypair for `did`, creating + storing one on first use
+    /// (mirrors `did_create`). The certificate ops sign with the
+    /// actor's keypair so the node's signature check passes.
     fn keypair_for(&mut self, did: &str) -> Keypair {
         if let Some(k) = self.keypairs.get(did) {
             return k.clone();
@@ -261,7 +266,8 @@ impl AgentState {
     }
 
     /// Sign + submit + sync an auction op as `actor`, returning an
-    /// `AgentResponse` with the deterministic winner (if the op selects one).
+    /// `AgentResponse` with the deterministic winner (if the op
+    /// selects one).
     fn submit_auction_op(
         &mut self,
         actor: &str,
@@ -326,19 +332,22 @@ impl AgentState {
                         })
                     })
                     .collect();
-                // GPU triage vocabulary (GPU_FEDERATION_PLAN T2.2): the
-                // `UK-GPU-<CODE>` stderr lines `fock_sirk::device` emits on
-                // CUDA init failure. Surfaced here so the agent loop can
-                // react to GPU failures without parsing kernel stderr.
-                let gpu_triage: Vec<serde_json::Value> = GPU_TRIAGE_CODES
-                    .iter()
-                    .map(|(code, fix)| {
-                        serde_json::json!({
-                            "code": code,
-                            "fix": fix,
+                // GPU triage vocabulary (GPU_FEDERATION_PLAN T2.2):
+                // the `UK-GPU-<CODE>` stderr lines
+                // `fock_sirk::device` emits on
+                // CUDA init failure. Surfaced here so the agent loop
+                // can react to GPU failures without
+                // parsing kernel stderr.
+                let gpu_triage: Vec<serde_json::Value> =
+                    GPU_TRIAGE_CODES
+                        .iter()
+                        .map(|(code, fix)| {
+                            serde_json::json!({
+                                "code": code,
+                                "fix": fix,
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
                 AgentResponse::ok(
                     &req.id,
                     serde_json::json!({ "codes": codes, "gpu_triage": gpu_triage }),
@@ -1526,15 +1535,20 @@ impl AgentState {
                     serde_json::json!({ "tex": tex }),
                 )
             }
-            // ── H10: named GrantSet presets ───────────────────────────────
+            // ── H10: named GrantSet presets
+            // ───────────────────────────────
             "preset_list" => {
-                // List the roster: each id + trust tier + tool surface, and the
-                // broken presets with their reasons (never silently skipped).
+                // List the roster: each id + trust tier + tool
+                // surface, and the broken presets
+                // with their reasons (never silently skipped).
                 let ids: Vec<&str> = self.roster.ids();
                 let presets: Vec<serde_json::Value> = ids
                     .iter()
                     .map(|id| {
-                        let p = self.roster.get(id).expect("id from roster");
+                        let p = self
+                            .roster
+                            .get(id)
+                            .expect("id from roster");
                         serde_json::json!({
                             "id": p.id,
                             "trust": p.trust,
@@ -1563,8 +1577,9 @@ impl AgentState {
                 )
             }
             "preset_set" => {
-                // Record the start preset on a blank session (a switch is valid
-                // only while the session has produced nothing).
+                // Record the start preset on a blank session (a
+                // switch is valid only while the
+                // session has produced nothing).
                 let model_id = match req
                     .params
                     .get("model_id")
@@ -1602,12 +1617,15 @@ impl AgentState {
                         );
                     }
                 };
-                // Blank-session check: refuse a switch once the session has
-                // produced anything (the tool surface must not change under a
+                // Blank-session check: refuse a switch once the
+                // session has produced anything (the
+                // tool surface must not change under a
                 // model that already ran).
-                let produced = session
-                    .event_log_len_for_preset_switch();
-                if !unfer_protocol::preset::switch_valid_when_blank(produced) {
+                let produced =
+                    session.event_log_len_for_preset_switch();
+                if !unfer_protocol::preset::switch_valid_when_blank(
+                    produced,
+                ) {
                     return AgentResponse::err(
                         &req.id,
                         Diagnostic::new(
@@ -1638,7 +1656,9 @@ impl AgentState {
                             .iter()
                             .find(|b| b.id == preset_id)
                             .and_then(|b| b.reason.clone())
-                            .unwrap_or_else(|| "unknown preset".to_string());
+                            .unwrap_or_else(|| {
+                                "unknown preset".to_string()
+                            });
                         AgentResponse::err(
                             &req.id,
                             Diagnostic::new(
@@ -1829,17 +1849,23 @@ mod tests {
         let resp = state.handle(&req);
         assert!(resp.ok);
         let result = resp.result.clone().unwrap();
-        // The GPU triage vocabulary rides along (GPU_FEDERATION_PLAN T2.2).
+        // The GPU triage vocabulary rides along (GPU_FEDERATION_PLAN
+        // T2.2).
         let triage = result["gpu_triage"]
             .as_array()
             .expect("list_codes carries gpu_triage");
         assert_eq!(triage.len(), 5);
         assert!(
-            triage.iter().any(|t| t["code"] == "UK-GPU-ARCH_MISMATCH"),
+            triage
+                .iter()
+                .any(|t| t["code"] == "UK-GPU-ARCH_MISMATCH"),
             "ARCH_MISMATCH triage present"
         );
         assert!(
-            triage.iter().any(|t| t["fix"].as_str().unwrap_or("").contains("LD_LIBRARY_PATH")),
+            triage.iter().any(|t| t["fix"]
+                .as_str()
+                .unwrap_or("")
+                .contains("LD_LIBRARY_PATH")),
             "ARCH_MISMATCH fix mentions LD_LIBRARY_PATH"
         );
         // The layout codes from T1.2 are in the kernel registry.
@@ -1989,7 +2015,8 @@ mod tests {
             .unwrap();
         assert_ne!(new_model_id, model_id);
 
-        // Query probability on restored model — should work without error.
+        // Query probability on restored model — should work without
+        // error.
         let prob = AgentRequest::new(
             "13",
             "probability",
@@ -2000,7 +2027,8 @@ mod tests {
         let p = prob_resp.result.unwrap()["probability"]
             .as_f64()
             .unwrap();
-        // Vacuum-started state at t=0 should be entirely in the vacuum sector.
+        // Vacuum-started state at t=0 should be entirely in the
+        // vacuum sector.
         assert!((p - 1.0).abs() < 1e-6, "expected p≈1.0, got {p}");
     }
 
@@ -2451,8 +2479,9 @@ mod tests {
     #[test]
     fn cert_ledger_roundtrip_via_ops() {
         let mut state = AgentState::new();
-        // Real DIDs (verify_transaction requires the op did to encode a 32-byte
-        // pubkey). Pre-seed keypairs so the agent signs each op correctly.
+        // Real DIDs (verify_transaction requires the op did to encode
+        // a 32-byte pubkey). Pre-seed keypairs so the agent
+        // signs each op correctly.
         let authority = Keypair::generate();
         let alice = Keypair::generate();
         let bob = Keypair::generate();
@@ -2571,23 +2600,30 @@ mod tests {
         );
     }
 
-    // ── H10: named GrantSet presets ─────────────────────────────────────
+    // ── H10: named GrantSet presets
+    // ─────────────────────────────────────
 
     #[test]
     fn preset_list_and_set_roundtrip() {
-        // Unfer_agent `preset_list`/`preset_set` round-trip: create a blank
-        // session, set its start preset, and confirm the roster + broken
-        // surface via `preset_list`.
+        // Unfer_agent `preset_list`/`preset_set` round-trip: create a
+        // blank session, set its start preset, and confirm
+        // the roster + broken surface via `preset_list`.
         let mut state = AgentState::new();
-        // With no roster dir configured, the roster is empty (but not broken).
-        let req = AgentRequest::new("1", "preset_list", serde_json::json!({}));
+        // With no roster dir configured, the roster is empty (but not
+        // broken).
+        let req = AgentRequest::new(
+            "1",
+            "preset_list",
+            serde_json::json!({}),
+        );
         let resp = state.handle(&req);
         assert!(resp.ok);
         let list = resp.result.as_ref().unwrap();
         assert_eq!(list["presets"].as_array().unwrap().len(), 0);
         assert_eq!(list["broken"].as_array().unwrap().len(), 0);
 
-        // A roster in the temp dir: one good preset + one broken file.
+        // A roster in the temp dir: one good preset + one broken
+        // file.
         let dir = std::env::temp_dir().join(format!(
             "unfer-h10-roster-{}-{}",
             std::process::id(),
@@ -2608,14 +2644,20 @@ mod tests {
         state.roster = unfer_protocol::preset::Roster::from_entries(
             unfer_protocol::preset::discover_roster(&dir),
         );
-        let req = AgentRequest::new("2", "preset_list", serde_json::json!({}));
+        let req = AgentRequest::new(
+            "2",
+            "preset_list",
+            serde_json::json!({}),
+        );
         let resp = state.handle(&req);
         assert!(resp.ok);
         let list = resp.result.as_ref().unwrap();
         assert_eq!(list["presets"].as_array().unwrap().len(), 1);
         let broken = list["broken"].as_array().unwrap();
         assert_eq!(broken.len(), 1);
-        assert!(broken[0]["reason"].as_str().unwrap().contains("broken"));
+        assert!(
+            broken[0]["reason"].as_str().unwrap().contains("broken")
+        );
 
         // Create a blank session, set its start preset.
         let spec = ModelSpec {
@@ -2633,7 +2675,9 @@ mod tests {
         );
         let resp = state.handle(&req);
         assert!(resp.ok);
-        let model_id = resp.result.as_ref().unwrap()["model_id"].as_u64().unwrap();
+        let model_id = resp.result.as_ref().unwrap()["model_id"]
+            .as_u64()
+            .unwrap();
 
         let req = AgentRequest::new(
             "4",
@@ -2641,8 +2685,14 @@ mod tests {
             serde_json::json!({ "model_id": model_id, "preset": "analyst" }),
         );
         let resp = state.handle(&req);
-        assert!(resp.ok, "blank-session preset_set must succeed: {resp:?}");
-        assert_eq!(resp.result.as_ref().unwrap()["preset"], "analyst");
+        assert!(
+            resp.ok,
+            "blank-session preset_set must succeed: {resp:?}"
+        );
+        assert_eq!(
+            resp.result.as_ref().unwrap()["preset"],
+            "analyst"
+        );
         assert_eq!(
             state.sessions[&model_id].start_preset(),
             Some("analyst")
@@ -2664,7 +2714,8 @@ mod tests {
     #[test]
     fn preset_switch_on_non_blank_session_is_rejected() {
         let mut state = AgentState::new();
-        // Create a blank session, evolve it (produced ≥1 op), then try a switch.
+        // Create a blank session, evolve it (produced ≥1 op), then
+        // try a switch.
         let spec = ModelSpec {
             hamiltonian: unfer_protocol::HamiltonianSpec::builtin(
                 "harmonic_chain",
@@ -2679,7 +2730,9 @@ mod tests {
             serde_json::to_value(spec).unwrap(),
         );
         let resp = state.handle(&req);
-        let model_id = resp.result.as_ref().unwrap()["model_id"].as_u64().unwrap();
+        let model_id = resp.result.as_ref().unwrap()["model_id"]
+            .as_u64()
+            .unwrap();
 
         let req = AgentRequest::new(
             "2",

@@ -1,11 +1,12 @@
-//! Tiny embedded 5x7 bitmap font, shared by the references panel's small
-//! header text (`references_panel.rs`).
+//! Tiny embedded 5x7 bitmap font, shared by the references panel's
+//! small header text (`references_panel.rs`).
 //!
-//! Markers themselves no longer have a bespoke rendering path: Ctrl+M sets
-//! `TransformOptions::show_hidden`, so a marker's `#id` text is laid out and
-//! rasterized by the exact same Typst pass as the rest of the document
-//! (`app.rs::redraw`) — guaranteed to look identical to "the rest of the
-//! text" because it *is* the rest of the text, not a separate overlay.
+//! Markers themselves no longer have a bespoke rendering path: Ctrl+M
+//! sets `TransformOptions::show_hidden`, so a marker's `#id` text is
+//! laid out and rasterized by the exact same Typst pass as the rest
+//! of the document (`app.rs::redraw`) — guaranteed to look identical
+//! to "the rest of the text" because it *is* the rest of the text,
+//! not a separate overlay.
 
 /// Tiny 5x7 bitmap font for small header text. Each char is
 /// `5` columns × `7` rows of bits, packed MSB-first. We hand-roll

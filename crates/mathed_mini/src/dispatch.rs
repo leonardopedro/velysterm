@@ -1,17 +1,19 @@
 //! The translator dispatcher (P3 #10, TRANSLATOR_DESIGN.md Step 4).
 //!
-//! Bridges a [`KernelStatement`] (a `\model`/`\event`/`\prob` segment from the
-//! semantic index) to a kernel payload by running its translator and parsing
-//! the result:
+//! Bridges a [`KernelStatement`] (a `\model`/`\event`/`\prob` segment
+//! from the semantic index) to a kernel payload by running its
+//! translator and parsing the result:
 //!
 //! - `\model` → translator emits `TermSpec[]` JSON → wrapped in
-//!   [`HamiltonianSpec::Terms`] → a [`ModelSpec`] with a vacuum prior and
-//!   default solver.
-//! - `\event` / `\prob` → translator emits `EventPredicate` JSON, returned as a
-//!   raw string for the worker to forward to the kernel.
+//!   [`HamiltonianSpec::Terms`] → a [`ModelSpec`] with a vacuum prior
+//!   and default solver.
+//! - `\event` / `\prob` → translator emits `EventPredicate` JSON,
+//!   returned as a raw string for the worker to forward to the
+//!   kernel.
 //!
-//! Translator resolution: a statement's named translator, else the unnamed
-//! (`""`) block-local default, else the embedded [`BUILTIN_TRANSLATOR`].
+//! Translator resolution: a statement's named translator, else the
+//! unnamed (`""`) block-local default, else the embedded
+//! [`BUILTIN_TRANSLATOR`].
 
 use crate::translate::{
     BUILTIN_EVENT_TRANSLATOR, BUILTIN_TRANSLATOR, TranslateError,
@@ -31,10 +33,11 @@ pub enum DispatchError {
     Translate(TranslateError),
     /// The translator's JSON did not match the expected schema.
     Json(String),
-    /// A `\prior`/`\solver` body failed the mini-grammar parse (and was not
-    /// valid JSON for that spec either).
+    /// A `\prior`/`\solver` body failed the mini-grammar parse (and
+    /// was not valid JSON for that spec either).
     Parse(String),
-    /// The statement's [`PropKind`] is not handled by the called function.
+    /// The statement's [`PropKind`] is not handled by the called
+    /// function.
     WrongKind(PropKind),
 }
 
@@ -60,8 +63,9 @@ impl std::fmt::Display for DispatchError {
 
 impl std::error::Error for DispatchError {}
 
-/// Resolve the translator source for a statement: its named translator, then
-/// the unnamed block-local default (`""`), then the provided built-in default.
+/// Resolve the translator source for a statement: its named
+/// translator, then the unnamed block-local default (`""`), then the
+/// provided built-in default.
 pub fn resolve_translator_src<'a>(
     translators: &'a HashMap<String, TranslatorDef>,
     name: Option<&str>,
@@ -80,10 +84,11 @@ pub fn resolve_translator_src<'a>(
 
 /// Translate a `\model` statement into a [`ModelSpec`].
 ///
-/// The translator owns the operator mapping (notation → `TermSpec[]`). The
-/// `prior`/`solver` are separate concerns supplied by `\prior`/`\solver`
-/// segments (parsed by [`parse_prior`]/[`parse_solver`] and bound to this
-/// model by the bridge); when absent they fall back to a vacuum prior and the
+/// The translator owns the operator mapping (notation →
+/// `TermSpec[]`). The `prior`/`solver` are separate concerns supplied
+/// by `\prior`/`\solver` segments (parsed by
+/// [`parse_prior`]/[`parse_solver`] and bound to this model by the
+/// bridge); when absent they fall back to a vacuum prior and the
 /// default solver, preserving the original behaviour.
 pub fn statement_to_model_spec(
     engine: &mut Translator,
@@ -114,11 +119,13 @@ pub fn statement_to_model_spec(
 
 /// Parse a `\prior` segment body into a [`PriorSpec`].
 ///
-/// Accepts a small editor-friendly grammar, falling back to direct JSON:
+/// Accepts a small editor-friendly grammar, falling back to direct
+/// JSON:
 /// - `vacuum` → [`PriorSpec::Vacuum`]
 /// - `bosons(0:2, 1:1)` → [`PriorSpec::Bosons`] (`mode:count` pairs)
 /// - `fermions(0, 2)` → [`PriorSpec::Fermions`] (occupied modes)
-/// - otherwise the body is parsed as a JSON `PriorSpec` (full control).
+/// - otherwise the body is parsed as a JSON `PriorSpec` (full
+///   control).
 pub fn parse_prior(body: &str) -> Result<PriorSpec, DispatchError> {
     let t = body.trim();
     if t.eq_ignore_ascii_case("vacuum") {
@@ -153,10 +160,10 @@ pub fn parse_prior(body: &str) -> Result<PriorSpec, DispatchError> {
 
 /// Parse a `\solver` segment body into a [`SolverSpec`].
 ///
-/// A JSON object (`{...}`) is parsed as a full [`SolverSpec`]. Otherwise the
-/// body is comma-separated `key: value` overrides applied to
-/// [`SolverSpec::default`]: `krylov_dim`, `prune_eps`, `max_components`,
-/// `restarts` (e.g. `krylov_dim: 12, restarts: 2`).
+/// A JSON object (`{...}`) is parsed as a full [`SolverSpec`].
+/// Otherwise the body is comma-separated `key: value` overrides
+/// applied to [`SolverSpec::default`]: `krylov_dim`, `prune_eps`,
+/// `max_components`, `restarts` (e.g. `krylov_dim: 12, restarts: 2`).
 pub fn parse_solver(body: &str) -> Result<SolverSpec, DispatchError> {
     let t = body.trim();
     if t.starts_with('{') {
@@ -227,11 +234,12 @@ fn parse_f64(s: &str) -> Result<f64, DispatchError> {
     })
 }
 
-/// Translate an `\event`/`\prob` statement into an `EventPredicate` JSON string
-/// (forwarded verbatim to the kernel). The translator's output is validated
-/// against the `EventPredicate` schema *here* (typed check) so a malformed
-/// predicate is caught before the worker round-trip — producing a structured
-/// error with the specific field that failed, not a generic UK-1003.
+/// Translate an `\event`/`\prob` statement into an `EventPredicate`
+/// JSON string (forwarded verbatim to the kernel). The translator's
+/// output is validated against the `EventPredicate` schema *here*
+/// (typed check) so a malformed predicate is caught before the worker
+/// round-trip — producing a structured error with the specific field
+/// that failed, not a generic UK-1003.
 pub fn statement_to_event_json(
     engine: &mut Translator,
     translators: &HashMap<String, TranslatorDef>,
@@ -248,8 +256,9 @@ pub fn statement_to_event_json(
     let json = engine
         .run(src, &stmt.body_text)
         .map_err(DispatchError::Translate)?;
-    // Typed validation: parse as EventPredicate so a bad predicate shape is
-    // caught here with a specific message, not a generic kernel rejection.
+    // Typed validation: parse as EventPredicate so a bad predicate
+    // shape is caught here with a specific message, not a generic
+    // kernel rejection.
     serde_json::from_str::<EventPredicate>(&json)
         .map_err(|e| DispatchError::Json(e.to_string()))?;
     Ok(json)
@@ -263,7 +272,8 @@ mod tests {
         to_render_text,
     };
 
-    /// Build a semantic index over `doc` using the public marker pipeline.
+    /// Build a semantic index over `doc` using the public marker
+    /// pipeline.
     fn index_for(doc: &str) -> SemanticIndex {
         let scan = scan(doc);
         let segments = resolve_segments(&scan);
@@ -322,7 +332,8 @@ mod tests {
         )
         .expect("builtin dispatch");
         match spec.hamiltonian {
-            // builtin_translator.typ emits a single mode-0 number operator.
+            // builtin_translator.typ emits a single mode-0 number
+            // operator.
             HamiltonianSpec::Terms { terms } => {
                 assert_eq!(terms.len(), 1)
             }
@@ -354,9 +365,10 @@ mod tests {
 
     #[test]
     fn event_typed_validation_catches_bad_predicate() {
-        // Translator emits JSON with an unknown `kind` tag — valid JSON,
-        // but not a valid EventPredicate variant. The typed validation in
-        // statement_to_event_json should catch it with a Json error.
+        // Translator emits JSON with an unknown `kind` tag — valid
+        // JSON, but not a valid EventPredicate variant. The
+        // typed validation in statement_to_event_json should
+        // catch it with a Json error.
         let doc = "#3 #let translate(b) = { \"{\\\"kind\\\":\\\"nonexistent\\\"}\" } #4 \\translator(#3,#4, name: \"bad\")\n\n#1 vac #2 \\event(#1,#2, translator: \"bad\")";
         let idx = index_for(doc);
         let stmt = idx
@@ -379,8 +391,9 @@ mod tests {
 
     #[test]
     fn event_combinator_predicate_validates() {
-        // A translator emitting an `And` combinator over `BosonModeTotal`
-        // and `Vacuum` — exercises the recursive EventPredicate schema.
+        // A translator emitting an `And` combinator over
+        // `BosonModeTotal` and `Vacuum` — exercises the
+        // recursive EventPredicate schema.
         let src = r#"#let translate(b) = {
           let p1 = (kind: "boson_mode_total", mode: 0, cmp: "eq", value: 1)
           let p2 = (kind: "vacuum",)

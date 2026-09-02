@@ -1,21 +1,21 @@
 //! mathed — a math-semantics editor.
 //!
-//! Bevy systems naturally exceed clippy's 7-argument limit; the dead-code
-//! lints flag UI scaffolding (popup variants, unused struct fields) that are
-//! part of the M2 design but not yet wired. Both are acknowledged tech debt
-//! for the Bevy frontend, not bugs.
+//! Bevy systems naturally exceed clippy's 7-argument limit; the
+//! dead-code lints flag UI scaffolding (popup variants, unused struct
+//! fields) that are part of the M2 design but not yet wired. Both are
+//! acknowledged tech debt for the Bevy frontend, not bugs.
 
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
-//! Document model: `mathed_core::MathDoc` (Loro CRDT). The text contains
-//! hidden markers (`#1`, `#2` ...) and property statements
+//! Document model: `mathed_core::MathDoc` (Loro CRDT). The text
+//! contains hidden markers (`#1`, `#2` ...) and property statements
 //! (`\function(#1,#2)`) that are stripped/applied by
-//! `mathed_core::transform` before the text is compiled and laid out by
-//! Typst (via velyst) and rendered with vello.
+//! `mathed_core::transform` before the text is compiled and laid out
+//! by Typst (via velyst) and rendered with vello.
 //!
-//! Architecture: the document is split into blocks (B2). Each block gets
-//! its own Typst `Source` and is rendered independently (B3). Only dirty
-//! blocks are re-transformed and re-evaluated.
+//! Architecture: the document is split into blocks (B2). Each block
+//! gets its own Typst `Source` and is rendered independently (B3).
+//! Only dirty blocks are re-transformed and re-evaluated.
 
 mod blocks_view;
 mod cite_refs;
@@ -169,9 +169,9 @@ pub fn scroll_adjust(
 }
 
 fn main() {
-    // Args: `mathed [file] [--listen host:port | --connect host:port]`.
-    // The transport is optional — without it the editor runs offline
-    // with the in-process demo peer.
+    // Args: `mathed [file] [--listen host:port | --connect
+    // host:port]`. The transport is optional — without it the
+    // editor runs offline with the in-process demo peer.
     let mut file = None;
     let mut listen = None;
     let mut connect = None;
@@ -240,7 +240,10 @@ fn main() {
         .init_resource::<cite_refs::CitePopupStack>()
         .init_resource::<cite_refs::ReferencesPanelOpen>()
         .init_resource::<ImePreedit>()
-        .add_systems(Startup, (setup, durable_sys::spawn_durable_panel))
+        .add_systems(
+            Startup,
+            (setup, durable_sys::spawn_durable_panel),
+        )
         .add_systems(
             PreUpdate,
             (handle_keyboard, handle_mouse, handle_ime),
@@ -319,7 +322,8 @@ impl EditorDoc {
 struct EditorState {
     /// Caret position, doc byte offset (always on a char boundary).
     cursor: usize,
-    /// Selection anchor (doc byte) while selecting; None = no selection.
+    /// Selection anchor (doc byte) while selecting; None = no
+    /// selection.
     anchor: Option<usize>,
     show_hidden: bool,
     /// Index of the definition being renamed via popup.
@@ -376,8 +380,8 @@ fn sync_presence(
         let _ = host.0.apply(&blob);
     }
     if let Some(t) = &transport {
-        // Network mode: broadcast our presence on every caret move and
-        // drain the wire into the ephemeral store.
+        // Network mode: broadcast our presence on every caret move
+        // and drain the wire into the ephemeral store.
         if cursor_moved {
             t.send_presence(&host.0.encode());
         }
@@ -400,8 +404,9 @@ fn sync_presence(
             *announced = true;
         }
     } else {
-        // Offline single-host demo: exchange blobs with the in-process
-        // peer (the same channel shape a real transport would use).
+        // Offline single-host demo: exchange blobs with the
+        // in-process peer (the same channel shape a real
+        // transport would use).
         let host_blob = host.0.encode();
         let peer_blob = demo.0.encode();
         let _ = host.0.apply(&peer_blob);
@@ -422,8 +427,8 @@ fn sync_presence(
     }
 }
 
-/// Live-collaborator overlay state. Toggled with F3; the overlay lists
-/// who is editing and where their caret is (line:column).
+/// Live-collaborator overlay state. Toggled with F3; the overlay
+/// lists who is editing and where their caret is (line:column).
 #[derive(Resource, Default)]
 struct PresenceOverlay {
     visible: bool,
@@ -431,7 +436,8 @@ struct PresenceOverlay {
     last_text: String,
 }
 
-/// Marker for the overlay root node (so it can be despawned on toggle).
+/// Marker for the overlay root node (so it can be despawned on
+/// toggle).
 #[derive(Component)]
 struct PresenceOverlayRoot;
 
@@ -548,15 +554,16 @@ fn line_col(doc: &str, byte: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// In-progress IME composition text (CJK/composed input), if any — the
-/// OS `Ime::Preedit` string, not yet committed to the document. Shown as
-/// an underlined overlay at the caret; `Ime::Commit` clears it and
-/// inserts the finished text into the doc (G1 IME support, mirroring
-/// `mathed_mini`'s `ime_preedit`).
+/// In-progress IME composition text (CJK/composed input), if any —
+/// the OS `Ime::Preedit` string, not yet committed to the document.
+/// Shown as an underlined overlay at the caret; `Ime::Commit` clears
+/// it and inserts the finished text into the doc (G1 IME support,
+/// mirroring `mathed_mini`'s `ime_preedit`).
 #[derive(Resource, Default)]
 pub struct ImePreedit(pub Option<String>);
 
-/// Tracks the previous reveal key for detecting cursor/selection changes.
+/// Tracks the previous reveal key for detecting cursor/selection
+/// changes.
 #[derive(Resource, Default)]
 struct RevealState {
     key: (usize, Option<Range<usize>>, bool),
@@ -575,10 +582,10 @@ struct LastChange(Option<f64>);
 fn setup(mut commands: Commands) {
     // C13 host wiring: this editor publishes its own presence (name +
     // caret + heartbeat) and merges remote blobs; the demo peer below
-    // is a second in-process `PresenceStore` that exchanges blobs with
-    // the host over the same channel a real network would carry deltas
-    // on — so the inbound `apply` path runs end-to-end with no
-    // networking (see `sync_presence`).
+    // is a second in-process `PresenceStore` that exchanges blobs
+    // with the host over the same channel a real network would
+    // carry deltas on — so the inbound `apply` path runs
+    // end-to-end with no networking (see `sync_presence`).
     let host = PresenceStore::new("host", "host", 30_000);
     commands.insert_resource(HostPresence(host));
     let demo = PresenceStore::new("demo-peer", "demo peer", 30_000);
@@ -611,7 +618,8 @@ fn setup(mut commands: Commands) {
                     ..default()
                 },
             ));
-            // Overlay layer: absolute vello scene for caret, selection, etc.
+            // Overlay layer: absolute vello scene for caret,
+            // selection, etc.
             parent.spawn((
                 OverlayLayer,
                 Node {
@@ -1112,10 +1120,10 @@ fn handle_keyboard(
     }
 }
 
-/// Handle IME composition events (G1): `Preedit` updates the in-progress
-/// composition overlay; `Commit` finalizes it by inserting the composed
-/// text into the document (exactly like a normal keystroke). Mirrors
-/// `mathed_mini`'s `ime_preedit` handling.
+/// Handle IME composition events (G1): `Preedit` updates the
+/// in-progress composition overlay; `Commit` finalizes it by
+/// inserting the composed text into the document (exactly like a
+/// normal keystroke). Mirrors `mathed_mini`'s `ime_preedit` handling.
 fn handle_ime(
     mut ime_evr: MessageReader<bevy::window::WindowEvent>,
     mut ime: ResMut<ImePreedit>,
@@ -1201,11 +1209,11 @@ fn insert_text(
 }
 
 /// Typing an unescaped `#` inserts a fresh auto-named marker (`#3ad`:
-/// lowest free number + its RFC 1751 word) instead of a bare `#`; after
-/// a `\` it inserts the literal `#` (Typst escape). No trailing space —
-/// typing letters right after extends/renames the id. `insert_text` does
-/// the selection deletion first, so the freeness scan runs over the
-/// post-deletion document.
+/// lowest free number + its RFC 1751 word) instead of a bare `#`;
+/// after a `\` it inserts the literal `#` (Typst escape). No trailing
+/// space — typing letters right after extends/renames the id.
+/// `insert_text` does the selection deletion first, so the freeness
+/// scan runs over the post-deletion document.
 fn insert_hash(
     editor: &mut EditorDoc,
     state: &mut EditorState,
@@ -1331,8 +1339,8 @@ fn save(editor: &mut EditorDoc) {
     }
 }
 
-/// Per-block sync: update block index, spawn/despawn entities, transform
-/// dirty blocks, and evaluate their Typst sources.
+/// Per-block sync: update block index, spawn/despawn entities,
+/// transform dirty blocks, and evaluate their Typst sources.
 fn sync_blocks(
     time: Res<Time>,
     world: VelystWorld,
@@ -1484,9 +1492,10 @@ fn sync_blocks(
     let sel = state.selection();
     let show_hidden = state.show_hidden;
 
-    // Inline kernel annotations (green `= 0.4231` / red `code_name`) keyed
-    // by each prob's body offset. Computed once per sync pass; the transform
-    // filters to segments within each block's range (P5 #24).
+    // Inline kernel annotations (green `= 0.4231` / red `code_name`)
+    // keyed by each prob's body offset. Computed once per sync
+    // pass; the transform filters to segments within each block's
+    // range (P5 #24).
     let annotations = kernel_bridge.result_annotations();
     // Translator error messages for the expanded panel (P5 #28).
     let translator_errors = kernel_bridge.translator_errors().clone();
@@ -1755,7 +1764,8 @@ fn draw_overlay(
         }
     }
 
-    // Kernel prob overlays: green underline for success, red dashed for error.
+    // Kernel prob overlays: green underline for success, red dashed
+    // for error.
     let mut prob_ok_rects = Vec::new();
     let mut prob_err_rects = Vec::new();
     for ks in &semantics.0.kernel_statements {
@@ -1802,8 +1812,9 @@ fn draw_overlay(
     }
 
     // Search-match rects: every query match (yellow fill) plus the
-    // currently-selected one (fill + stroke). The matches are byte ranges
-    // maintained by `Searching`; only built while a search is active.
+    // currently-selected one (fill + stroke). The matches are byte
+    // ranges maintained by `Searching`; only built while a search
+    // is active.
     let mut search_rects: Vec<bevy_vello::vello::kurbo::Rect> =
         Vec::new();
     let mut search_current_rect: Option<

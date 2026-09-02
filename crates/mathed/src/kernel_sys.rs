@@ -1,17 +1,20 @@
 //! Bevy bridge between the mathed editor and the probability kernel.
 //!
 //! This is a thin Bevy wrapper around the headless
-//! [`mathed_mini::KernelBridge`] (P3 #10/#11): the translator pipeline +
-//! `kernel_client` worker, shared with the Bevy-free `mathed_mini` frontend so
-//! both editors compute `\prob` values exactly the same way.
+//! [`mathed_mini::KernelBridge`] (P3 #10/#11): the translator
+//! pipeline + `kernel_client` worker, shared with the Bevy-free
+//! `mathed_mini` frontend so both editors compute `\prob` values
+//! exactly the same way.
 //!
 //! Systems:
-//! - [`dispatch_kernel_requests`] — when the document changes, re-runs the
-//!   bridge (build index → translate `\model`/`\prob` → submit to the worker).
-//! - [`apply_kernel_results`] — drains async worker results each frame.
+//! - [`dispatch_kernel_requests`] — when the document changes,
+//!   re-runs the bridge (build index → translate `\model`/`\prob` →
+//!   submit to the worker).
+//! - [`apply_kernel_results`] — drains async worker results each
+//!   frame.
 //!
-//! Results are keyed by each statement's body **doc offset** (`span.start`);
-//! the overlay looks them up with `ks.span.start`.
+//! Results are keyed by each statement's body **doc offset**
+//! (`span.start`); the overlay looks them up with `ks.span.start`.
 
 use std::collections::HashMap;
 
@@ -22,8 +25,8 @@ use crate::EditorDoc;
 use crate::blocks_view::Blocks;
 use crate::scheduler::Scheduler;
 
-/// Per-`\prob` result, re-exported from the shared bridge so the overlay can
-/// match on it.
+/// Per-`\prob` result, re-exported from the shared bridge so the
+/// overlay can match on it.
 pub use mathed_mini::KernelResult;
 
 /// Bevy resource wrapping the shared headless kernel bridge.
@@ -38,29 +41,33 @@ impl KernelBridge {
         self.inner.results()
     }
 
-    /// Inline annotations keyed by each prob's body offset (green value /
-    /// red error code) for splicing into `TransformOptions::annotations`.
-    /// Mirrors [`mathed_mini::KernelBridge::result_annotations`] so the Bevy
-    /// frontend shows the same inline `= 0.4231` / `code_name` marks the mini
-    /// frontend does (P5 #24), not just coloured underlines.
+    /// Inline annotations keyed by each prob's body offset (green
+    /// value / red error code) for splicing into
+    /// `TransformOptions::annotations`.
+    /// Mirrors [`mathed_mini::KernelBridge::result_annotations`] so
+    /// the Bevy frontend shows the same inline `= 0.4231` /
+    /// `code_name` marks the mini frontend does (P5 #24), not
+    /// just coloured underlines.
     pub fn result_annotations(&self) -> HashMap<usize, String> {
         self.inner.result_annotations()
     }
 
-    /// Translator error messages for `TransformOptions::translator_errors`
-    /// (P5 #28): keyed by translator body-start offset, shown in red in the
-    /// expanded panel when a translator fails.
+    /// Translator error messages for
+    /// `TransformOptions::translator_errors` (P5 #28): keyed by
+    /// translator body-start offset, shown in red in the expanded
+    /// panel when a translator fails.
     pub fn translator_errors(&self) -> &HashMap<usize, String> {
         self.inner.translator_errors()
     }
 }
 
-/// On a document change, re-run the bridge: it rebuilds the semantic index,
-/// translates each `\model`/`\prob`, and submits changed ones to the worker.
-/// The bridge's internal hashing makes an unchanged document a no-op. If
-/// `refresh` synchronously inserts a dispatch error (bad translator / missing
-/// model / unparseable prior or solver), the owning block is re-dirtied so
-/// its inline `code_name` annotation renders next frame.
+/// On a document change, re-run the bridge: it rebuilds the semantic
+/// index, translates each `\model`/`\prob`, and submits changed ones
+/// to the worker. The bridge's internal hashing makes an unchanged
+/// document a no-op. If `refresh` synchronously inserts a dispatch
+/// error (bad translator / missing model / unparseable prior or
+/// solver), the owning block is re-dirtied so its inline `code_name`
+/// annotation renders next frame.
 pub fn dispatch_kernel_requests(
     editor: Res<EditorDoc>,
     mut bridge: ResMut<KernelBridge>,
@@ -81,11 +88,11 @@ pub fn dispatch_kernel_requests(
     }
 }
 
-/// Drain completed kernel responses each frame. When any async result lands,
-/// the blocks containing those `\prob`s are re-dirtied so the inline
-/// annotations spliced into their Typst source re-render next frame
-/// (annotations live in the evaluated source, not the overlay layer —
-/// see `sync_blocks`).
+/// Drain completed kernel responses each frame. When any async result
+/// lands, the blocks containing those `\prob`s are re-dirtied so the
+/// inline annotations spliced into their Typst source re-render next
+/// frame (annotations live in the evaluated source, not the overlay
+/// layer — see `sync_blocks`).
 pub fn apply_kernel_results(
     mut bridge: ResMut<KernelBridge>,
     mut scheduler: ResMut<Scheduler>,
@@ -102,9 +109,10 @@ pub fn apply_kernel_results(
     }
 }
 
-/// Mark for re-transform every block that owns a prob with a result. Keys are
-/// each prob's body doc offset. Shared by [`dispatch_kernel_requests`] (sync
-/// dispatch errors) and [`apply_kernel_results`] (async worker responses).
+/// Mark for re-transform every block that owns a prob with a result.
+/// Keys are each prob's body doc offset. Shared by
+/// [`dispatch_kernel_requests`] (sync dispatch errors) and
+/// [`apply_kernel_results`] (async worker responses).
 fn dirty_prob_blocks(
     inner: &mathed_mini::KernelBridge,
     blocks: &Blocks,
@@ -132,9 +140,9 @@ mod tests {
     /// Stage C10 headless smoke: the full kernel path — document →
     /// KernelBridge → worker → prob_kernel → annotation → transformed
     /// Typst source — must produce the green `= 1.0000` markup for a
-    /// successful `\prob`, with no window or GPU. This is the pipeline
-    /// `sync_blocks` runs before handing source to Typst; the Bevy
-    /// rendering layer is not involved.
+    /// successful `\prob`, with no window or GPU. This is the
+    /// pipeline `sync_blocks` runs before handing source to
+    /// Typst; the Bevy rendering layer is not involved.
     #[test]
     fn kernel_smoke_annotation_in_transformed_source() {
         let doc = "#1 a #2 \\model(#1,#2)\n\n\
@@ -187,9 +195,10 @@ mod tests {
     }
 
     /// The layout-claim path (GPU_FEDERATION_PLAN T1.2): a `\layout`
-    /// statement with a bank-conflict congruence renders its UK-4907 verdict
-    /// in the transformed source exactly like a kernel error — the Bevy
-    /// overlay shows the code inline, no window or GPU.
+    /// statement with a bank-conflict congruence renders its UK-4907
+    /// verdict in the transformed source exactly like a kernel
+    /// error — the Bevy overlay shows the code inline, no window
+    /// or GPU.
     #[test]
     fn kernel_smoke_layout_verdict_in_transformed_source() {
         let doc = "#1 2x + 4y ≡ 0 (mod 32) #2 \\layout(#1,#2)";
@@ -226,8 +235,8 @@ mod tests {
         );
     }
 
-    /// The error path: a bad translator produces a red UK-style code in
-    /// the transformed source, again with no window or GPU.
+    /// The error path: a bad translator produces a red UK-style code
+    /// in the transformed source, again with no window or GPU.
     #[test]
     fn kernel_smoke_error_annotation_in_transformed_source() {
         let doc = "#1 a #2 \\model(#1,#2)\n\n\

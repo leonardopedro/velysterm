@@ -1,20 +1,22 @@
 //! H11: keyless snapshot replay gate for `unfer_agent`.
 //!
-//! Records a committed NDJSON transcript (create_model → evolve → probability →
-//! bayesian_update → save_session → close_model) and replays it through the
-//! **real binary** (the built `unfer_agent` entry path, not the library), then
-//! diffs normalized output + the re-derived H3 event log (the saved session
-//! blob) against a committed golden. Regeneration only via `UPDATE_GOLDEN=1` —
+//! Records a committed NDJSON transcript (create_model → evolve →
+//! probability → bayesian_update → save_session → close_model) and
+//! replays it through the **real binary** (the built `unfer_agent`
+//! entry path, not the library), then diffs normalized output + the
+//! re-derived H3 event log (the saved session blob) against a
+//! committed golden. Regeneration only via `UPDATE_GOLDEN=1` —
 //! a transcript/output change updates the fixture or golden, never a
-//! normalizer. This catches the "green unit tests, broken product" class (stale
-//! artifact, masked settle, wrong entry wiring).
+//! normalizer. This catches the "green unit tests, broken product"
+//! class (stale artifact, masked settle, wrong entry wiring).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The built `unfer_agent` binary (Cargo sets this env var for integration
-/// tests). Booting the real binary exercises the real entry path.
+/// The built `unfer_agent` binary (Cargo sets this env var for
+/// integration tests). Booting the real binary exercises the real
+/// entry path.
 const BIN: &str = env!("CARGO_BIN_EXE_unfer_agent");
 
 fn fixture_path() -> PathBuf {
@@ -31,16 +33,17 @@ fn golden_path() -> PathBuf {
         .join("session_transcript.ndjson.golden")
 }
 
-/// Normalize a response line: drop the wall-clock `timing_ms` (nondeterministic)
-/// and any transient fields, so a golden bump reflects a real transcript/output
-/// change, not a timing jitter.
+/// Normalize a response line: drop the wall-clock `timing_ms`
+/// (nondeterministic) and any transient fields, so a golden bump
+/// reflects a real transcript/output change, not a timing jitter.
 fn normalize_line(line: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(line) {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("timing_ms");
-                // The saved session blob carries wall-clock provenance on
-                // events (`ts`) — strip it so the golden is keyless.
+                // The saved session blob carries wall-clock
+                // provenance on events (`ts`) — strip
+                // it so the golden is keyless.
                 if let Some(result) = obj.get_mut("result")
                     && let Some(blob) = result.get_mut("events")
                     && let Some(events) = blob.as_array_mut()
@@ -52,17 +55,20 @@ fn normalize_line(line: &str) -> String {
                     }
                 }
             }
-            serde_json::to_string(&v).expect("re-serialize normalized response")
+            serde_json::to_string(&v)
+                .expect("re-serialize normalized response")
         }
         Err(_) => line.to_string(),
     }
 }
 
-/// Replay the committed transcript through the real binary, returning the
-/// normalized NDJSON response lines.
+/// Replay the committed transcript through the real binary, returning
+/// the normalized NDJSON response lines.
 fn replay() -> Vec<String> {
     let transcript = std::fs::read_to_string(fixture_path())
-        .unwrap_or_else(|e| panic!("missing transcript fixture: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("missing transcript fixture: {e}")
+        });
 
     let mut child = Command::new(BIN)
         .stdin(Stdio::piped())
@@ -99,9 +105,11 @@ fn keyless_snapshot_replay_matches_golden() {
     let canonical = built.join("\n") + "\n";
 
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        let dir = golden_path().parent().expect("golden dir").to_path_buf();
+        let dir =
+            golden_path().parent().expect("golden dir").to_path_buf();
         std::fs::create_dir_all(&dir).expect("golden dir");
-        std::fs::write(golden_path(), &canonical).expect("write golden");
+        std::fs::write(golden_path(), &canonical)
+            .expect("write golden");
         eprintln!(
             "UPDATE_GOLDEN=1: regenerated {}",
             golden_path().display()
@@ -121,7 +129,9 @@ fn keyless_snapshot_replay_matches_golden() {
         let b: Vec<&str> = canonical.lines().collect();
         for (i, (gl, bl)) in g.iter().zip(b.iter()).enumerate() {
             if gl != bl {
-                diff_lines.push(format!("line {i}:\n  golden: {gl}\n  built : {bl}"));
+                diff_lines.push(format!(
+                    "line {i}:\n  golden: {gl}\n  built : {bl}"
+                ));
             }
         }
         if g.len() != b.len() {
@@ -141,14 +151,23 @@ fn keyless_snapshot_replay_matches_golden() {
 
 #[test]
 fn snapshot_replay_produces_well_formed_ndjson() {
-    // Every built line is parseable JSON with an id — the real entry path emits
-    // the NDJSON contract, not prose or partial output.
+    // Every built line is parseable JSON with an id — the real entry
+    // path emits the NDJSON contract, not prose or partial
+    // output.
     let built = replay();
     assert!(!built.is_empty(), "transcript must produce responses");
     for line in &built {
         let v: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("non-NDJSON line '{line}': {e}"));
-        assert!(v.get("id").is_some(), "response must carry its id: {line}");
-        assert!(v.get("ok").is_some(), "response must carry ok: {line}");
+            .unwrap_or_else(|e| {
+                panic!("non-NDJSON line '{line}': {e}")
+            });
+        assert!(
+            v.get("id").is_some(),
+            "response must carry its id: {line}"
+        );
+        assert!(
+            v.get("ok").is_some(),
+            "response must carry ok: {line}"
+        );
     }
 }

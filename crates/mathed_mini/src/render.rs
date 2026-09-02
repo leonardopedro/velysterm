@@ -1,5 +1,5 @@
-//! The Bevy-free render pipeline: mathed document → Typst markup → laid-out
-//! [`Frame`] → CPU-rasterized RGBA8 image.
+//! The Bevy-free render pipeline: mathed document → Typst markup →
+//! laid-out [`Frame`] → CPU-rasterized RGBA8 image.
 
 use imaging::RgbaImage;
 use imaging_vello_cpu::VelloCpuRenderer;
@@ -30,21 +30,23 @@ pub enum RenderError {
     TooLarge,
 }
 
-/// Convert a mathed document into renderable Typst markup via the editor's
-/// marker/transform pipeline.
+/// Convert a mathed document into renderable Typst markup via the
+/// editor's marker/transform pipeline.
 pub fn doc_to_markup(doc_text: &str) -> String {
     doc_to_render(doc_text).text
 }
 
-/// Run the marker/transform pipeline, keeping the full [`RenderOutput`] so the
-/// caller retains the doc↔render [`OffsetMap`](mathed_core::transform::OffsetMap)
-/// needed to map glyph positions back to document byte offsets.
+/// Run the marker/transform pipeline, keeping the full
+/// [`RenderOutput`] so the caller retains the doc↔render
+/// [`OffsetMap`](mathed_core::transform::OffsetMap) needed to map
+/// glyph positions back to document byte offsets.
 pub fn doc_to_render(doc_text: &str) -> RenderOutput {
     doc_to_render_with(doc_text, &TransformOptions::default())
 }
 
-/// Like [`doc_to_render`] but with explicit [`TransformOptions`] — e.g. a
-/// caret position so the translator panel (P3 #10) it falls inside expands.
+/// Like [`doc_to_render`] but with explicit [`TransformOptions`] —
+/// e.g. a caret position so the translator panel (P3 #10) it falls
+/// inside expands.
 pub fn doc_to_render_with(
     doc_text: &str,
     opts: &TransformOptions,
@@ -55,8 +57,8 @@ pub fn doc_to_render_with(
 }
 
 /// The doc byte range of the special-rendered part (translator panel,
-/// `\prob`/`\model` annotation, `\cite` label, ...) that `pos` sits in,
-/// if any — from the opening marker (or the statement itself, for
+/// `\prob`/`\model` annotation, `\cite` label, ...) that `pos` sits
+/// in, if any — from the opening marker (or the statement itself, for
 /// statements with no marker-delimited body, e.g. a bib-key `\cite`)
 /// through the end of the defining statement. A frontend uses this
 /// both to relayout only when the caret crosses a boundary (entering/
@@ -85,10 +87,11 @@ pub fn active_reveal_span(
     })
 }
 
-/// A laid-out document: the rasterized page plus the glyph index that maps
-/// document byte offsets to caret geometry. Cached by the frontend and only
-/// rebuilt on edit/resize — cursor motion reuses it (foot-style: separate the
-/// expensive content render from the cheap caret overlay).
+/// A laid-out document: the rasterized page plus the glyph index that
+/// maps document byte offsets to caret geometry. Cached by the
+/// frontend and only rebuilt on edit/resize — cursor motion reuses it
+/// (foot-style: separate the expensive content render from the cheap
+/// caret overlay).
 pub struct DocLayout {
     /// The rasterized page (1px == 1pt).
     pub image: RgbaImage,
@@ -100,7 +103,8 @@ pub struct DocLayout {
     pub height: u32,
 }
 
-/// Lay out the world's current document into a Typst [`Frame`] at `width_pt`.
+/// Lay out the world's current document into a Typst [`Frame`] at
+/// `width_pt`.
 fn layout_world(
     world: &MiniWorld,
     width_pt: f64,
@@ -122,13 +126,15 @@ fn rasterize(frame: &Frame) -> Result<RgbaImage, RenderError> {
         return Err(RenderError::TooLarge);
     }
 
-    // CPU (software) rasterizer — no GPU, runs on constrained hardware.
+    // CPU (software) rasterizer — no GPU, runs on constrained
+    // hardware.
     let mut renderer = VelloCpuRenderer::new(w as u16, h as u16);
     typst_imaging::render_frame(frame, &mut renderer);
     renderer.finish().map_err(|_| RenderError::Raster)
 }
 
-/// Lay out and rasterize the world's current document to an RGBA8 image.
+/// Lay out and rasterize the world's current document to an RGBA8
+/// image.
 pub fn render_world(
     world: &MiniWorld,
     width_pt: f64,
@@ -137,9 +143,10 @@ pub fn render_world(
     rasterize(&frame)
 }
 
-/// Lay out a mathed document into a cached [`DocLayout`]: the rasterized page
-/// plus the glyph index for caret positioning. This is the entry point a
-/// frontend rebuilds on edit/resize and then reuses for cursor motion.
+/// Lay out a mathed document into a cached [`DocLayout`]: the
+/// rasterized page plus the glyph index for caret positioning. This
+/// is the entry point a frontend rebuilds on edit/resize and then
+/// reuses for cursor motion.
 pub fn layout_doc(
     doc_text: &str,
     width_pt: f64,
@@ -147,8 +154,9 @@ pub fn layout_doc(
     layout_doc_with(doc_text, width_pt, &TransformOptions::default())
 }
 
-/// Like [`layout_doc`] but with explicit [`TransformOptions`] (e.g. a caret so
-/// the translator panel it sits in expands to show the code).
+/// Like [`layout_doc`] but with explicit [`TransformOptions`] (e.g. a
+/// caret so the translator panel it sits in expands to show the
+/// code).
 pub fn layout_doc_with(
     doc_text: &str,
     width_pt: f64,
@@ -200,28 +208,29 @@ pub fn layout_doc_with(
 /// breaks that assumption on purpose — it's a per-*pair* adjustment,
 /// so the same letter's advance shifts with whatever follows it
 /// (confirmed: `T`'s advance is 9.078pt before `o` but 9.316pt before
-/// `a`) — and visually lets neighboring glyphs' ink overlap past their
-/// nominal cell boundary. So a kerned letter's ink can extend outside
-/// the block caret drawn for it (or the caret can extend into the
-/// next letter), making the letter look visually split/non-uniform
-/// while the caret sits there; moving the caret away just stops
-/// overlaying that region, so the (never actually altered) glyph looks
-/// "recovered". Disabling kerning keeps every glyph's ink inside its
-/// own advance, so the block caret's width reliably matches what it's
-/// drawn over.
+/// `a`) — and visually lets neighboring glyphs' ink overlap past
+/// their nominal cell boundary. So a kerned letter's ink can extend
+/// outside the block caret drawn for it (or the caret can extend into
+/// the next letter), making the letter look visually
+/// split/non-uniform while the caret sits there; moving the caret
+/// away just stops overlaying that region, so the (never actually
+/// altered) glyph looks "recovered". Disabling kerning keeps every
+/// glyph's ink inside its own advance, so the block caret's width
+/// reliably matches what it's drawn over.
 ///
-/// `font: "DejaVu Sans Mono"` (bundled in `typst-assets`, so no system
-/// font lookup): disabling ligatures/kerning above only makes a
-/// *single* glyph's own cell internally consistent — in a
+/// `font: "DejaVu Sans Mono"` (bundled in `typst-assets`, so no
+/// system font lookup): disabling ligatures/kerning above only makes
+/// a *single* glyph's own cell internally consistent — in a
 /// proportional font, "i" and "W" still have very different advances,
 /// so the block caret's width (and the character-grid alignment
 /// between lines) still visibly varies letter to letter. Requested:
-/// caret and its neighboring letters should occupy uniform space "like
-/// in a terminal" — this editor's whole caret/selection/line-band
-/// model is explicitly built foot-style (see module docs across
-/// `app.rs`/`glyphs.rs`), so a true monospace font is the fix that
-/// actually matches that design, not just a per-glyph patch: every
-/// character (not just same-glyph pairs) gets the same advance.
+/// caret and its neighboring letters should occupy uniform space
+/// "like in a terminal" — this editor's whole
+/// caret/selection/line-band model is explicitly built foot-style
+/// (see module docs across `app.rs`/`glyphs.rs`), so a true monospace
+/// font is the fix that actually matches that design, not just a
+/// per-glyph patch: every character (not just same-glyph pairs) gets
+/// the same advance.
 const THEME_PRELUDE: &str = "#set text(fill: white, size: 17pt, \
     font: \"DejaVu Sans Mono\", kerning: false, \
     bottom-edge: \"descender\", ligatures: false)\n";
@@ -259,9 +268,10 @@ pub fn render_markup(
     render_world(&MiniWorld::new(markup), width_pt)
 }
 
-/// Lay out a single block's range into its own cached [`DocLayout`] — the
-/// per-block counterpart to `layout_doc_inner`. No footer (the footer is
-/// a separate, always-last virtual block; see [`layout_footer`]).
+/// Lay out a single block's range into its own cached [`DocLayout`] —
+/// the per-block counterpart to `layout_doc_inner`. No footer (the
+/// footer is a separate, always-last virtual block; see
+/// [`layout_footer`]).
 pub fn layout_block(
     doc_text: &str,
     scan: &mathed_core::markers::MarkerScan,
@@ -315,9 +325,10 @@ pub fn layout_footer(
     })
 }
 
-/// Intersect each reveal range with `block_range`, dropping ranges that
-/// don't overlap at all. Mirrors the Bevy frontend's per-block
-/// `block_reveal` computation in `crates/mathed/src/main.rs::sync_blocks`.
+/// Intersect each reveal range with `block_range`, dropping ranges
+/// that don't overlap at all. Mirrors the Bevy frontend's per-block
+/// `block_reveal` computation in
+/// `crates/mathed/src/main.rs::sync_blocks`.
 pub fn clamp_reveal_to_block(
     reveal: &[std::ops::Range<usize>],
     block_range: &std::ops::Range<usize>,
@@ -332,10 +343,10 @@ pub fn clamp_reveal_to_block(
         .collect()
 }
 
-/// Render an in-progress IME composition string (CJK/composed input) as
-/// underlined text, themed the same as the document (white on the black
-/// page). `text` is escaped so IME input can never be interpreted as
-/// Typst markup.
+/// Render an in-progress IME composition string (CJK/composed input)
+/// as underlined text, themed the same as the document (white on the
+/// black page). `text` is escaped so IME input can never be
+/// interpreted as Typst markup.
 pub fn render_preedit(
     text: &str,
     width_pt: f64,
@@ -370,8 +381,9 @@ pub fn render_doc(
 
 #[cfg(test)]
 mod tests {
-    // clamp_reveal_to_block cases pass single-element `&[Range<usize>]`
-    // slices; clippy's suggestion would change them into `Vec<usize>`.
+    // clamp_reveal_to_block cases pass single-element
+    // `&[Range<usize>]` slices; clippy's suggestion would change
+    // them into `Vec<usize>`.
     #![allow(clippy::single_range_in_vec_init)]
     use super::*;
 
@@ -380,7 +392,8 @@ mod tests {
         let img = render_markup("$x^2 + y^2$", 300.0)
             .expect("render should succeed");
         assert!(img.width > 0 && img.height > 0, "image has size");
-        // At least some pixels must be drawn (non-transparent glyph coverage).
+        // At least some pixels must be drawn (non-transparent glyph
+        // coverage).
         assert!(
             img.data.chunks_exact(4).any(|px| px[3] != 0),
             "expected some non-transparent pixels"
@@ -412,8 +425,8 @@ mod tests {
 
     #[test]
     fn render_preedit_escapes_markup_special_chars() {
-        // Must not panic or be interpreted as Typst code — `#let` would
-        // be a parse/eval error if not escaped.
+        // Must not panic or be interpreted as Typst code — `#let`
+        // would be a parse/eval error if not escaped.
         let img = render_preedit("#let x = 1", 300.0)
             .expect("preedit render should succeed even with Typst-like input");
         assert!(img.width > 0 && img.height > 0);
@@ -429,10 +442,11 @@ mod tests {
     #[test]
     fn last_line_reserves_room_for_descenders() {
         // Reported bug: the last line's descenders (the leg of a "g",
-        // an underscore) didn't render — clipped off the bottom of the
-        // image. Root cause: Typst's default text style measures every
-        // line's box with zero reserved descender space; for all but
-        // the last line that overflow harmlessly bleeds into the next
+        // an underscore) didn't render — clipped off the bottom of
+        // the image. Root cause: Typst's default text style
+        // measures every line's box with zero reserved
+        // descender space; for all but the last line that
+        // overflow harmlessly bleeds into the next
         // line's leading, but the last line has no frame below it to
         // bleed into, and the raster canvas is sized exactly to the
         // frame's reported height with no margin. Fixed via
@@ -502,13 +516,14 @@ mod tests {
 
     #[test]
     fn kerning_does_not_make_a_letters_advance_context_dependent() {
-        // Reported bug (follow-on to the ligature-caret fix): with the
-        // caret on/near a letter, the letter's rendering looked
-        // non-uniform, recovering once the caret moved away. Root
-        // cause: the block caret's width is one glyph's own `advance`,
-        // on the assumption a letter's ink stays inside its own
-        // advance-width cell. Kerning breaks that on purpose — a
-        // per-*pair* adjustment, so the same letter's advance shifts
+        // Reported bug (follow-on to the ligature-caret fix): with
+        // the caret on/near a letter, the letter's rendering
+        // looked non-uniform, recovering once the caret moved
+        // away. Root cause: the block caret's width is one
+        // glyph's own `advance`, on the assumption a letter's
+        // ink stays inside its own advance-width cell.
+        // Kerning breaks that on purpose — a per-*pair*
+        // adjustment, so the same letter's advance shifts
         // with whatever follows it — letting neighboring ink overlap
         // past its nominal cell edge. Confirmed before the fix: "T"'s
         // advance was 9.078pt before "o" but 9.316pt before "a".
@@ -536,10 +551,11 @@ mod tests {
         // "W" still have very different advances, so the caret's
         // width (and character-grid alignment across lines) still
         // visibly varies letter to letter. Fixed by setting
-        // `THEME_PRELUDE`'s font to the bundled monospace "DejaVu Sans
-        // Mono", matching this editor's foot-style (terminal-like)
-        // caret/line-band design. Verified across a mix of narrow,
-        // wide, punctuation and space characters.
+        // `THEME_PRELUDE`'s font to the bundled monospace "DejaVu
+        // Sans Mono", matching this editor's foot-style
+        // (terminal-like) caret/line-band design. Verified
+        // across a mix of narrow, wide, punctuation and space
+        // characters.
         let doc = "iWmT.,1 gj";
         let layout = layout_doc(doc, 400.0).expect("layout");
         let advances: Vec<f32> =
@@ -668,7 +684,8 @@ mod tests {
 
     #[test]
     fn active_reveal_span_covers_non_translator_segments() {
-        // A `\prob` segment: caret inside the body ("vacuum") is over it.
+        // A `\prob` segment: caret inside the body ("vacuum") is over
+        // it.
         let doc = "#1 vacuum #2 \\prob(#1,#2, translator: \"ev\")";
         let body_pos = doc.find("vacuum").unwrap() + 2;
         assert!(active_reveal_span(doc, body_pos).is_some());
@@ -696,7 +713,8 @@ mod tests {
             !layout.glyphs.entries.is_empty(),
             "glyph index should have positioned glyphs"
         );
-        // Caret at the start sits at/above the left edge of the first glyph.
+        // Caret at the start sits at/above the left edge of the first
+        // glyph.
         let start = layout
             .glyphs
             .caret_for_byte(0)
@@ -717,8 +735,9 @@ mod tests {
 
     #[test]
     fn inline_annotation_lays_out() {
-        // A coloured inline annotation (as the kernel bridge produces) is
-        // valid Typst and renders after the prob body without error.
+        // A coloured inline annotation (as the kernel bridge
+        // produces) is valid Typst and renders after the prob
+        // body without error.
         use mathed_core::PropKind;
         use mathed_core::markers::{resolve_segments, scan};
         use std::collections::HashMap;
@@ -758,16 +777,17 @@ mod tests {
 
     #[test]
     fn band_for_byte_distinguishes_lines() {
-        // Long enough text (no explicit newlines) to wrap onto multiple
-        // visual lines purely from word-wrap at a narrow width.
+        // Long enough text (no explicit newlines) to wrap onto
+        // multiple visual lines purely from word-wrap at a
+        // narrow width.
         let text = "the quick brown fox jumps over the lazy dog \
                     and then keeps running through the wide green field";
         let layout =
             layout_doc(text, 200.0).expect("layout should succeed");
         let bands = layout.glyphs.bands.len();
         assert!(bands >= 2, "expected at least 2 bands, got {bands}");
-        // Byte 0 is on the top band; a byte well into the text should be on
-        // a later band once the content wraps.
+        // Byte 0 is on the top band; a byte well into the text should
+        // be on a later band once the content wraps.
         let top_band = layout
             .glyphs
             .band_for_byte(0)
@@ -793,9 +813,9 @@ mod tests {
      {
         // Typst collapses the trailing space that causes a soft wrap
         // to zero advance (correct — no visible width at the end of a
-        // line). Without a fallback, that gives the caret zero *drawn*
-        // width there, and makes the byte unclickable (an empty
-        // [x, x+0) hit-test range).
+        // line). Without a fallback, that gives the caret zero
+        // *drawn* width there, and makes the byte unclickable
+        // (an empty [x, x+0) hit-test range).
         let text = "the quick brown fox jumps over the lazy dog and \
                      then keeps running";
         let layout = layout_doc(text, 150.0).expect("layout");
@@ -901,8 +921,9 @@ mod tests {
 
     #[test]
     fn hard_newline_produces_a_new_band() {
-        // A single Enter press must move to a genuinely new visual line
-        // (not collapse to a space, as bare Typst markup would).
+        // A single Enter press must move to a genuinely new visual
+        // line (not collapse to a space, as bare Typst markup
+        // would).
         let layout = layout_doc("one\ntwo", 400.0)
             .expect("layout should succeed");
         assert_eq!(layout.glyphs.bands.len(), 2);
@@ -928,8 +949,8 @@ mod tests {
                 "byte {b} should have collapsed away, no entry expected"
             );
         }
-        // Touched: every space in the run gets its own real, reachable
-        // glyph.
+        // Touched: every space in the run gets its own real,
+        // reachable glyph.
         let opts = TransformOptions {
             reveal: std::iter::once(5..5).collect(),
             ..Default::default()
@@ -950,8 +971,9 @@ mod tests {
 
     #[test]
     fn blank_line_has_its_own_reachable_band() {
-        // A blank line (from pressing Enter twice) must still get a band
-        // — otherwise up/down-arrow navigation and clicks skip over it.
+        // A blank line (from pressing Enter twice) must still get a
+        // band — otherwise up/down-arrow navigation and
+        // clicks skip over it.
         let layout = layout_doc("a\n\nb", 400.0)
             .expect("layout should succeed");
         assert_eq!(
@@ -967,8 +989,8 @@ mod tests {
             blank_band, 1,
             "blank line should be the middle band"
         );
-        // Clicking in the middle of the blank band's vertical space must
-        // resolve back to its doc byte (2).
+        // Clicking in the middle of the blank band's vertical space
+        // must resolve back to its doc byte (2).
         let band = &layout.glyphs.bands[1];
         let mid_y = (band.top + band.bottom) * 0.5;
         let (byte, _) = layout
@@ -1118,11 +1140,13 @@ mod tests {
 
     #[test]
     fn rects_for_range_covers_selected_bytes() {
-        // The selection highlight geometry (`rects_for_range`) must return
-        // at least one rect that horizontally spans the selected bytes'
-        // glyph advances. P9.14 (mathed_mini Step 4) needs this for the
-        // drag-to-select path: a single-band selection produces one rect,
-        // a multi-line selection produces one rect per band.
+        // The selection highlight geometry (`rects_for_range`) must
+        // return at least one rect that horizontally spans
+        // the selected bytes' glyph advances. P9.14
+        // (mathed_mini Step 4) needs this for the
+        // drag-to-select path: a single-band selection produces one
+        // rect, a multi-line selection produces one rect per
+        // band.
         let layout = layout_doc("hello world", 400.0)
             .expect("layout should succeed");
         let rects = layout.glyphs.rects_for_range(0..5);
@@ -1135,8 +1159,9 @@ mod tests {
             r.x0 < r.x1,
             "selection rect must have positive width"
         );
-        // The rect's y-band must match the glyph index's first band — the
-        // selected bytes are all on line 0 in a single-line document.
+        // The rect's y-band must match the glyph index's first band —
+        // the selected bytes are all on line 0 in a
+        // single-line document.
         let band = &layout.glyphs.bands[0];
         assert!(
             (r.y0 - band.top).abs() < 0.01
@@ -1208,8 +1233,9 @@ mod tests {
 
     #[test]
     fn rects_for_range_empty_outside_document() {
-        // A range past the document end produces no rects (the rendering
-        // code can call this with a stale selection without panicking).
+        // A range past the document end produces no rects (the
+        // rendering code can call this with a stale selection
+        // without panicking).
         let layout =
             layout_doc("hi", 400.0).expect("layout should succeed");
         let rects = layout.glyphs.rects_for_range(100..200);

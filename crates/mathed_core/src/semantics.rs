@@ -10,23 +10,26 @@ pub struct SemanticIndex {
     /// Kernel statements (`\model`, `\prior`, `\event`, `\prob`)
     /// collected for the probability kernel bridge (Stage 15).
     pub kernel_statements: Vec<KernelStatement>,
-    /// User-defined translators (`\translator`, P3 #10) keyed by name.
-    /// An unnamed translator is stored under `""` (block-local default).
-    /// Last-wins on name collision (a later `\translator` shadows an
-    /// earlier one with the same name).
+    /// User-defined translators (`\translator`, P3 #10) keyed by
+    /// name. An unnamed translator is stored under `""`
+    /// (block-local default). Last-wins on name collision (a
+    /// later `\translator` shadows an earlier one with the same
+    /// name).
     pub translators: HashMap<String, TranslatorDef>,
     /// `\bibliography`/`\cite` statements (P11.21) collected for the
-    /// `mathed_biblio` citation bridge, mirroring `kernel_statements` but
-    /// routed to the bibliography backend instead of `prob_kernel`.
+    /// `mathed_biblio` citation bridge, mirroring
+    /// `kernel_statements` but routed to the bibliography
+    /// backend instead of `prob_kernel`.
     pub biblio_statements: Vec<BiblioStatement>,
 }
 
 /// A `\translator(#3,#4, name: "harmonic")` segment (P3 #10).
 ///
-/// The body is Typst source that defines a `#let translate(body) = {...}`
-/// binding returning a `TermSpec[]` JSON string (or `EventPredicate`
-/// JSON for event/prob segments). The dispatcher evaluates it via
-/// typst-eval and calls `translate` with the math source string.
+/// The body is Typst source that defines a `#let translate(body) =
+/// {...}` binding returning a `TermSpec[]` JSON string (or
+/// `EventPredicate` JSON for event/prob segments). The dispatcher
+/// evaluates it via typst-eval and calls `translate` with the math
+/// source string.
 #[derive(Debug, Clone)]
 pub struct TranslatorDef {
     pub name: String,
@@ -62,13 +65,14 @@ pub struct Occurrence {
 ///   `\prob(#1,#2,heads)` → `Some("heads")`.
 /// - `body_text` — trimmed doc text between the two marker refs; this
 ///   is the payload (model spec, event predicate, etc.).
-/// - `translator` — optional translator name (from a `translator: "name"`
-///   named extra-arg); `None` means the dispatcher falls back to the
-///   builtin default translator (P3 #10).
-/// - `model_name` — optional model binding for `\prob`/`\event`/`\prior`/
-///   `\solver` statements (from a `model: "name"` named extra-arg, P3 #10
-///   follow-up). When present, the bridge binds the statement to the
-///   `\model` with that `name` instead of its nearest preceding model.
+/// - `translator` — optional translator name (from a `translator:
+///   "name"` named extra-arg); `None` means the dispatcher falls back
+///   to the builtin default translator (P3 #10).
+/// - `model_name` — optional model binding for
+///   `\prob`/`\event`/`\prior`/ `\solver` statements (from a `model:
+///   "name"` named extra-arg, P3 #10 follow-up). When present, the
+///   bridge binds the statement to the `\model` with that `name`
+///   instead of its nearest preceding model.
 /// - `span` — doc byte range of the body text (exclusive of markers).
 #[derive(Debug, Clone)]
 pub struct KernelStatement {
@@ -88,18 +92,22 @@ pub struct KernelStatement {
 /// - `kind` — `Bibliography` (a library source segment) or `Cite` (an
 ///   in-text citation marker).
 /// - `name` — for `Bibliography`, the label used by `\cite`'s `bib:`
-///   binding (first bare literal extra-arg, mirrors `\prob`'s `name`).
-///   `None` for `Cite`.
-/// - `keys` — for `Cite`, every bare (non-`key: value`) literal extra-arg,
-///   in source order — the cited entry keys. Empty for `Bibliography`.
-/// - `format` — `Bibliography` only: `format: "yaml"|"bibtex"` (default
-///   `"yaml"` at the consuming side).
-/// - `style` — CSL style name (`style: "apa"`, ...); may appear on either
-///   kind, with `Cite`'s value overriding the bound `Bibliography`'s.
-/// - `bib_name` — `Cite` only: which `\bibliography` to resolve `keys`
-///   against (`bib: "name"`); `None` binds to the nearest preceding one.
+///   binding (first bare literal extra-arg, mirrors `\prob`'s
+///   `name`). `None` for `Cite`.
+/// - `keys` — for `Cite`, every bare (non-`key: value`) literal
+///   extra-arg, in source order — the cited entry keys. Empty for
+///   `Bibliography`.
+/// - `format` — `Bibliography` only: `format: "yaml"|"bibtex"`
+///   (default `"yaml"` at the consuming side).
+/// - `style` — CSL style name (`style: "apa"`, ...); may appear on
+///   either kind, with `Cite`'s value overriding the bound
+///   `Bibliography`'s.
+/// - `bib_name` — `Cite` only: which `\bibliography` to resolve
+///   `keys` against (`bib: "name"`); `None` binds to the nearest
+///   preceding one.
 /// - `body_text` — trimmed doc text between the two marker refs (the
-///   library source for `Bibliography`; usually empty/inert for `Cite`).
+///   library source for `Bibliography`; usually empty/inert for
+///   `Cite`).
 /// - `span` — doc byte range of the body text (exclusive of markers).
 #[derive(Debug, Clone)]
 pub struct BiblioStatement {
@@ -190,7 +198,8 @@ impl SemanticIndex {
 
         for occ in occurrences.iter_mut() {
             let mut resolved = None;
-            // 1. If occurrence is inside its own def's span, it resolves to that def.
+            // 1. If occurrence is inside its own def's span, it
+            //    resolves to that def.
             for (i, def) in defs.iter().enumerate() {
                 if def.span.contains(&occ.range.start)
                     && def.span.contains(&occ.range.end)
@@ -199,7 +208,8 @@ impl SemanticIndex {
                     break;
                 }
             }
-            // 2. Otherwise, look up the name in the map (last def wins).
+            // 2. Otherwise, look up the name in the map (last def
+            //    wins).
             if resolved.is_none()
                 && let Some(&def_idx) = name_to_def_idx.get(&occ.name)
             {
@@ -226,8 +236,9 @@ impl SemanticIndex {
                 find_block_for_doc_pos(per_block_renders, span.start);
 
             if seg.kind == PropKind::Translator {
-                // `\translator(#3,#4, name: "harmonic")` — collect into
-                // the translators map. Unnamed → key "" (block-local
+                // `\translator(#3,#4, name: "harmonic")` — collect
+                // into the translators map. Unnamed →
+                // key "" (block-local
                 // default). Last-wins on collision.
                 let name =
                     extract_named_string(&seg.extra_args, "name")
@@ -286,7 +297,8 @@ impl SemanticIndex {
             });
         }
 
-        // --- Collect bibliography statements (Bibliography/Cite, P11.21). ---
+        // --- Collect bibliography statements (Bibliography/Cite,
+        // P11.21). ---
         let mut biblio_statements = Vec::new();
         for seg in segments {
             if !seg.kind.is_biblio() {
@@ -361,11 +373,12 @@ impl SemanticIndex {
         self.biblio_statements = biblio_statements;
     }
 
-    /// Scan the `\bibliography`/`\cite` statements in `doc_text` directly,
-    /// without the full `SemanticIndex` (per-block render) pipeline. This is
-    /// the lightweight path the CPU frontend (`mathed_mini`) uses to hand
-    /// `BiblioStatement`s to `mathed_biblio::resolve_citations`. `block` is
-    /// always 0 (the citation bridge does not use it).
+    /// Scan the `\bibliography`/`\cite` statements in `doc_text`
+    /// directly, without the full `SemanticIndex` (per-block
+    /// render) pipeline. This is the lightweight path the CPU
+    /// frontend (`mathed_mini`) uses to hand `BiblioStatement`s
+    /// to `mathed_biblio::resolve_citations`. `block` is always 0
+    /// (the citation bridge does not use it).
     pub fn scan_biblio_statements(
         doc_text: &str,
     ) -> Vec<BiblioStatement> {
@@ -500,9 +513,9 @@ fn find_block_for_doc_pos(
 
 /// Extract a named string argument `key: "value"` from a statement's
 /// extra args. Handles `key: "value"`, `key:"value"`, and unquoted
-/// `key: value`. Returns the first match, or `None` if absent. Used for
-/// the `translator:` arg on `\model`/`\event`/`\prob` and the `name:`
-/// arg on `\translator` (P3 #10).
+/// `key: value`. Returns the first match, or `None` if absent. Used
+/// for the `translator:` arg on `\model`/`\event`/`\prob` and the
+/// `name:` arg on `\translator` (P3 #10).
 fn extract_named_string(args: &[Arg], key: &str) -> Option<String> {
     for arg in args {
         let Arg::Literal { text, .. } = arg else {
@@ -711,7 +724,8 @@ mod tests {
     #[test]
     fn prob_name_not_confused_with_translator_arg() {
         // `\prob(#1,#2,heads, translator: "ho")` — the bare literal
-        // `heads` is the name; the named arg `translator:` is separate.
+        // `heads` is the name; the named arg `translator:` is
+        // separate.
         let doc =
             "#1 n(0) == 1 #2 \\prob(#1,#2,heads, translator: \"ho\")";
         let idx = build_index_for(doc);
@@ -837,8 +851,9 @@ mod tests {
 
     #[test]
     fn scan_biblio_statements_matches_index_pipeline() {
-        // The lightweight CPU-frontend path must yield the same statements the
-        // full SemanticIndex pipeline collects (it feeds mathed_biblio).
+        // The lightweight CPU-frontend path must yield the same
+        // statements the full SemanticIndex pipeline collects
+        // (it feeds mathed_biblio).
         let doc = "#1 a #2 \\model(#1,#2)\n\n\
                    #3 x #4 \\bibliography(#3,#4, refs, format: \"yaml\", style: \"apa\")\n\n\
                    #5 y #6 \\cite(#5,#6, \"crazy-rich\", bib: \"refs\")";

@@ -2,15 +2,16 @@
 //!
 //! `export_delta()` produces a compact binary patch of all operations
 //! since the last export. `import_delta()` applies a remote patch.
-//! Two `MathDoc` instances exchanging deltas converge to identical text.
+//! Two `MathDoc` instances exchanging deltas converge to identical
+//! text.
 //!
 //! Live presence (who is here, where their caret is) rides the same
-//! transport: [`PresenceStore`] is backed by Loro's ephemeral store, so
-//! presence is never written into the document history and never
+//! transport: [`PresenceStore`] is backed by Loro's ephemeral store,
+//! so presence is never written into the document history and never
 //! persisted — it is gossip, exactly like Lody's `presence` /
-//! `session-live-status` modules. Peers exchange `encode()`d blobs over
-//! the same channel that carries deltas, and a peer whose heartbeat
-//! lapses past the timeout is pruned by `remove_outdated`.
+//! `session-live-status` modules. Peers exchange `encode()`d blobs
+//! over the same channel that carries deltas, and a peer whose
+//! heartbeat lapses past the timeout is pruned by `remove_outdated`.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -20,8 +21,8 @@ use loro::awareness::EphemeralStore;
 use loro::{ExportMode, LoroMapValue, LoroValue};
 
 impl MathDoc {
-    /// Export all operations since the last export as a compact binary
-    /// patch suitable for network transport.
+    /// Export all operations since the last export as a compact
+    /// binary patch suitable for network transport.
     pub fn export_delta(&self) -> Vec<u8> {
         self.doc
             .export(ExportMode::all_updates())
@@ -49,8 +50,8 @@ pub struct Presence {
     pub peer: String,
     /// Display name, as published by the peer.
     pub name: String,
-    /// Caret byte offset into the document, or `None` when the peer is
-    /// not currently editing the document.
+    /// Caret byte offset into the document, or `None` when the peer
+    /// is not currently editing the document.
     pub cursor: Option<usize>,
     /// Millisecond epoch of the peer's last heartbeat.
     pub last_seen_ms: i64,
@@ -58,11 +59,12 @@ pub struct Presence {
 
 /// Live presence channel for a shared document (C13).
 ///
-/// One `PresenceStore` per peer per document. `set_name` / `set_cursor`
-/// publish a heartbeat; `encode` / `encode_all` produce the transport
-/// payload; `apply` merges a remote payload; `remove_outdated` prunes
-/// peers whose heartbeat lapsed past `timeout_ms`, and `peers` skips
-/// them even before a prune pass runs.
+/// One `PresenceStore` per peer per document. `set_name` /
+/// `set_cursor` publish a heartbeat; `encode` / `encode_all` produce
+/// the transport payload; `apply` merges a remote payload;
+/// `remove_outdated` prunes peers whose heartbeat lapsed past
+/// `timeout_ms`, and `peers` skips them even before a prune pass
+/// runs.
 ///
 /// Nothing here touches the document's CRDT history: presence is
 /// ephemeral by construction and disappears when its peers stop
@@ -77,9 +79,10 @@ pub struct PresenceStore {
     /// Millisecond of the last publish, reserved so every publish is
     /// strictly newer than the previous one (see [`Self::publish`]).
     last_set_ms: AtomicI64,
-    /// The inactivity timeout, kept here so `peers` can filter expired
-    /// entries without a `remove_outdated` pass having run (Loro keeps
-    /// expired entries in `get_all_states` until they are purged).
+    /// The inactivity timeout, kept here so `peers` can filter
+    /// expired entries without a `remove_outdated` pass having
+    /// run (Loro keeps expired entries in `get_all_states` until
+    /// they are purged).
     timeout_ms: i64,
 }
 
@@ -111,9 +114,9 @@ const KEY_SEEN: &str = "seen";
 impl PresenceStore {
     /// Create a presence channel for `peer`, displayed as `name`.
     ///
-    /// `timeout_ms` is the inactivity timeout: a peer that has not been
-    /// heard from within this window is skipped by `encode` and pruned
-    /// by `remove_outdated`.
+    /// `timeout_ms` is the inactivity timeout: a peer that has not
+    /// been heard from within this window is skipped by `encode`
+    /// and pruned by `remove_outdated`.
     pub fn new(
         peer: impl Into<String>,
         name: impl Into<String>,
@@ -140,12 +143,12 @@ impl PresenceStore {
     ///
     /// Loro's ephemeral store dedups on `apply` by the publisher's
     /// millisecond timestamp, so two publishes within the same
-    /// millisecond would carry identical timestamps and the second would
-    /// be silently dropped by a remote peer. To keep every publish
-    /// strictly newer than the last, the next free millisecond is
-    /// reserved before the store is updated (a brief busy-wait, bounded
-    /// by the millisecond granularity, and only when two publishes
-    /// collide).
+    /// millisecond would carry identical timestamps and the second
+    /// would be silently dropped by a remote peer. To keep every
+    /// publish strictly newer than the last, the next free
+    /// millisecond is reserved before the store is updated (a
+    /// brief busy-wait, bounded by the millisecond granularity,
+    /// and only when two publishes collide).
     fn publish(&self) {
         let local =
             self.local.read().unwrap_or_else(|e| e.into_inner());
@@ -202,8 +205,8 @@ impl PresenceStore {
         self.publish();
     }
 
-    /// Set this peer's caret position and republish. `None` signals the
-    /// peer left the document.
+    /// Set this peer's caret position and republish. `None` signals
+    /// the peer left the document.
     pub fn set_cursor(&self, cursor: Option<usize>) {
         self.local
             .write()
@@ -234,12 +237,13 @@ impl PresenceStore {
 
     /// The live peer list, self excluded, sorted by peer id.
     ///
-    /// Loro's `get_all_states` returns expired entries until an explicit
-    /// `remove_outdated` purges them (in Rust nothing prunes
-    /// automatically), so the view filters on the published heartbeat
-    /// itself: a peer not heard from within the timeout is invisible
-    /// here without requiring a prune pass to have run. An entry with
-    /// no heartbeat field at all counts as long dead.
+    /// Loro's `get_all_states` returns expired entries until an
+    /// explicit `remove_outdated` purges them (in Rust nothing
+    /// prunes automatically), so the view filters on the
+    /// published heartbeat itself: a peer not heard from within
+    /// the timeout is invisible here without requiring a prune
+    /// pass to have run. An entry with no heartbeat field at all
+    /// counts as long dead.
     pub fn peers(&self) -> Vec<Presence> {
         let mut out: Vec<Presence> = self
             .store
@@ -255,7 +259,8 @@ impl PresenceStore {
 
     /// Whether a heartbeat from `last_seen_ms` has lapsed past the
     /// timeout, mirroring Loro's `now - timestamp > timeout` expiry
-    /// semantics on the same millisecond clock the heartbeat publishes.
+    /// semantics on the same millisecond clock the heartbeat
+    /// publishes.
     fn expired(&self, last_seen_ms: i64) -> bool {
         now_ms() - last_seen_ms > self.timeout_ms
     }

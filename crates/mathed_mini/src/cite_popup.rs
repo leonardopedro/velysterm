@@ -9,8 +9,8 @@
 //!
 //! The box is purely a render-time overlay: the base document is not
 //! re-laid-out when the popup stack changes. The cache from
-//! [`crate::render::DocLayout`] is reused, and the box is drawn on top
-//! of the blitted image with `softbuffer`-style CPU pixel writes.
+//! [`crate::render::DocLayout`] is reused, and the box is drawn on
+//! top of the blitted image with `softbuffer`-style CPU pixel writes.
 
 use mathed_core::markers::{
     ReferenceEntry, ReferenceKind, scan, scan_references,
@@ -79,13 +79,15 @@ pub enum PopupBody {
         /// labels spliced, ready for re-rendering as a sub-doc).
         body_markup: String,
     },
-    /// Placeholder for `\cite(key1, key2, ...)`; the `rendered` text (from
-    /// `mathed_biblio::resolve_citations`) is preferred when present.
+    /// Placeholder for `\cite(key1, key2, ...)`; the `rendered` text
+    /// (from `mathed_biblio::resolve_citations`) is preferred
+    /// when present.
     Bibliography {
         keys: Vec<String>,
-        /// The resolved in-text citation (e.g. `(Kwan 2014)`) when the
-        /// document has a `\bibliography` binding and `mathed_biblio` can
-        /// render it; `None` keeps the key placeholder.
+        /// The resolved in-text citation (e.g. `(Kwan 2014)`) when
+        /// the document has a `\bibliography` binding and
+        /// `mathed_biblio` can render it; `None` keeps the
+        /// key placeholder.
         rendered: Option<String>,
     },
 }
@@ -161,10 +163,11 @@ pub fn resolve_popup_body(
     None
 }
 
-/// Resolve a `\cite(key1, key2, ...)` to its rendered in-text citation via
-/// `mathed_biblio::resolve_citations`. Returns `None` when the document has no
-/// `\bibliography` binding for these keys, or the citation cannot be rendered
-/// (the caller then falls back to the key placeholder).
+/// Resolve a `\cite(key1, key2, ...)` to its rendered in-text
+/// citation via `mathed_biblio::resolve_citations`. Returns `None`
+/// when the document has no `\bibliography` binding for these keys,
+/// or the citation cannot be rendered (the caller then falls back to
+/// the key placeholder).
 fn resolve_bib_rendered(
     doc_text: &str,
     keys: &[String],
@@ -176,9 +179,9 @@ fn resolve_bib_rendered(
         return None;
     }
     let resolved = mathed_biblio::resolve_citations(&statements);
-    // `scan_references` (the popup's key source) keeps quotes and `bib:` args;
-    // normalize to the clean key set `scan_biblio_statements` produces so the
-    // two agree.
+    // `scan_references` (the popup's key source) keeps quotes and
+    // `bib:` args; normalize to the clean key set
+    // `scan_biblio_statements` produces so the two agree.
     let wanted = normalize_cite_keys(keys);
     for stmt in &statements {
         if stmt.kind != mathed_core::markers::PropKind::Cite {
@@ -194,8 +197,9 @@ fn resolve_bib_rendered(
     None
 }
 
-/// Strip quotes and drop named (`name: value`) args from a raw key list, the
-/// same normalization `mathed_core` applies when it builds a `BiblioStatement`.
+/// Strip quotes and drop named (`name: value`) args from a raw key
+/// list, the same normalization `mathed_core` applies when it builds
+/// a `BiblioStatement`.
 fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
     keys.iter()
         .filter_map(|k| {
@@ -216,7 +220,8 @@ fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Resolve a cite's `[N]` label position from the cached [`DocLayout`].
+/// Resolve a cite's `[N]` label position from the cached
+/// [`DocLayout`].
 ///
 /// `target` is the auto-assigned number `N` of the cite to find.
 /// Returns `None` when the cite or its glyph is not found (e.g. the
@@ -259,8 +264,9 @@ pub fn render_popup_body(
             body_markup.clone()
         }
         PopupBody::Bibliography { keys, rendered } => {
-            // Prefer the resolved citation (mathed_biblio); fall back to the
-            // key placeholder when the document has no bibliography binding.
+            // Prefer the resolved citation (mathed_biblio); fall back
+            // to the key placeholder when the document
+            // has no bibliography binding.
             match rendered {
                 Some(text) if !text.is_empty() => {
                     format!("```\n{text}\n```")
@@ -340,7 +346,8 @@ mod tests {
 
     #[test]
     fn resolve_popup_body_bib_ref() {
-        // No `\bibliography` binding → the placeholder is kept, `rendered` is None.
+        // No `\bibliography` binding → the placeholder is kept,
+        // `rendered` is None.
         let doc = "\\cite(authorA89, authorB94)";
         let body =
             resolve_popup_body(doc, 1).expect("cite [1] exists");
@@ -364,8 +371,9 @@ mod tests {
 
     #[test]
     fn resolve_popup_body_bib_ref_renders_real_citation() {
-        // A `\bibliography` binding + matching key → the popup body carries the
-        // resolved citation text (mathed_biblio integration), not the placeholder.
+        // A `\bibliography` binding + matching key → the popup body
+        // carries the resolved citation text (mathed_biblio
+        // integration), not the placeholder.
         let doc = "#1 crazy-rich:\n\
                    \x20   type: Book\n\
                    \x20   title: Crazy Rich Asians\n\
@@ -378,8 +386,9 @@ mod tests {
             resolve_popup_body(doc, 1).expect("cite [1] exists");
         match body {
             PopupBody::Bibliography { keys, rendered } => {
-                // The popup's `keys` are the raw scan form (quotes + `bib:` arg
-                // retained); the meaningful assertion is that the citation text
+                // The popup's `keys` are the raw scan form (quotes +
+                // `bib:` arg retained); the
+                // meaningful assertion is that the citation text
                 // resolves through mathed_biblio.
                 assert!(!keys.is_empty());
                 let text =

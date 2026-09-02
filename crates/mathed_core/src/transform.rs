@@ -4,16 +4,17 @@
 //! - **Hide** marker and property-statement tokens (plus one trailing
 //!   space, as the terminal example does) unless the caret/selection
 //!   intersects them or show-hidden is on.
-//! - **Reveal** non-hidden tokens *literally*: every `#` and `\` inside a
-//!   revealed token gets a Typst escape backslash so the raw token text
-//!   is displayed instead of being executed as Typst code.
+//! - **Reveal** non-hidden tokens *literally*: every `#` and `\`
+//!   inside a revealed token gets a Typst escape backslash so the raw
+//!   token text is displayed instead of being executed as Typst code.
 //! - **Apply visual segment properties** (bold/italic/underline) by
 //!   wrapping each uniform run of visible text in `#strong[..]` /
-//!   `#emph[..]` / `#underline[..]`. Runs inside math (`$..$`) are left
-//!   unwrapped in v1 (Typst math styling needs different wrappers).
-//! - Produce an [`OffsetMap`] of verbatim-copied spans so byte positions
-//!   convert between doc and render coordinates in both directions
-//!   (caret placement, click hit-testing).
+//!   `#emph[..]` / `#underline[..]`. Runs inside math (`$..$`) are
+//!   left unwrapped in v1 (Typst math styling needs different
+//!   wrappers).
+//! - Produce an [`OffsetMap`] of verbatim-copied spans so byte
+//!   positions convert between doc and render coordinates in both
+//!   directions (caret placement, click hit-testing).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -39,8 +40,8 @@ pub struct OffsetMap {
 impl OffsetMap {
     /// Map a doc byte position to a render position. Positions inside
     /// hidden regions snap to the surrounding rendered byte; on exact
-    /// span boundaries the *later* span wins, so a caret placed after a
-    /// hidden token lands after it visually too.
+    /// span boundaries the *later* span wins, so a caret placed after
+    /// a hidden token lands after it visually too.
     pub fn doc_to_render(&self, pos: usize) -> usize {
         Self::lookup(
             &self.spans,
@@ -84,43 +85,51 @@ impl OffsetMap {
 
 #[derive(Debug, Default, Clone)]
 pub struct TransformOptions {
-    /// Doc byte ranges whose tokens must stay visible (caret, selection).
-    /// An empty range (caret) reveals tokens it touches. Applies to
-    /// **every** token kind, including markers.
+    /// Doc byte ranges whose tokens must stay visible (caret,
+    /// selection). An empty range (caret) reveals tokens it
+    /// touches. Applies to **every** token kind, including
+    /// markers.
     pub reveal: Vec<Range<usize>>,
-    /// Wide ranges (from `active_reveal_span`) that keep a **statement**
-    /// token or **translator span**'s own content expanded — e.g. the
-    /// caret sitting anywhere inside a `\translator(...)`'s multi-line
-    /// code, not just right at its edge. Deliberately does *not* reveal
-    /// the marker tokens (`#3`/`#4`, ...) that delimit the segment: those
+    /// Wide ranges (from `active_reveal_span`) that keep a
+    /// **statement** token or **translator span**'s own content
+    /// expanded — e.g. the caret sitting anywhere inside a
+    /// `\translator(...)`'s multi-line code, not just right at
+    /// its edge. Deliberately does *not* reveal the marker
+    /// tokens (`#3`/`#4`, ...) that delimit the segment: those
     /// stay collapsed regardless of where the caret sits inside the
-    /// expanded block, unless `show_hidden` is on or `reveal` touches
-    /// that specific marker directly. Without this split, being anywhere
-    /// inside a revealed translator's code would leak its flanking
-    /// markers as literal `\#3 ... \#4` text.
+    /// expanded block, unless `show_hidden` is on or `reveal`
+    /// touches that specific marker directly. Without this
+    /// split, being anywhere inside a revealed translator's code
+    /// would leak its flanking markers as literal `\#3 ... \#4`
+    /// text.
     pub expand: Vec<Range<usize>>,
     /// Reveal everything (the Ctrl+Shift "show hidden" chord).
     pub show_hidden: bool,
-    /// Inline annotations keyed by a segment's body **start** offset; the
-    /// associated string (raw Typst markup) is spliced into the render text
-    /// immediately after that segment's body. Used to show a `\prob`'s
-    /// computed value next to it (P3 #11). The transform stays kernel-
-    /// agnostic — it just splices whatever markup the caller supplies.
+    /// Inline annotations keyed by a segment's body **start**
+    /// offset; the associated string (raw Typst markup) is
+    /// spliced into the render text immediately after that
+    /// segment's body. Used to show a `\prob`'s computed value
+    /// next to it (P3 #11). The transform stays kernel- agnostic
+    /// — it just splices whatever markup the caller supplies.
     pub annotations: HashMap<usize, String>,
-    /// Translator error messages keyed by the translator segment's body
-    /// **start** offset (P5 #28). When present, the expanded translator panel
-    /// shows the error message in red below the code — so a failed translator
-    /// is visible in the panel itself, not just as a red `code_name` on the
-    /// dependent `\prob`/`\model`. The transform stays kernel-agnostic: the
-    /// caller (KernelBridge) populates this from dispatch errors.
+    /// Translator error messages keyed by the translator segment's
+    /// body **start** offset (P5 #28). When present, the
+    /// expanded translator panel shows the error message in red
+    /// below the code — so a failed translator is visible in the
+    /// panel itself, not just as a red `code_name` on the
+    /// dependent `\prob`/`\model`. The transform stays
+    /// kernel-agnostic: the caller (KernelBridge) populates this
+    /// from dispatch errors.
     pub translator_errors: HashMap<usize, String>,
-    /// Cite references (cite_popup_boxes plan, Stage 3). When present, the
-    /// transform replaces each `\cite(...)` token (which is hidden) with
-    /// its visible label `[N]` (doc-ref) or `[N1, N2, ...]` (bib-key).
-    /// `ReferenceEntry::stmt_idx` is the index into `MarkerScan::stmts`,
-    /// so the transform looks up the corresponding `PropertyStmt::range`
-    /// to find the cite token to hide and the byte to splice the label at.
-    /// The label is render-only markup (no `OffsetMap` entry).
+    /// Cite references (cite_popup_boxes plan, Stage 3). When
+    /// present, the transform replaces each `\cite(...)` token
+    /// (which is hidden) with its visible label `[N]` (doc-ref)
+    /// or `[N1, N2, ...]` (bib-key). `ReferenceEntry::stmt_idx`
+    /// is the index into `MarkerScan::stmts`, so the transform
+    /// looks up the corresponding `PropertyStmt::range`
+    /// to find the cite token to hide and the byte to splice the
+    /// label at. The label is render-only markup (no `OffsetMap`
+    /// entry).
     pub references: Vec<crate::markers::ReferenceEntry>,
 }
 
@@ -183,8 +192,8 @@ pub fn to_render_text(
 /// `doc_text[range]` is emitted. Tokens must not straddle `range`
 /// boundaries (the block splitter guarantees this); visual segment
 /// spans are clamped to `range`. `OffsetMap` doc offsets stay
-/// **absolute** (`map.doc_len == doc_text.len()`), so positions outside
-/// `range` clamp to the block's nearest end.
+/// **absolute** (`map.doc_len == doc_text.len()`), so positions
+/// outside `range` clamp to the block's nearest end.
 pub fn to_render_text_range(
     doc_text: &str,
     scan: &MarkerScan,
@@ -192,18 +201,19 @@ pub fn to_render_text_range(
     range: Range<usize>,
     opts: &TransformOptions,
 ) -> RenderOutput {
-    // 0. Hard-newline handling (foot-style: this is a line-based editor,
-    //    not a rich-text document — every '\n' the user types is a real
-    //    line break, never Typst's markup "soft break collapses to a
-    //    space" or "blank line means new paragraph" semantics). Each doc
-    //    '\n' becomes its own one-byte window (below) so it can be
-    //    special-cased into `#linebreak()` instead of being copied
-    //    verbatim. Blank lines (no visible content between two line
-    //    breaks, or before the first / after the last) get an invisible
-    //    NBSP anchor spliced in so the line still has a real glyph a
-    //    `GlyphIndex` band can attach to — otherwise a wholly empty line
-    //    has no glyphs at all and up/down-arrow navigation and click
-    //    hit-testing skip right over it.
+    // 0. Hard-newline handling (foot-style: this is a line-based
+    //    editor, not a rich-text document — every '\n' the user types
+    //    is a real line break, never Typst's markup "soft break
+    //    collapses to a space" or "blank line means new paragraph"
+    //    semantics). Each doc '\n' becomes its own one-byte window
+    //    (below) so it can be special-cased into `#linebreak()`
+    //    instead of being copied verbatim. Blank lines (no visible
+    //    content between two line breaks, or before the first / after
+    //    the last) get an invisible NBSP anchor spliced in so the
+    //    line still has a real glyph a `GlyphIndex` band can attach
+    //    to — otherwise a wholly empty line has no glyphs at all and
+    //    up/down-arrow navigation and click hit-testing skip right
+    //    over it.
     let newline_positions: Vec<usize> = doc_text
         .as_bytes()
         .iter()
@@ -216,12 +226,13 @@ pub fn to_render_text_range(
     let blank_line_anchors = blank_line_anchors(doc_text, &range);
 
     // 0b. Collapsible space runs: like Markdown/Typst's own default
-    // whitespace handling, two or more consecutive spaces the user typed
-    // render as just one — *unless* the caret/selection is touching that
-    // exact run, in which case every space is shown and individually
-    // reachable (so the user can see and edit exactly how many they
-    // typed). Detected here on raw doc text; applied in the emit loop
-    // below via `revealed()`, the same touch predicate markers use.
+    // whitespace handling, two or more consecutive spaces the user
+    // typed render as just one — *unless* the caret/selection is
+    // touching that exact run, in which case every space is shown
+    // and individually reachable (so the user can see and edit
+    // exactly how many they typed). Detected here on raw doc
+    // text; applied in the emit loop below via `revealed()`, the
+    // same touch predicate markers use.
     let space_runs = space_run_ranges(doc_text, &range);
 
     // 1. Token ranges inside `range`, sorted; decide hidden/revealed
@@ -237,17 +248,19 @@ pub fn to_render_text_range(
 
     let touches = |ranges: &[Range<usize>], tok: &Range<usize>| {
         ranges.iter().any(|r| {
-            // Inclusive touch: a caret directly before/after the token
-            // keeps it visible, matching the terminal example.
+            // Inclusive touch: a caret directly before/after the
+            // token keeps it visible, matching the
+            // terminal example.
             r.start <= tok.end && tok.start <= r.end
         })
     };
     let revealed = |tok: &Range<usize>| {
         opts.show_hidden || touches(&opts.reveal, tok)
     };
-    // Statement tokens and translator spans additionally expand when the
-    // caret is anywhere inside their wide `opts.expand` span — markers
-    // never do (see the `expand` field doc comment on `TransformOptions`).
+    // Statement tokens and translator spans additionally expand when
+    // the caret is anywhere inside their wide `opts.expand` span
+    // — markers never do (see the `expand` field doc comment on
+    // `TransformOptions`).
     let expanded = |tok: &Range<usize>| {
         revealed(tok) || touches(&opts.expand, tok)
     };
@@ -295,14 +308,14 @@ pub fn to_render_text_range(
     // document content — but it participates in the exact same
     // hidden/shown/`revealed()` machinery as every other segment kind
     // (markers, `\cite` statements) rather than a bespoke mechanism.
-    // Hidden (collapsed): the span is added to `hidden` like any other
-    // token, and a one-line title is spliced at its start —
+    // Hidden (collapsed): the span is added to `hidden` like any
+    // other token, and a one-line title is spliced at its start —
     // `translator_title_points` below, the same splice-at-position
     // pattern as `annotation_points`/`cite_label_points`. Shown
     // (revealed): the span is added to `shown`, but rendered as a
-    // fenced code block rather than plain escaped text — mirroring how
-    // math content inside `$..$` is specially *rendered* by Typst
-    // itself while still going through the same reveal/hide
+    // fenced code block rather than plain escaped text — mirroring
+    // how math content inside `$..$` is specially *rendered* by
+    // Typst itself while still going through the same reveal/hide
     // *mechanism* as everything else.
     let translator_spans: Vec<(Range<usize>, &Segment)> = segments
         .iter()
@@ -336,12 +349,12 @@ pub fn to_render_text_range(
     // 2. Math toggle positions over visible, non-token text.
     let (toggles, unmatched_dollar) =
         math_toggles(doc_text, range.clone(), &hidden, &shown);
-    // Each balanced `$...$` pair (delimiters included) as one span, for
-    // the same reveal-on-cursor treatment as markers and space runs:
-    // rendered as real Typst math while the caret/selection is
-    // elsewhere, shown as literal source text the moment it touches
-    // the span — so the raw formula is always directly editable, not
-    // just the typeset result.
+    // Each balanced `$...$` pair (delimiters included) as one span,
+    // for the same reveal-on-cursor treatment as markers and
+    // space runs: rendered as real Typst math while the
+    // caret/selection is elsewhere, shown as literal source text
+    // the moment it touches the span — so the raw formula is
+    // always directly editable, not just the typeset result.
     let math_spans: Vec<Range<usize>> =
         toggles.chunks_exact(2).map(|c| c[0]..c[1]).collect();
 
@@ -362,10 +375,11 @@ pub fn to_render_text_range(
         }
     }
 
-    // Inline annotations (P3 #11): markup spliced in just after a segment's
-    // body, keyed by the body start offset. Insertion point is `span.end`.
-    // Don't splice while the segment is revealed (caret/selection over it) —
-    // the raw token wins in that case so the user sees/edits the original
+    // Inline annotations (P3 #11): markup spliced in just after a
+    // segment's body, keyed by the body start offset. Insertion
+    // point is `span.end`. Don't splice while the segment is
+    // revealed (caret/selection over it) — the raw token wins in
+    // that case so the user sees/edits the original
     // source instead of the computed annotation.
     let annotation_points: Vec<(usize, &str)> = if opts
         .annotations
@@ -390,12 +404,13 @@ pub fn to_render_text_range(
             .collect()
     };
 
-    // Cite labels (cite_popup_boxes plan, Stage 3): for each `\cite(...)`
-    // statement with a ReferenceEntry in `opts.references`, splice the
-    // visible label `[N]` (doc-ref) or `[N1, N2, ...]` (bib-key) at the
-    // cite's start byte. The cite statement itself is hidden (it's a
-    // property statement token); the label is render-only markup, not a
-    // `CopySpan` entry. Skip cites whose range is outside `range`.
+    // Cite labels (cite_popup_boxes plan, Stage 3): for each
+    // `\cite(...)` statement with a ReferenceEntry in
+    // `opts.references`, splice the visible label `[N]` (doc-ref)
+    // or `[N1, N2, ...]` (bib-key) at the cite's start byte. The
+    // cite statement itself is hidden (it's a property statement
+    // token); the label is render-only markup, not a `CopySpan`
+    // entry. Skip cites whose range is outside `range`.
     let cite_label_points: Vec<(usize, String)> = {
         let mut out = Vec::new();
         for entry in &opts.references {
@@ -407,8 +422,9 @@ pub fn to_render_text_range(
             {
                 continue;
             }
-            // Don't splice if the cite is revealed (caret/selection on it);
-            // the raw token wins in that case so the user can edit it.
+            // Don't splice if the cite is revealed (caret/selection
+            // on it); the raw token wins in that case so
+            // the user can edit it.
             if expanded(&stmt.range) {
                 continue;
             }
@@ -424,7 +440,8 @@ pub fn to_render_text_range(
 
     bounds.extend(toggles.iter().copied());
     // Isolate every hard newline into its own `[i, i+1)` window (see
-    // "0." above) and add a window boundary at each blank-line anchor.
+    // "0." above) and add a window boundary at each blank-line
+    // anchor.
     for &i in &newline_positions {
         bounds.push(i);
         bounds.push(i + 1);
@@ -502,11 +519,12 @@ pub fn to_render_text_range(
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
-        // Splice any inline annotation whose insertion point is `start`
-        // (after a segment body), as caller-supplied render-only markup.
-        // Pinned (zero-length `CopySpan`) so its glyphs map back to
-        // `start`, not wherever `render_to_doc`'s "clamp to the
-        // preceding span" fallback would land without one — that
+        // Splice any inline annotation whose insertion point is
+        // `start` (after a segment body), as caller-supplied
+        // render-only markup. Pinned (zero-length `CopySpan`)
+        // so its glyphs map back to `start`, not wherever
+        // `render_to_doc`'s "clamp to the preceding span"
+        // fallback would land without one — that
         // fallback previously clamped an annotation/label/title's
         // glyphs to the *end of the nearest real content before it*,
         // which for a translator's collapsed title was one byte short
@@ -520,10 +538,10 @@ pub fn to_render_text_range(
                 out.push_str(markup);
             }
         }
-        // Splice any cite label whose insertion point is `start` (at the
-        // cite token's start byte). The cite token is hidden, so the
-        // label appears in its place. Pinned the same way as the
-        // annotation above.
+        // Splice any cite label whose insertion point is `start` (at
+        // the cite token's start byte). The cite token is
+        // hidden, so the label appears in its place. Pinned
+        // the same way as the annotation above.
         for (pos, label) in &cite_label_points {
             if *pos == start {
                 pin_splice_point(start, &mut out, &mut map);
@@ -578,19 +596,21 @@ pub fn to_render_text_range(
         // verbatim so Typst renders it as real math.
         // A blank line gets an invisible NBSP anchor pinned (via a
         // zero-length `CopySpan`) to its doc byte, so its otherwise
-        // glyph-less row still has a real glyph a `GlyphIndex` band can
-        // attach to (see "0." above). Only for genuinely plain,
-        // visible text — checked after the hidden/translator-span
-        // guards above, so a blank line buried in a *collapsed*
-        // translator's (or any other hidden token's) raw source
-        // doesn't leak a phantom extra row into the one-line summary
+        // glyph-less row still has a real glyph a `GlyphIndex` band
+        // can attach to (see "0." above). Only for genuinely
+        // plain, visible text — checked after the
+        // hidden/translator-span guards above, so a blank
+        // line buried in a *collapsed* translator's (or any
+        // other hidden token's) raw source doesn't leak a
+        // phantom extra row into the one-line summary
         // the user actually sees.
         if blank_line_anchors.contains(&start) {
             push_blank_line_anchor(start, &mut out, &mut map);
         }
         let chunk = &doc_text[start..end];
         if shown_token_at(start) {
-            // Revealed token: copy with Typst escapes before `#` and `\`.
+            // Revealed token: copy with Typst escapes before `#` and
+            // `\`.
             emit_escaped(chunk, start, &mut out, &mut map);
             continue;
         }
@@ -609,9 +629,10 @@ pub fn to_render_text_range(
             continue;
         }
         if Some(start) == unmatched_dollar {
-            // A genuinely unmatched `$` (odd total count) — escaping it
-            // is the only thing standing between it and Typst reading it
-            // as a live, unclosed math toggle, which fails the *entire*
+            // A genuinely unmatched `$` (odd total count) — escaping
+            // it is the only thing standing between it
+            // and Typst reading it as a live, unclosed
+            // math toggle, which fails the *entire*
             // layout ("unclosed delimiter") rather than just this one
             // character. `emit_escaped` doesn't apply here: it only
             // escapes `#`/`\`, never `$`.
@@ -619,18 +640,21 @@ pub fn to_render_text_range(
             continue;
         }
         if chunk == "\n" {
-            // A hard newline is a real line break (foot-style: this is a
-            // line-based editor, not a rich-text document) — never Typst
-            // markup's soft-break-collapses-to-a-space. Not copied into
-            // any `CopySpan` (like a hidden control byte); the doc byte
-            // round-trips via the surrounding-span snap, same as any
+            // A hard newline is a real line break (foot-style: this
+            // is a line-based editor, not a rich-text
+            // document) — never Typst
+            // markup's soft-break-collapses-to-a-space. Not copied
+            // into any `CopySpan` (like a hidden control
+            // byte); the doc byte round-trips via the
+            // surrounding-span snap, same as any
             // other uncopied byte.
             out.push_str("#linebreak()");
             continue;
         }
         let v = visual_at(start);
-        // Whitespace-only chunks need no styling; math chunks keep their
-        // own syntax (v1: visual props are not applied inside `$..$`).
+        // Whitespace-only chunks need no styling; math chunks keep
+        // their own syntax (v1: visual props are not applied
+        // inside `$..$`).
         let wrap = v.any()
             && !math_at(start)
             && !chunk.chars().all(char::is_whitespace);
@@ -638,23 +662,26 @@ pub fn to_render_text_range(
             out.push_str(&v.openers());
         }
         if math_at(start) {
-            // Math content keeps its own Typst syntax verbatim (`#` can
-            // legitimately embed a computed expression there).
+            // Math content keeps its own Typst syntax verbatim (`#`
+            // can legitimately embed a computed
+            // expression there).
             push_copy(chunk, start, &mut out, &mut map);
         } else {
-            // Plain document prose is never Typst code — a bare `#` here
-            // is either a marker (already handled above) or just a
-            // literal character the user typed (e.g. editing a marker's
+            // Plain document prose is never Typst code — a bare `#`
+            // here is either a marker (already handled
+            // above) or just a literal character the user
+            // typed (e.g. editing a marker's
             // name into something `try_parse_marker` no longer
             // recognizes, like deleting its leading digit). An
             // unescaped `#` reaching Typst starts a code expression,
             // which fails the *entire* layout with a parse error
-            // ("expected expression") if what follows isn't valid Typst
-            // code — silently emptying `self.layout` and freezing
-            // navigation and reflow along with it, not just that one
-            // character. `emit_plain_text` escapes only genuinely bare
-            // `#`s, leaving any `\`-escape the user already typed
-            // (`\#`, `\$`, ...) untouched.
+            // ("expected expression") if what follows isn't valid
+            // Typst code — silently emptying
+            // `self.layout` and freezing navigation and
+            // reflow along with it, not just that one
+            // character. `emit_plain_text` escapes only genuinely
+            // bare `#`s, leaving any `\`-escape the user
+            // already typed (`\#`, `\$`, ...) untouched.
             emit_plain_text(chunk, start, &mut out, &mut map);
         }
         if wrap {
@@ -663,8 +690,8 @@ pub fn to_render_text_range(
             }
         }
     }
-    // An annotation whose insertion point is the very end of the range has no
-    // window starting there; splice it now.
+    // An annotation whose insertion point is the very end of the
+    // range has no window starting there; splice it now.
     for (pos, markup) in &annotation_points {
         if *pos == range.end {
             pin_splice_point(range.end, &mut out, &mut map);
@@ -680,13 +707,14 @@ pub fn to_render_text_range(
     RenderOutput { text: out, map }
 }
 
-/// Doc byte ranges of every balanced `$...$` pair (delimiters included).
-/// A simpler, standalone version of the scan inside `math_toggles`
-/// (ignores marker/statement token boundaries and doesn't report a
-/// trailing unmatched `$`) — good enough for a frontend to use as a
-/// cache key (`mathed_mini::app`) deciding whether the caret/
-/// selection's *touch* on a math span changed since the last layout,
-/// the only thing that should force a relayout for it.
+/// Doc byte ranges of every balanced `$...$` pair (delimiters
+/// included). A simpler, standalone version of the scan inside
+/// `math_toggles` (ignores marker/statement token boundaries and
+/// doesn't report a trailing unmatched `$`) — good enough for a
+/// frontend to use as a cache key (`mathed_mini::app`) deciding
+/// whether the caret/ selection's *touch* on a math span changed
+/// since the last layout, the only thing that should force a relayout
+/// for it.
 pub fn math_span_ranges(doc_text: &str) -> Vec<Range<usize>> {
     let bytes = doc_text.as_bytes();
     let mut spans = Vec::new();
@@ -716,18 +744,20 @@ pub fn math_span_ranges(doc_text: &str) -> Vec<Range<usize>> {
 }
 
 /// Byte offsets where math state toggles (each unescaped `$` outside
-/// hidden/shown token ranges). The opening `$` toggles at its own index,
-/// the closing `$` right after itself, so both delimiters count as math.
+/// hidden/shown token ranges). The opening `$` toggles at its own
+/// index, the closing `$` right after itself, so both delimiters
+/// count as math.
 ///
-/// Also returns the doc byte of a trailing, genuinely unmatched `$` (an
-/// odd total count — e.g. a currency "$5" the user never meant as math,
-/// or an in-progress formula whose closing `$` hasn't been typed yet),
-/// if there is one. That `$` is *not* included in the returned toggle
-/// list (so nothing after it is mistreated as "still in math"): letting
-/// it reach Typst as a literal, unescaped `$` would toggle math mode
-/// there too, but with no closing partner — "unclosed delimiter", which
-/// fails the *entire* layout (see `emit_dollar` below, which the caller
-/// uses to render this one escaped instead).
+/// Also returns the doc byte of a trailing, genuinely unmatched `$`
+/// (an odd total count — e.g. a currency "$5" the user never meant as
+/// math, or an in-progress formula whose closing `$` hasn't been
+/// typed yet), if there is one. That `$` is *not* included in the
+/// returned toggle list (so nothing after it is mistreated as "still
+/// in math"): letting it reach Typst as a literal, unescaped `$`
+/// would toggle math mode there too, but with no closing partner —
+/// "unclosed delimiter", which fails the *entire* layout (see
+/// `emit_dollar` below, which the caller uses to render this one
+/// escaped instead).
 fn math_toggles(
     text: &str,
     range: Range<usize>,
@@ -766,13 +796,14 @@ fn math_toggles(
         i += utf8_len(bytes[i]);
     }
     // `in_math` still true means the very last push above was this
-    // opening `$` (pushed at its own byte, not `+1`) with nothing left
-    // to close it.
+    // opening `$` (pushed at its own byte, not `+1`) with nothing
+    // left to close it.
     let unmatched_dollar = if in_math { toggles.pop() } else { None };
     (toggles, unmatched_dollar)
 }
 
-/// Extract the `name:` literal from a translator segment's extra args.
+/// Extract the `name:` literal from a translator segment's extra
+/// args.
 fn translator_name(seg: &Segment) -> Option<String> {
     seg.extra_args.iter().find_map(|arg| {
         let Arg::Literal { text, .. } = arg else {
@@ -784,10 +815,10 @@ fn translator_name(seg: &Segment) -> Option<String> {
 }
 
 /// The collapsed one-line title for a hidden translator span (`▸
-/// translator: name`, or a red `⚠` variant when `opts.translator_errors`
-/// has an entry for it) — render-only markup, spliced in by
-/// `translator_title_points` the same way a `\prob` annotation or a
-/// `\cite` label is spliced.
+/// translator: name`, or a red `⚠` variant when
+/// `opts.translator_errors` has an entry for it) — render-only
+/// markup, spliced in by `translator_title_points` the same way a
+/// `\prob` annotation or a `\cite` label is spliced.
 fn translator_title_markup(
     seg: &Segment,
     opts: &TransformOptions,
@@ -812,14 +843,14 @@ fn translator_title_markup(
     }
 }
 
-/// Render a revealed translator span's code as a fenced Typst raw block
-/// (monospace, syntax-highlighted, and — because it's a raw block —
-/// shown literally rather than executed as document markup) plus any
-/// inline error message below it. This is the "specially rendered"
-/// counterpart to the collapsed title: same reveal/hide mechanism as
-/// every other segment kind, just special *content* when shown, the
-/// same way math content inside `$..$` is specially rendered by Typst
-/// itself.
+/// Render a revealed translator span's code as a fenced Typst raw
+/// block (monospace, syntax-highlighted, and — because it's a raw
+/// block — shown literally rather than executed as document markup)
+/// plus any inline error message below it. This is the "specially
+/// rendered" counterpart to the collapsed title: same reveal/hide
+/// mechanism as every other segment kind, just special *content* when
+/// shown, the same way math content inside `$..$` is specially
+/// rendered by Typst itself.
 fn emit_translator_code(
     span: &Range<usize>,
     seg: &Segment,
@@ -834,16 +865,18 @@ fn emit_translator_code(
     // maps back to the right place.
     let body_start =
         span.start + (raw.len() - raw.trim_start().len());
-    // No language tag: a `typ` tag would enable Typst's built-in syntax
-    // highlighting (keywords, strings, punctuation each in their own
-    // styled sub-run), but those sub-runs' glyphs come from Typst's own
-    // internal highlighting machinery, not our source file — `walk_records`
-    // (`mathed_core::glyphs`) only accepts a glyph whose span belongs to
-    // `source.id()`, so every highlighted token (observed: punctuation
+    // No language tag: a `typ` tag would enable Typst's built-in
+    // syntax highlighting (keywords, strings, punctuation each in
+    // their own styled sub-run), but those sub-runs' glyphs come
+    // from Typst's own internal highlighting machinery, not our
+    // source file — `walk_records` (`mathed_core::glyphs`) only
+    // accepts a glyph whose span belongs to `source.id()`, so
+    // every highlighted token (observed: punctuation
     // like `(`/`)`/`{`/`}` and keywords like `let`) silently got *no*
-    // glyph entry at all, making it unreachable by caret navigation or
-    // click. Plain (unhighlighted) monospace text is one uniform run in
-    // our own source, so every character maps back correctly.
+    // glyph entry at all, making it unreachable by caret navigation
+    // or click. Plain (unhighlighted) monospace text is one
+    // uniform run in our own source, so every character maps back
+    // correctly.
     out.push_str("```\n");
     push_copy(body, body_start, out, map);
     out.push_str("\n```");
@@ -856,18 +889,20 @@ fn emit_translator_code(
         .as_ref()
         .and_then(|s| opts.translator_errors.get(&s.start))
     {
-        // Escape `[`/`]` so Typst doesn't parse them as content delimiters.
+        // Escape `[`/`]` so Typst doesn't parse them as content
+        // delimiters.
         let escaped = err.replace('[', "\\[").replace(']', "\\]");
         out.push_str(&format!("\n#text(fill: red)[⚠ {escaped}]"));
     }
 }
 
-/// Doc byte offsets of every blank line's caret position within `range` — a
-/// zero-length line spanning `[p, p)`, i.e. a `\n` immediately following the
-/// start of `range` or another `\n`, or `range.end` immediately following a
-/// `\n` (a trailing blank line) or being `range.start` itself (an empty
-/// range). One `\n` can be the anchor point at most once even at the seam
-/// between two blank lines (e.g. `"a\n\n\nb"` has anchors right after each of
+/// Doc byte offsets of every blank line's caret position within
+/// `range` — a zero-length line spanning `[p, p)`, i.e. a `\n`
+/// immediately following the start of `range` or another `\n`, or
+/// `range.end` immediately following a `\n` (a trailing blank line)
+/// or being `range.start` itself (an empty range). One `\n` can be
+/// the anchor point at most once even at the seam between two blank
+/// lines (e.g. `"a\n\n\nb"` has anchors right after each of
 /// the two interior newlines).
 fn blank_line_anchors(
     doc_text: &str,
@@ -892,17 +927,17 @@ fn blank_line_anchors(
 }
 
 /// Pin the *next* bytes pushed to `out` (typically caller-supplied,
-/// render-only markup: an annotation, a cite label, a translator title)
-/// to `doc_pos` via a zero-length [`CopySpan`], so their glyphs'
-/// `render_to_doc` resolves to `doc_pos` exactly rather than falling
-/// through to the "clamp to the preceding real span" fallback — which
-/// clamps to the *end of whatever real content came before the splice*,
-/// not the splice's own doc position. For a translator's collapsed
-/// title specifically, that fallback position could land one byte short
-/// of the marker `active_reveal_span`'s boundary check requires,
-/// silently preventing Down-arrow (or any caret move) from ever
-/// entering/expanding it. Call immediately before pushing the spliced
-/// text.
+/// render-only markup: an annotation, a cite label, a translator
+/// title) to `doc_pos` via a zero-length [`CopySpan`], so their
+/// glyphs' `render_to_doc` resolves to `doc_pos` exactly rather than
+/// falling through to the "clamp to the preceding real span" fallback
+/// — which clamps to the *end of whatever real content came before
+/// the splice*, not the splice's own doc position. For a translator's
+/// collapsed title specifically, that fallback position could land
+/// one byte short of the marker `active_reveal_span`'s boundary check
+/// requires, silently preventing Down-arrow (or any caret move) from
+/// ever entering/expanding it. Call immediately before pushing the
+/// spliced text.
 fn pin_splice_point(
     doc_pos: usize,
     out: &mut str,
@@ -917,12 +952,13 @@ fn pin_splice_point(
 
 /// Splice an invisible non-breaking-space glyph into the render text,
 /// pinned to `doc_pos` via a zero-length [`CopySpan`] (rather than
-/// `push_copy`, which requires equal-length doc/render runs). This gives an
-/// otherwise wholly empty line a real glyph for [`crate::glyphs::GlyphIndex`]
-/// to anchor a line band to — without it, a blank line has no glyphs at
-/// all, so up/down-arrow navigation and click hit-testing skip right over
-/// it. A plain space would work for band geometry too, but Typst (like most
-/// layout engines) trims leading whitespace after a forced line break;
+/// `push_copy`, which requires equal-length doc/render runs). This
+/// gives an otherwise wholly empty line a real glyph for
+/// [`crate::glyphs::GlyphIndex`] to anchor a line band to — without
+/// it, a blank line has no glyphs at all, so up/down-arrow navigation
+/// and click hit-testing skip right over it. A plain space would work
+/// for band geometry too, but Typst (like most layout engines) trims
+/// leading whitespace after a forced line break;
 /// U+00A0 is specifically exempt from that trimming.
 fn push_blank_line_anchor(
     doc_pos: usize,
@@ -938,22 +974,22 @@ fn push_blank_line_anchor(
 }
 
 /// Maximal runs of 2 or more consecutive ASCII spaces within `range`,
-/// outside of nothing in particular — hidden/shown/translator-span status
-/// is checked by the caller before treating a run as collapsible. Typst
-/// (like Markdown/HTML) already collapses a run of plain spaces to one
-/// when *rendering* — but every space still gets its own doc byte, and
-/// without special handling only the first would get a glyph, leaving
-/// the rest as unreachable dead bytes (the same class of bug as the
-/// zero-advance wrap-point space). Collapsing them ourselves, on
-/// purpose, one real space plus deliberately-uncopied bytes for the
-/// rest, keeps that consistent and *visible* as a real editor behavior
-/// rather than an Typst implementation detail the user just has to
-/// know about.
+/// outside of nothing in particular — hidden/shown/translator-span
+/// status is checked by the caller before treating a run as
+/// collapsible. Typst (like Markdown/HTML) already collapses a run of
+/// plain spaces to one when *rendering* — but every space still gets
+/// its own doc byte, and without special handling only the first
+/// would get a glyph, leaving the rest as unreachable dead bytes (the
+/// same class of bug as the zero-advance wrap-point space).
+/// Collapsing them ourselves, on purpose, one real space plus
+/// deliberately-uncopied bytes for the rest, keeps that consistent
+/// and *visible* as a real editor behavior rather than an Typst
+/// implementation detail the user just has to know about.
 ///
-/// `pub` so a frontend (`mathed_mini::app`) can compute the same ranges
-/// to decide whether the caret/selection's *touch* on a given run
-/// changed since the last layout — the only thing that should force a
-/// relayout for this, matching the marker-reveal cache key.
+/// `pub` so a frontend (`mathed_mini::app`) can compute the same
+/// ranges to decide whether the caret/selection's *touch* on a given
+/// run changed since the last layout — the only thing that should
+/// force a relayout for this, matching the marker-reveal cache key.
 pub fn space_run_ranges(
     doc_text: &str,
     range: &Range<usize>,
@@ -977,11 +1013,11 @@ pub fn space_run_ranges(
     runs
 }
 
-/// A collapsible space run with the caret/selection elsewhere: only the
-/// first space is real, visible content (matching what Typst would
-/// render for the whole run anyway); the rest are deliberately left
-/// uncopied, like a hidden token's bytes — clicking there snaps to the
-/// nearest real content, same as any other collapsed gap.
+/// A collapsible space run with the caret/selection elsewhere: only
+/// the first space is real, visible content (matching what Typst
+/// would render for the whole run anyway); the rest are deliberately
+/// left uncopied, like a hidden token's bytes — clicking there snaps
+/// to the nearest real content, same as any other collapsed gap.
 fn emit_collapsed_space_run(
     run: &Range<usize>,
     out: &mut String,
@@ -990,13 +1026,14 @@ fn emit_collapsed_space_run(
     push_copy(" ", run.start, out, map);
 }
 
-/// A collapsible space run the caret/selection is touching: every space
-/// is shown and individually reachable, so the user can see and edit
-/// exactly how many they typed. The first is a normal (collapsible)
-/// space; the rest are rendered as U+00A0 (non-breaking — exempt from
-/// Typst's whitespace collapsing, like the blank-line anchor above) so
-/// each one gets its own real glyph, pinned to its own doc byte the same
-/// way `push_blank_line_anchor` pins its anchor.
+/// A collapsible space run the caret/selection is touching: every
+/// space is shown and individually reachable, so the user can see and
+/// edit exactly how many they typed. The first is a normal
+/// (collapsible) space; the rest are rendered as U+00A0 (non-breaking
+/// — exempt from Typst's whitespace collapsing, like the blank-line
+/// anchor above) so each one gets its own real glyph, pinned to its
+/// own doc byte the same way `push_blank_line_anchor` pins its
+/// anchor.
 fn emit_expanded_space_run(
     run: &Range<usize>,
     out: &mut String,
@@ -1040,17 +1077,18 @@ fn push_copy(
 }
 
 /// Typst markup characters that, like `#` and `$`, require a matching
-/// partner elsewhere in the document (`_..._` emphasis, `*...*` strong,
-/// `` `...` `` raw) — a single stray, unpaired one anywhere fails the
-/// *entire* layout with "unclosed delimiter"/"unclosed raw text", the
-/// same failure mode `$` has (see `math_toggles`), just without a
-/// dedicated pairing check of its own. Rather than replicate `$`'s
-/// odd/even bookkeeping for three more characters (and get their
-/// pairing-boundary rules — Typst's "intraword" exception for `_`/`*` —
-/// exactly right), every occurrence in text this transform controls is
-/// unconditionally escaped: this editor's own styling already goes
-/// through `#emph[...]`/`#strong[...]`, never the shorthand, so nothing
-/// here relies on `_test_`/`*test*`/`` `test` `` being live markup.
+/// partner elsewhere in the document (`_..._` emphasis, `*...*`
+/// strong, `` `...` `` raw) — a single stray, unpaired one anywhere
+/// fails the *entire* layout with "unclosed delimiter"/"unclosed raw
+/// text", the same failure mode `$` has (see `math_toggles`), just
+/// without a dedicated pairing check of its own. Rather than
+/// replicate `$`'s odd/even bookkeeping for three more characters
+/// (and get their pairing-boundary rules — Typst's "intraword"
+/// exception for `_`/`*` — exactly right), every occurrence in text
+/// this transform controls is unconditionally escaped: this editor's
+/// own styling already goes through `#emph[...]`/`#strong[...]`,
+/// never the shorthand, so nothing here relies on
+/// `_test_`/`*test*`/`` `test` `` being live markup.
 fn is_bare_markup_delim(c: char) -> bool {
     matches!(c, '_' | '*' | '`')
 }
@@ -1079,10 +1117,10 @@ fn emit_escaped(
             // wrong doc byte (observed: the caret jumping away when
             // stepping past an escaped `\`/`#` in revealed statement
             // text, e.g. a revealed `\translator(...)`'s own leading
-            // `\`). Pinning it to the escaped character's own doc byte
-            // (zero-length — nothing is copied here, only mapped)
-            // gives it the same, correct target as the real copy
-            // right after it.
+            // `\`). Pinning it to the escaped character's own doc
+            // byte (zero-length — nothing is copied here,
+            // only mapped) gives it the same, correct
+            // target as the real copy right after it.
             map.spans.push(CopySpan {
                 doc_start: doc_start + i,
                 render_start: out.len(),
@@ -1097,11 +1135,12 @@ fn emit_escaped(
 
 /// Escape a single, genuinely unmatched `$` (see `math_toggles`) as a
 /// literal Typst `\$` instead of a live math toggle. Not folded into
-/// `emit_escaped` since that only ever escapes `#`/`\`, never `$` (a bare
-/// `$` in ordinary revealed token text is not dangerous the way an
-/// unmatched one is — this is specifically for the one case where it is).
-/// Same escape-byte pin as `emit_escaped`, for the same reason: without
-/// it, the escaped `$`'s glyph would map back to the wrong doc byte.
+/// `emit_escaped` since that only ever escapes `#`/`\`, never `$` (a
+/// bare `$` in ordinary revealed token text is not dangerous the way
+/// an unmatched one is — this is specifically for the one case where
+/// it is). Same escape-byte pin as `emit_escaped`, for the same
+/// reason: without it, the escaped `$`'s glyph would map back to the
+/// wrong doc byte.
 fn emit_escaped_dollar(
     doc_pos: usize,
     out: &mut String,
@@ -1116,19 +1155,20 @@ fn emit_escaped_dollar(
     push_copy("$", doc_pos, out, map);
 }
 
-/// Emit a run of plain (non-token, non-math) document prose, escaping only
-/// a genuinely bare `#`, `_`, `*` or `` ` `` — one the user typed that isn't
-/// already preceded by a `\` — so none of them can reach Typst as an
-/// unintended code sigil or unpaired markup delimiter (see
-/// `is_bare_markup_delim`). Unlike [`emit_escaped`] (used for a
-/// *recognized* marker/statement's own raw text, which is never itself
-/// pre-escaped), plain prose can legitimately already contain a Typst
-/// escape the user typed by hand (`\#`, `\$`, ...); an existing `\`+char
-/// pair is left untouched, matching how `scan` and `math_toggles` already
-/// treat a backslash as pre-escaping whatever follows. `\` itself is never
-/// escaped here — unlike these characters it can't start Typst code or
-/// stray markup on its own, so double-escaping it would only corrupt text
-/// the user already wrote correctly.
+/// Emit a run of plain (non-token, non-math) document prose, escaping
+/// only a genuinely bare `#`, `_`, `*` or `` ` `` — one the user
+/// typed that isn't already preceded by a `\` — so none of them can
+/// reach Typst as an unintended code sigil or unpaired markup
+/// delimiter (see `is_bare_markup_delim`). Unlike [`emit_escaped`]
+/// (used for a *recognized* marker/statement's own raw text, which is
+/// never itself pre-escaped), plain prose can legitimately already
+/// contain a Typst escape the user typed by hand (`\#`, `\$`, ...);
+/// an existing `\`+char pair is left untouched, matching how `scan`
+/// and `math_toggles` already treat a backslash as pre-escaping
+/// whatever follows. `\` itself is never escaped here — unlike these
+/// characters it can't start Typst code or stray markup on its own,
+/// so double-escaping it would only corrupt text the user already
+/// wrote correctly.
 fn emit_plain_text(
     chunk: &str,
     doc_start: usize,
@@ -1169,16 +1209,17 @@ fn emit_plain_text(
     push_copy(&chunk[run_start..], doc_start + run_start, out, map);
 }
 
-/// Render a revealed `$...$` span (delimiters included) as literal source
-/// text instead of live Typst math: escapes every bare `#`, `_`, `*`,
-/// `` ` `` (same reasons as `emit_plain_text`) *and* every `$` (including
-/// the span's own opening/closing delimiters — otherwise they'd just
-/// toggle math right back on), skipping any `\`-escape the user already
-/// typed. Subscripts (`x_2`) make a bare `_` in math content near-certain,
-/// so this one particularly needs the same treatment as `$` itself —
-/// not just the general markup delimiters `emit_plain_text` also covers.
-/// Same escape-byte pin as `emit_plain_text`/`emit_escaped` for each one,
-/// so the escaped characters' glyphs map back to their own doc byte.
+/// Render a revealed `$...$` span (delimiters included) as literal
+/// source text instead of live Typst math: escapes every bare `#`,
+/// `_`, `*`, `` ` `` (same reasons as `emit_plain_text`) *and* every
+/// `$` (including the span's own opening/closing delimiters —
+/// otherwise they'd just toggle math right back on), skipping any
+/// `\`-escape the user already typed. Subscripts (`x_2`) make a bare
+/// `_` in math content near-certain, so this one particularly needs
+/// the same treatment as `$` itself — not just the general markup
+/// delimiters `emit_plain_text` also covers. Same escape-byte pin as
+/// `emit_plain_text`/`emit_escaped` for each one, so the escaped
+/// characters' glyphs map back to their own doc byte.
 fn emit_revealed_math_span(
     span: &Range<usize>,
     doc_text: &str,
@@ -1230,8 +1271,9 @@ fn utf8_len(first_byte: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-    // reveal tests pass single-element `Vec<Range<usize>>` (whole-doc or a
-    // single point); clippy's suggestion would change the semantics.
+    // reveal tests pass single-element `Vec<Range<usize>>` (whole-doc
+    // or a single point); clippy's suggestion would change the
+    // semantics.
     #![allow(clippy::single_range_in_vec_init)]
     use super::*;
     use crate::markers::{resolve_segments, scan};
@@ -1299,10 +1341,10 @@ mod tests {
 
     #[test]
     fn annotation_suppressed_when_segment_revealed() {
-        // Caret over the segment reveals the raw source instead of the
-        // computed annotation — the markers show (escaped) and the
-        // `\prob` statement shows (escaped) rather than being folded
-        // into the annotation.
+        // Caret over the segment reveals the raw source instead of
+        // the computed annotation — the markers show
+        // (escaped) and the `\prob` statement shows (escaped)
+        // rather than being folded into the annotation.
         let text = "#1 vacuum #2 \\prob(#1,#2)";
         let s = scan(text);
         let segs = resolve_segments(&s);
@@ -1384,8 +1426,8 @@ mod tests {
         let text = "#1 a #2 \\cite(#1,#2) and \\cite(k1) and #3 b #4 \\cite(#3,#4)";
         let out =
             render_with_refs(text, &TransformOptions::default());
-        // Cite 1 → [1], cite 2 → [2], cite 3 → [3]. The body of cite 1
-        // (`a`) appears first, then the label, etc.
+        // Cite 1 → [1], cite 2 → [2], cite 3 → [3]. The body of cite
+        // 1 (`a`) appears first, then the label, etc.
         assert_eq!(out.text, "a [1] and [2] and b [3]");
     }
 
@@ -1414,9 +1456,9 @@ mod tests {
 
     #[test]
     fn math_shows_raw_source_when_caret_touches_it() {
-        // A point reveal inside "$x+y$" (byte 9, the "x") shows the raw
-        // source — delimiters included — as literal text instead of
-        // typeset math.
+        // A point reveal inside "$x+y$" (byte 9, the "x") shows the
+        // raw source — delimiters included — as literal text
+        // instead of typeset math.
         let text = "before $x+y$ after";
         let touch = text.find('x').unwrap();
         let out = render(
@@ -1469,11 +1511,12 @@ mod tests {
     fn subscript_underscore_in_revealed_math_is_escaped() {
         // Reported: typing `_` inside math produces "typst: unclosed
         // delimiter" and a black window. Root cause: revealing a math
-        // span's raw source (previous fix) escaped `#`/`$` but not `_`
-        // — and Typst's markup mode treats a lone `_` not surrounded by
-        // word characters on both sides as an emphasis delimiter, which
-        // then has no matching partner. `x_2$` (revealed span content
-        // followed by the escaped closing `\$`) is exactly such a case.
+        // span's raw source (previous fix) escaped `#`/`$` but not
+        // `_` — and Typst's markup mode treats a lone `_` not
+        // surrounded by word characters on both sides as an
+        // emphasis delimiter, which then has no matching
+        // partner. `x_2$` (revealed span content followed by
+        // the escaped closing `\$`) is exactly such a case.
         let text = "before $x_2$ after";
         let touch = text.find('x').unwrap();
         let out = render(
@@ -1490,10 +1533,10 @@ mod tests {
     fn trailing_unmatched_dollar_with_underscore_after_it_still_works()
      {
         // Same failure mode, reached through the *other* path: an
-        // in-progress, still-unclosed `$x_` (no closing `$` typed yet).
-        // The unmatched `$` gets escaped (existing fix), which turns
-        // "x_" into ordinary markup text where the bare `_` again has
-        // no closing partner.
+        // in-progress, still-unclosed `$x_` (no closing `$` typed
+        // yet). The unmatched `$` gets escaped (existing
+        // fix), which turns "x_" into ordinary markup text
+        // where the bare `_` again has no closing partner.
         let out = render("before $x_", &TransformOptions::default());
         assert_eq!(out.text, "before \\$x\\_");
     }
@@ -1502,8 +1545,9 @@ mod tests {
     fn lone_asterisk_and_backtick_in_plain_prose_are_escaped() {
         // Same class of bug, not math-specific: any of Typst's paired
         // markup delimiters (`_`, `*`, `` ` ``) can fail the entire
-        // layout ("unclosed delimiter"/"unclosed raw text") if a lone,
-        // unpaired one appears anywhere — e.g. "5 * 3" or a bare "`".
+        // layout ("unclosed delimiter"/"unclosed raw text") if a
+        // lone, unpaired one appears anywhere — e.g. "5 * 3"
+        // or a bare "`".
         let out = render(
             "the result is 5 * 3 today",
             &TransformOptions::default(),
@@ -1520,10 +1564,11 @@ mod tests {
     fn unmatched_dollar_is_escaped_not_left_as_a_live_toggle() {
         // A genuinely unbalanced `$` (a currency sign never meant as
         // math, or an in-progress formula whose closing `$` hasn't
-        // been typed yet) used to reach Typst as a live, unclosed math
-        // toggle — "unclosed delimiter", failing the *entire* layout
-        // and leaving nothing on screen (reported as: clicking near a
-        // `$` produces that exact error and a fully black editor).
+        // been typed yet) used to reach Typst as a live, unclosed
+        // math toggle — "unclosed delimiter", failing the
+        // *entire* layout and leaving nothing on screen
+        // (reported as: clicking near a `$` produces that
+        // exact error and a fully black editor).
         let out =
             render("cost is $5 today", &TransformOptions::default());
         assert_eq!(out.text, "cost is \\$5 today");
@@ -1555,7 +1600,8 @@ mod tests {
         // Doc byte of 'f' is 3; it must map to render byte 0.
         assert_eq!(out.map.doc_to_render(3), 0);
         assert_eq!(out.map.render_to_doc(0), 3);
-        // Doc position inside the hidden leading marker snaps forward.
+        // Doc position inside the hidden leading marker snaps
+        // forward.
         assert_eq!(out.map.doc_to_render(1), 0);
         // 't' of tail: doc byte 11, render byte 5.
         assert_eq!(out.map.doc_to_render(11), 5);
@@ -1769,8 +1815,8 @@ mod tests {
 
     #[test]
     fn segment_spanning_blocks_clamps_per_block() {
-        // Bold segment runs from block 1 into block 2; each block wraps
-        // only its own part.
+        // Bold segment runs from block 1 into block 2; each block
+        // wraps only its own part.
         let text = "#1 a\n\nb #2 \\bold(#1,#2)";
         let out =
             render_range(text, 0..4, &TransformOptions::default());
@@ -1782,8 +1828,9 @@ mod tests {
 
     #[test]
     fn translator_collapsed_when_caret_outside() {
-        // Body code is replaced by a one-line summary; the `#let` is NOT
-        // emitted as document markup (so Typst won't execute it).
+        // Body code is replaced by a one-line summary; the `#let` is
+        // NOT emitted as document markup (so Typst won't
+        // execute it).
         let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
         let out = render(text, &TransformOptions::default());
         assert_eq!(out.text, "▸ translator: ho");
@@ -1825,9 +1872,10 @@ mod tests {
     fn translator_expanded_when_caret_inside() {
         let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
         // Caret at byte 10 — inside the body code — via `reveal`, the
-        // exact same channel every other segment kind (`\prob`, `\cite`,
-        // ...) uses to expand/reveal a special-rendered part. A point
-        // reveal only overlaps the *body span* it's inside of; it
+        // exact same channel every other segment kind (`\prob`,
+        // `\cite`, ...) uses to expand/reveal a
+        // special-rendered part. A point reveal only overlaps
+        // the *body span* it's inside of; it
         // doesn't separately touch the surrounding `#3`/`#4` marker
         // tokens (different byte ranges), so they stay hidden without
         // any translator-specific carve-out.
@@ -1845,19 +1893,21 @@ mod tests {
             "got: {}",
             out.text
         );
-        // Markers are not revealed by a reveal point that only touches
-        // the body span, not the marker tokens themselves.
+        // Markers are not revealed by a reveal point that only
+        // touches the body span, not the marker tokens
+        // themselves.
         assert!(!out.text.contains("\\#3"), "got: {}", out.text);
     }
 
     #[test]
     fn expand_reveals_translator_body_but_not_its_markers() {
-        // Mirrors what `mathed_mini::app::redraw` actually feeds in: a
-        // *wide* span (marker-start through statement-end, from
-        // `active_reveal_span`) as `opts.expand`, not `opts.reveal` —
-        // the caret can be anywhere inside the multi-line code, not
-        // just touching one edge. Expanding the body must still not
-        // reveal the flanking `#3`/`#4` markers.
+        // Mirrors what `mathed_mini::app::redraw` actually feeds in:
+        // a *wide* span (marker-start through statement-end,
+        // from `active_reveal_span`) as `opts.expand`, not
+        // `opts.reveal` — the caret can be anywhere inside
+        // the multi-line code, not just touching one edge.
+        // Expanding the body must still not reveal the
+        // flanking `#3`/`#4` markers.
         let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
         let out = render(
             text,
@@ -1872,16 +1922,19 @@ mod tests {
             out.text
         );
         // The leading `#3` marker (right before `#let`) is never
-        // emitted, revealed or not — the fenced block opens immediately.
+        // emitted, revealed or not — the fenced block opens
+        // immediately.
         assert!(out.text.starts_with("```\n"), "got: {}", out.text);
-        // The trailing `#4` marker (between the code and `\translator`)
-        // is likewise never emitted — the closing fence is immediately
-        // followed by the statement's own (separately, intentionally
-        // revealed) raw text. That statement text legitimately contains
-        // escaped `\#3`/`\#4` *references* in its own argument list —
-        // that's the statement's own content being shown, not the
-        // flanking marker *definitions* being revealed.
-        // The statement's own leading `\` is itself escaped (so Typst
+        // The trailing `#4` marker (between the code and
+        // `\translator`) is likewise never emitted — the
+        // closing fence is immediately followed by the
+        // statement's own (separately, intentionally
+        // revealed) raw text. That statement text legitimately
+        // contains escaped `\#3`/`\#4` *references* in its
+        // own argument list — that's the statement's own
+        // content being shown, not the flanking marker
+        // *definitions* being revealed. The statement's own
+        // leading `\` is itself escaped (so Typst
         // doesn't parse it as markup), hence the doubled backslash.
         assert!(
             out.text.contains("```\\\\translator("),
@@ -2039,10 +2092,11 @@ mod tests {
 
     #[test]
     fn escape_byte_maps_to_same_doc_byte_as_escaped_char() {
-        // Regression: `emit_escaped` splices an extra escape byte before
-        // every literal `\` or `#` in revealed statement text. Typst
-        // treats `\\` as one "Escape" node and attributes the resulting
-        // glyph's source span to that escape byte. The escape byte's
+        // Regression: `emit_escaped` splices an extra escape byte
+        // before every literal `\` or `#` in revealed
+        // statement text. Typst treats `\\` as one "Escape"
+        // node and attributes the resulting glyph's source
+        // span to that escape byte. The escape byte's
         // render position must map back to the *same* doc byte as the
         // literal character, not to an unrelated position.
         let text = "#1 x #2 \\function(#1,#2)";
@@ -2051,12 +2105,13 @@ mod tests {
             ..Default::default()
         };
         let out = render(text, &opts);
-        // The `\` at byte 14 maps to render position 14 (it's at the start
-        // of `\function(...)` which begins after the reveal-span tag).
+        // The `\` at byte 14 maps to render position 14 (it's at the
+        // start of `\function(...)` which begins after the
+        // reveal-span tag).
         let backslash_render = out.map.doc_to_render(14);
         let backslash_doc = out.map.render_to_doc(backslash_render);
-        // The escape byte's render position must round-trip to the same
-        // doc byte as the backslash itself.
+        // The escape byte's render position must round-trip to the
+        // same doc byte as the backslash itself.
         assert_eq!(
             backslash_doc, 14,
             "escape byte at doc 14 should map back to doc 14, got {backslash_doc}"
@@ -2095,8 +2150,8 @@ mod tests {
 
     #[test]
     fn underscore_in_markup_is_escaped() {
-        // Typst's `_` emphasis delimiter must be escaped when it appears
-        // as a literal character in revealed content.
+        // Typst's `_` emphasis delimiter must be escaped when it
+        // appears as a literal character in revealed content.
         let out = render("x_y", &TransformOptions::default());
         assert_eq!(out.text, "x\\_y");
     }
@@ -2155,7 +2210,8 @@ mod tests {
     fn offset_map_bounds_are_valid() {
         let text = "#1 f(x) #2 ok\n\n#3 g(y) #4 \\function(#3,#4)";
         let out = render(text, &TransformOptions::default());
-        // Any doc position in [0, doc_len) maps to a valid render position.
+        // Any doc position in [0, doc_len) maps to a valid render
+        // position.
         for d in [0, 1, text.len() / 2, text.len() - 1, text.len()] {
             let r = out.map.doc_to_render(d);
             assert!(
@@ -2164,7 +2220,8 @@ mod tests {
                 out.map.render_len
             );
         }
-        // Any render position in [0, render_len) maps to a valid doc position.
+        // Any render position in [0, render_len) maps to a valid doc
+        // position.
         for r in [
             0,
             1,
@@ -2228,7 +2285,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        // The space run expands: first space real, extras become NBSP.
+        // The space run expands: first space real, extras become
+        // NBSP.
         assert!(out.text.contains("a "));
         assert!(out.text.contains('\u{00A0}'));
     }
@@ -2261,8 +2319,9 @@ mod tests {
             hidden.text.contains("$a+b$"),
             "math should be typeset"
         );
-        // Touching the math span reveals raw source — the `$` delimiters
-        // are escaped so Typst shows them literally, not as a math toggle.
+        // Touching the math span reveals raw source — the `$`
+        // delimiters are escaped so Typst shows them
+        // literally, not as a math toggle.
         let revealed = render(
             text,
             &TransformOptions {
@@ -2288,8 +2347,9 @@ mod tests {
     use proptest::string::string_regex;
 
     fn doc_text_strategy() -> impl Strategy<Value = String> {
-        // Generate text that exercises markers, math, escapes, newlines,
-        // punctuation, and plain prose — the full transform pipeline.
+        // Generate text that exercises markers, math, escapes,
+        // newlines, punctuation, and plain prose — the full
+        // transform pipeline.
         let token = prop_oneof![
             // Plain prose chunks.
             string_regex("[a-zA-Z]{1,6}").unwrap(),

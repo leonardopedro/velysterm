@@ -1,16 +1,18 @@
 //! Accessible descriptions derived from the semantic model.
 //!
-//! The editor's semantic markers (`\def`, `\theorem`, `\prob`, …) already
-//! capture *what a span means*, not just how it looks. That is exactly the
-//! information an accessibility tree wants: a screen reader (or, increasingly,
-//! an AI speaker / translator / image generator consuming the document) can
-//! announce "definition of norm" or "probability heads of n(0) == 1" instead
-//! of reading raw Typst/LaTeX source.
+//! The editor's semantic markers (`\def`, `\theorem`, `\prob`, …)
+//! already capture *what a span means*, not just how it looks. That
+//! is exactly the information an accessibility tree wants: a screen
+//! reader (or, increasingly, an AI speaker / translator / image
+//! generator consuming the document) can announce "definition of
+//! norm" or "probability heads of n(0) == 1" instead of reading raw
+//! Typst/LaTeX source.
 //!
-//! This module is toolkit-agnostic and Bevy-free: it turns [`Segment`]s and a
-//! [`SemanticIndex`] into a flat list of [`AccessNode`]s with a neutral
-//! [`AccessRole`]. The Bevy crate maps these onto `accesskit` nodes and pushes
-//! them to the platform's assistive-technology adapter.
+//! This module is toolkit-agnostic and Bevy-free: it turns
+//! [`Segment`]s and a [`SemanticIndex`] into a flat list of
+//! [`AccessNode`]s with a neutral [`AccessRole`]. The Bevy crate maps
+//! these onto `accesskit` nodes and pushes them to the platform's
+//! assistive-technology adapter.
 
 use crate::markers::{Arg, PropKind, Segment};
 use crate::semantics::SemanticIndex;
@@ -18,9 +20,9 @@ use std::ops::Range;
 
 /// Toolkit-neutral accessible role for a semantic span.
 ///
-/// The Bevy/AccessKit bridge maps these onto `accesskit::Role`; keeping the
-/// enum here lets the mapping live next to the renderer while this crate stays
-/// dependency-free and unit-testable.
+/// The Bevy/AccessKit bridge maps these onto `accesskit::Role`;
+/// keeping the enum here lets the mapping live next to the renderer
+/// while this crate stays dependency-free and unit-testable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessRole {
     /// The document root.
@@ -51,7 +53,8 @@ pub enum AccessRole {
 }
 
 impl AccessRole {
-    /// Stable lowercase identifier, handy for logging and serialization.
+    /// Stable lowercase identifier, handy for logging and
+    /// serialization.
     pub fn as_str(self) -> &'static str {
         match self {
             AccessRole::Document => "document",
@@ -77,20 +80,24 @@ impl AccessRole {
     }
 }
 
-/// A single accessible node: a human/AI-facing description of one span.
+/// A single accessible node: a human/AI-facing description of one
+/// span.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessNode {
     pub role: AccessRole,
     /// Natural-language label, e.g. `"definition of norm"`.
     pub label: String,
-    /// The underlying source content the label describes (the math/text).
+    /// The underlying source content the label describes (the
+    /// math/text).
     pub value: Option<String>,
-    /// Document byte range this node covers — lets the renderer sync the
-    /// accessibility focus with the caret and do hit-testing.
+    /// Document byte range this node covers — lets the renderer sync
+    /// the accessibility focus with the caret and do
+    /// hit-testing.
     pub range: Option<Range<usize>>,
 }
 
-/// First literal extra-argument of a segment (e.g. a definition's name).
+/// First literal extra-argument of a segment (e.g. a definition's
+/// name).
 fn extra_literal(seg: &Segment) -> Option<String> {
     seg.extra_args.iter().find_map(|a| match a {
         Arg::Literal { text, .. } => {
@@ -101,10 +108,12 @@ fn extra_literal(seg: &Segment) -> Option<String> {
     })
 }
 
-/// Produce the `(role, label)` for one segment given its (trimmed) content.
+/// Produce the `(role, label)` for one segment given its (trimmed)
+/// content.
 ///
-/// `seg.prop` is consulted for the `Statement` family so theorems, lemmas and
-/// axioms keep their distinct wording even though they share a [`PropKind`].
+/// `seg.prop` is consulted for the `Statement` family so theorems,
+/// lemmas and axioms keep their distinct wording even though they
+/// share a [`PropKind`].
 pub fn describe_segment(
     seg: &Segment,
     content: &str,
@@ -195,12 +204,13 @@ pub fn describe_segment(
     }
 }
 
-/// Build a flat, range-ordered list of accessible nodes for the document.
+/// Build a flat, range-ordered list of accessible nodes for the
+/// document.
 ///
-/// Covers every resolved [`Segment`] (the styled and semantic spans) plus
-/// unresolved identifier occurrences, which are surfaced as warnings — a
-/// signal useful both to a human reader and to an AI agent checking the
-/// document for dangling references.
+/// Covers every resolved [`Segment`] (the styled and semantic spans)
+/// plus unresolved identifier occurrences, which are surfaced as
+/// warnings — a signal useful both to a human reader and to an AI
+/// agent checking the document for dangling references.
 pub fn build_access_nodes(
     doc_text: &str,
     segments: &[Segment],

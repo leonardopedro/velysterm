@@ -1,35 +1,38 @@
 //! The user-defined translator engine (P3 #10).
 //!
-//! A *translator* is Typst source that defines a `#let translate(body) = …`
-//! binding mapping a math source string to a JSON payload for the kernel
-//! (`TermSpec[]` for `\model`, an `EventPredicate` for `\event`/`\prob`).
-//! This module evaluates that source against a `body` string and returns the
-//! JSON string the translator produced.
+//! A *translator* is Typst source that defines a `#let
+//! translate(body) = …` binding mapping a math source string to a
+//! JSON payload for the kernel (`TermSpec[]` for `\model`, an
+//! `EventPredicate` for `\event`/`\prob`). This module evaluates that
+//! source against a `body` string and returns the JSON string the
+//! translator produced.
 //!
-//! Evaluation strategy: we append `#let __mathed_result = translate(<body>)`
-//! to the translator source so Typst invokes the function *during module
-//! evaluation*, then read `__mathed_result` from the module scope. This avoids
-//! constructing a layout `Vm`/`Args` by hand to call a `Value::Func` from Rust
-//! (see `docs/mathed/TRANSLATOR_DESIGN.md` §5 Risk A — this is the resolved
+//! Evaluation strategy: we append `#let __mathed_result =
+//! translate(<body>)` to the translator source so Typst invokes the
+//! function *during module evaluation*, then read `__mathed_result`
+//! from the module scope. This avoids constructing a layout
+//! `Vm`/`Args` by hand to call a `Value::Func` from Rust (see `docs/
+//! mathed/TRANSLATOR_DESIGN.md` §5 Risk A — this is the resolved
 //! "let-binding" path).
 //!
-//! The returned value is a raw JSON *string*; parsing it into `Vec<TermSpec>`
-//! or an `EventPredicate` is the dispatcher's job, keeping the typst-eval
-//! boundary free of kernel types.
+//! The returned value is a raw JSON *string*; parsing it into
+//! `Vec<TermSpec>` or an `EventPredicate` is the dispatcher's job,
+//! keeping the typst-eval boundary free of kernel types.
 
 use crate::world::MiniWorld;
 use typst::foundations::Value;
 
-/// The default translator, used when a `\model`/`\event`/`\prob` segment names
-/// no translator. It is intentionally minimal — real documents define a
-/// model-specific translator — but it is valid Typst returning valid JSON.
+/// The default translator, used when a `\model`/`\event`/`\prob`
+/// segment names no translator. It is intentionally minimal — real
+/// documents define a model-specific translator — but it is valid
+/// Typst returning valid JSON.
 pub const BUILTIN_TRANSLATOR: &str =
     include_str!("builtin_translator.typ");
 
-/// The default event translator, used when a `\event`/`\prob` segment names
-/// no translator. Emits the `Vacuum` predicate — the simplest valid
-/// `EventPredicate` — so a document with no event translator still produces a
-/// well-formed kernel request.
+/// The default event translator, used when a `\event`/`\prob` segment
+/// names no translator. Emits the `Vacuum` predicate — the simplest
+/// valid `EventPredicate` — so a document with no event translator
+/// still produces a well-formed kernel request.
 pub const BUILTIN_EVENT_TRANSLATOR: &str =
     include_str!("builtin_event_translator.typ");
 
@@ -39,15 +42,16 @@ const RESULT_BINDING: &str = "__mathed_result";
 /// Why a translator failed to produce a JSON string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranslateError {
-    /// The Typst source failed to evaluate (syntax/runtime error). Carries
-    /// the concatenated Typst diagnostics.
+    /// The Typst source failed to evaluate (syntax/runtime error).
+    /// Carries the concatenated Typst diagnostics.
     Eval(String),
-    /// Evaluation succeeded but the result binding was absent (defensive: the
-    /// appended `translate(body)` call normally surfaces a missing function as
-    /// an [`Eval`](Self::Eval) error instead).
+    /// Evaluation succeeded but the result binding was absent
+    /// (defensive: the appended `translate(body)` call normally
+    /// surfaces a missing function as an [`Eval`](Self::Eval)
+    /// error instead).
     MissingResult,
-    /// `translate(body)` returned a non-string value (translators must return
-    /// a JSON string, e.g. via `json.encode(...)`).
+    /// `translate(body)` returned a non-string value (translators
+    /// must return a JSON string, e.g. via `json.encode(...)`).
     NotString,
     /// The translator returned an empty string.
     Empty,
@@ -78,10 +82,11 @@ impl std::fmt::Display for TranslateError {
 
 impl std::error::Error for TranslateError {}
 
-/// Evaluates translators, reusing one [`MiniWorld`] (and its loaded fonts)
-/// across calls so repeated evaluation does not reload the font set.
-/// Caches the last translator source hash to skip re-evaluation when the
-/// source hasn't changed (C14 translator caching).
+/// Evaluates translators, reusing one [`MiniWorld`] (and its loaded
+/// fonts) across calls so repeated evaluation does not reload the
+/// font set. Caches the last translator source hash to skip
+/// re-evaluation when the source hasn't changed (C14 translator
+/// caching).
 pub struct Translator {
     world: MiniWorld,
     last_src_hash: Option<u64>,
@@ -102,8 +107,8 @@ impl Translator {
         }
     }
 
-    /// Run `translator_src` against `body`, returning the JSON string the
-    /// translator's `translate(body)` function produced.
+    /// Run `translator_src` against `body`, returning the JSON string
+    /// the translator's `translate(body)` function produced.
     pub fn run(
         &mut self,
         translator_src: &str,
@@ -146,9 +151,9 @@ impl Translator {
     }
 }
 
-/// Escape `s` into a Typst double-quoted string literal (including the
-/// surrounding quotes), so a math source string can be injected verbatim into
-/// generated Typst source.
+/// Escape `s` into a Typst double-quoted string literal (including
+/// the surrounding quotes), so a math source string can be injected
+/// verbatim into generated Typst source.
 pub(crate) fn typst_str_lit(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -190,7 +195,8 @@ mod tests {
 
     #[test]
     fn translate_can_build_json_from_body() {
-        // A realistic translator: emit a single (create, annihilate) term.
+        // A realistic translator: emit a single (create, annihilate)
+        // term.
         let src = r#"#let translate(body) = {
             let ops = (
               (kind: "create", level: "inner_boson", mode: 0),
@@ -202,7 +208,8 @@ mod tests {
         let mut t = Translator::new();
         let out =
             t.run(src, "a^\\dagger a").expect("json translator");
-        // `json.encode` pretty-prints by default, so compare whitespace-free.
+        // `json.encode` pretty-prints by default, so compare
+        // whitespace-free.
         let compact: String =
             out.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
@@ -223,9 +230,10 @@ mod tests {
 
     #[test]
     fn builtin_translator_round_trips_through_term_spec() {
-        // Compile-time contract for the builtin JSON keys: the emitted array
-        // must parse into the real `unfer_protocol::TermSpec`/`OpSpec`
-        // structs. Any key/level/kind drift in builtin_translator.typ now
+        // Compile-time contract for the builtin JSON keys: the
+        // emitted array must parse into the real
+        // `unfer_protocol::TermSpec`/`OpSpec` structs. Any
+        // key/level/kind drift in builtin_translator.typ now
         // fails this test, not a downstream UK-1003.
         use unfer_protocol::{Level, OpKind, OpSpec, TermSpec};
         let mut t = Translator::new();
@@ -250,9 +258,11 @@ mod tests {
     #[test]
     fn builtin_event_translator_round_trips_through_event_predicate()
     {
-        // Same contract for builtin_event_translator.typ: its `kind: vacuum`
-        // tag must map onto `unfer_protocol::EventPredicate::Vacuum` via the
-        // real serde schema (tag = "kind", rename_all = "snake_case").
+        // Same contract for builtin_event_translator.typ: its `kind:
+        // vacuum` tag must map onto
+        // `unfer_protocol::EventPredicate::Vacuum` via the
+        // real serde schema (tag = "kind", rename_all =
+        // "snake_case").
         use unfer_protocol::EventPredicate;
         let mut t = Translator::new();
         let out = t
@@ -261,7 +271,8 @@ mod tests {
         let pred: EventPredicate = serde_json::from_str(&out)
             .expect("builtin output is an EventPredicate");
         assert_eq!(pred, EventPredicate::Vacuum);
-        // Re-serialize through the schema and confirm the tag survives.
+        // Re-serialize through the schema and confirm the tag
+        // survives.
         let re = serde_json::to_string(&pred).unwrap();
         assert_eq!(
             serde_json::from_str::<EventPredicate>(&re).unwrap(),
@@ -283,8 +294,9 @@ mod tests {
     #[test]
     fn translate_missing_function_is_eval_error() {
         let mut t = Translator::new();
-        // No `translate` binding: the appended `translate(body)` call fails
-        // to resolve, so evaluation errors (unknown variable).
+        // No `translate` binding: the appended `translate(body)` call
+        // fails to resolve, so evaluation errors (unknown
+        // variable).
         let err = t.run("#let other = 1", "x").unwrap_err();
         assert!(
             matches!(err, TranslateError::Eval(_)),

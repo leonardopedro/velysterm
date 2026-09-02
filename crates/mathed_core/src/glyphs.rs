@@ -1,15 +1,17 @@
 //! Cached glyph index for geometry queries (Bevy-free).
 //!
 //! Built once per layout change from a laid-out Typst [`Frame`], the
-//! [`GlyphIndex`] maps doc byte offsets to pen positions and back, using real
-//! font metrics. It supports caret positioning, point hit-testing, and
-//! range-to-rectangle conversion — the geometry any frontend needs to draw a
-//! caret/selection on top of the rasterized page.
+//! [`GlyphIndex`] maps doc byte offsets to pen positions and back,
+//! using real font metrics. It supports caret positioning, point
+//! hit-testing, and range-to-rectangle conversion — the geometry any
+//! frontend needs to draw a caret/selection on top of the rasterized
+//! page.
 //!
-//! This is a toolkit-neutral port of the original Bevy `mathed::glyphs`
-//! module: `bevy::Vec2` is replaced by the local [`V2`], `kurbo::Rect` by
-//! [`RectF`], and the ECS rebuild system / prelude constant are dropped (the
-//! caller passes `prelude_len` explicitly).
+//! This is a toolkit-neutral port of the original Bevy
+//! `mathed::glyphs` module: `bevy::Vec2` is replaced by the local
+//! [`V2`], `kurbo::Rect` by [`RectF`], and the ECS rebuild system /
+//! prelude constant are dropped (the caller passes `prelude_len`
+//! explicitly).
 
 use std::ops::Range;
 use typst::layout::{Frame, FrameItem};
@@ -39,7 +41,8 @@ impl std::ops::Add for V2 {
     }
 }
 
-/// An axis-aligned rectangle in frame points (replaces `kurbo::Rect`).
+/// An axis-aligned rectangle in frame points (replaces
+/// `kurbo::Rect`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectF {
     pub x0: f32,
@@ -90,9 +93,10 @@ pub struct CaretGeom {
     pub x: f32,
     pub top: f32,
     pub height: f32,
-    /// Full character-cell width (a terminal-style block cursor), taken
-    /// from the reference glyph's advance — the character starting at
-    /// the caret when exact, otherwise the preceding character's.
+    /// Full character-cell width (a terminal-style block cursor),
+    /// taken from the reference glyph's advance — the character
+    /// starting at the caret when exact, otherwise the preceding
+    /// character's.
     pub width: f32,
 }
 
@@ -109,9 +113,10 @@ struct RawRecord {
 
 /// Build a [`GlyphIndex`] from a laid-out frame.
 ///
-/// `prelude_len` is the byte length of any Typst prelude prepended to the
-/// source before the document body; glyphs whose source bytes fall below it
-/// are skipped. Pass `0` when the source is the document body verbatim.
+/// `prelude_len` is the byte length of any Typst prelude prepended to
+/// the source before the document body; glyphs whose source bytes
+/// fall below it are skipped. Pass `0` when the source is the
+/// document body verbatim.
 ///
 /// Glyphs whose (prelude-adjusted) source byte falls at or beyond
 /// `map.render_len` are also skipped — these come from display-only
@@ -228,17 +233,19 @@ pub fn build_glyph_index(
         )
     });
 
-    // Typst collapses a soft-wrapped line's trailing whitespace to zero
-    // advance (correct for layout — no visible trailing space at the end
-    // of a line — but a zero-width entry is unusable as a caret target:
-    // `caret_for_byte` would draw a zero-width block cursor there, and
-    // `byte_for_point`'s hit-test range `[e.x, e.x + e.advance)` is empty
+    // Typst collapses a soft-wrapped line's trailing whitespace to
+    // zero advance (correct for layout — no visible trailing
+    // space at the end of a line — but a zero-width entry is
+    // unusable as a caret target: `caret_for_byte` would draw a
+    // zero-width block cursor there, and `byte_for_point`'s
+    // hit-test range `[e.x, e.x + e.advance)` is empty
     // when advance is 0, so no click x can ever land inside it — the
     // byte becomes reachable only through the "not exact" fallback,
-    // which can resolve to the wrong band entirely). Patch zero-advance
-    // entries to a representative non-zero width — the median advance
-    // among the rest of the document's glyphs — so a caret landing on
-    // one of these bytes still draws and hit-tests normally.
+    // which can resolve to the wrong band entirely). Patch
+    // zero-advance entries to a representative non-zero width —
+    // the median advance among the rest of the document's glyphs
+    // — so a caret landing on one of these bytes still draws and
+    // hit-tests normally.
     let fallback_advance = {
         let mut advances: Vec<f32> = entries
             .iter()
@@ -347,12 +354,13 @@ impl GlyphIndex {
         })
     }
 
-    /// Index (into `self.bands`) of the line band containing `doc_byte`, or
-    /// the nearest band if there is no exact entry. Bands are sorted by `top`,
-    /// so the index is also the visual line number (0 = topmost).
+    /// Index (into `self.bands`) of the line band containing
+    /// `doc_byte`, or the nearest band if there is no exact
+    /// entry. Bands are sorted by `top`, so the index is also the
+    /// visual line number (0 = topmost).
     ///
-    /// Used for Up/Down caret motion: find the current band, then move to the
-    /// adjacent one and hit-test at the caret's x.
+    /// Used for Up/Down caret motion: find the current band, then
+    /// move to the adjacent one and hit-test at the caret's x.
     pub fn band_for_byte(&self, doc_byte: usize) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
@@ -373,8 +381,8 @@ impl GlyphIndex {
 
     /// Hit-test a point to a doc byte offset.
     ///
-    /// Returns `(doc_byte, after)` where `after` is true when the point falls
-    /// in the right half of the glyph.
+    /// Returns `(doc_byte, after)` where `after` is true when the
+    /// point falls in the right half of the glyph.
     pub fn byte_for_point(&self, p: V2) -> Option<(usize, bool)> {
         // Find the band containing p.y.
         let band_entries: Vec<&GlyphEntry> = self

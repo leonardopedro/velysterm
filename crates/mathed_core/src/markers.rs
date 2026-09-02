@@ -4,25 +4,26 @@
 //! kinds that are *hidden at render time* (unless the caret is inside
 //! them, mirroring the terminal example's marker hiding):
 //!
-//! - **Markers**: `#` followed by an alphanumeric id, e.g. `#1`, `#2`,
-//!   `#ad`, `#3fx`. A marker is a zero-width *anchor* in the rendered
-//!   output. Typing an unescaped `#` always auto-inserts a fresh one
-//!   (see below) rather than a bare `#`, so a marker id shaped like a
-//!   Typst call (`#set`, `#strong`, ...) can only arrive via paste —
-//!   and even then, `mathed_core::transform`'s plain-text path escapes
-//!   any `#` that isn't recognized as a marker, so it can never reach
-//!   Typst as unintended code.
+//! - **Markers**: `#` followed by an alphanumeric id, e.g. `#1`,
+//!   `#2`, `#ad`, `#3fx`. A marker is a zero-width *anchor* in the
+//!   rendered output. Typing an unescaped `#` always auto-inserts a
+//!   fresh one (see below) rather than a bare `#`, so a marker id
+//!   shaped like a Typst call (`#set`, `#strong`, ...) can only
+//!   arrive via paste — and even then, `mathed_core::transform`'s
+//!   plain-text path escapes any `#` that isn't recognized as a
+//!   marker, so it can never reach Typst as unintended code.
 //! - **Property statements**: `\name(arg, arg, ...)`, e.g.
-//!   `\function(#1,#2)` or `\bold(#3,#4)`. A statement whose first two
-//!   arguments are marker references defines a *segment*: the span of
-//!   text between those two markers carries the property. This is the
-//!   textual form of Loro's start/finish rich-text segments, and the
-//!   segments are mirrored into `LoroText` marks (see
-//!   [`crate::doc::MathDoc::mark_segment`]).
+//!   `\function(#1,#2)` or `\bold(#3,#4)`. A statement whose first
+//!   two arguments are marker references defines a *segment*: the
+//!   span of text between those two markers carries the property.
+//!   This is the textual form of Loro's start/finish rich-text
+//!   segments, and the segments are mirrored into `LoroText` marks
+//!   (see [`crate::doc::MathDoc::mark_segment`]).
 //!
 //! Escapes: `\#` is a literal `#` (as in Typst) and `\\` a literal
-//! backslash; neither starts a token. A `\name` without an immediately
-//! following `(` is left alone (it is a Typst escape sequence).
+//! backslash; neither starts a token. A `\name` without an
+//! immediately following `(` is left alone (it is a Typst escape
+//! sequence).
 //!
 //! Typing an unescaped `#` in the editors auto-inserts a fresh marker
 //! named after the RFC 1751 memorable word for the lowest free slot
@@ -32,7 +33,8 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-/// A `#id` anchor in the text. `range` covers the whole token (`#` + id).
+/// A `#id` anchor in the text. `range` covers the whole token (`#` +
+/// id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
     pub id: String,
@@ -87,32 +89,35 @@ pub enum PropKind {
     Reference,
     Statement,
     /// Kernel: populates `SemanticIndex.kernel_statements` for the
-    /// probability kernel bridge (Stage 15). The body text between the
-    /// two marker refs is the kernel payload (model spec, event
-    /// predicate, etc.); an optional literal extra-arg names the result.
+    /// probability kernel bridge (Stage 15). The body text between
+    /// the two marker refs is the kernel payload (model spec,
+    /// event predicate, etc.); an optional literal extra-arg
+    /// names the result.
     Model,
     Prior,
     Solver,
     Event,
     Prob,
-    /// A user-defined translator: Typst code (in the segment body) that
-    /// maps a math source string to a `TermSpec[]` JSON payload for the
-    /// kernel. Named via the `name:` extra-arg; looked up by `\model`'s
-    /// `translator:` extra-arg. Collected into
-    /// `SemanticIndex.translators` for the dispatcher (P3 #10).
+    /// A user-defined translator: Typst code (in the segment body)
+    /// that maps a math source string to a `TermSpec[]` JSON
+    /// payload for the kernel. Named via the `name:` extra-arg;
+    /// looked up by `\model`'s `translator:` extra-arg. Collected
+    /// into `SemanticIndex.translators` for the dispatcher (P3
+    /// #10).
     Translator,
     /// Bibliography/citation (P11.21, `mathed_biblio` bridge to
     /// `../hayagriva`): populates `SemanticIndex.biblio_statements`,
     /// mirroring the kernel-statement collection but routed to the
-    /// citation backend instead of `prob_kernel`. Segment body is a YAML
-    /// or BibTeX bibliography source; `format:`/`style:`/`name:`
-    /// extra-args pick the parser, CSL style, and a label for `\cite`'s
-    /// `bib:` binding (mirrors `\prob`'s `model:` binding).
+    /// citation backend instead of `prob_kernel`. Segment body is a
+    /// YAML or BibTeX bibliography source;
+    /// `format:`/`style:`/`name:` extra-args pick the parser, CSL
+    /// style, and a label for `\cite`'s `bib:` binding (mirrors
+    /// `\prob`'s `model:` binding).
     Bibliography,
     /// An in-text citation marker: `\cite(#1,#2, "key-a", "key-b",
-    /// style: "apa", bib: "refs")`. The translator emits these spans —
-    /// never hand-written Typst-math (P3.10 pivot) — with the bare
-    /// literal extra-args naming the cited keys, in order.
+    /// style: "apa", bib: "refs")`. The translator emits these spans
+    /// — never hand-written Typst-math (P3.10 pivot) — with the
+    /// bare literal extra-args naming the cited keys, in order.
     Cite,
     /// Federation: create or reference a DID (C12).
     Did,
@@ -120,16 +125,17 @@ pub enum PropKind {
     Content,
     /// Federation: resolve a CID and display content inline (C12).
     Resolve,
-    /// H13: a skill catalog entry (`\skill`). Renders the skills registry
-    /// surface (scope-owned modules shared by grant); the body names the skill
-    /// id, extra-args may carry `scope:` / `grants:` for the catalog panel.
+    /// H13: a skill catalog entry (`\skill`). Renders the skills
+    /// registry surface (scope-owned modules shared by grant);
+    /// the body names the skill id, extra-args may carry `scope:`
+    /// / `grants:` for the catalog panel.
     Skill,
-    /// GPU federation (GPU_FEDERATION_PLAN T1.2): a layout claim — the
-    /// body text is a bank-conflict congruence such as
+    /// GPU federation (GPU_FEDERATION_PLAN T1.2): a layout claim —
+    /// the body text is a bank-conflict congruence such as
     /// `2x + 4y ≡ 0 (mod 32)`. Kernel-bearing: collected into
     /// `SemanticIndex.kernel_statements` and dispatched by the kernel
-    /// bridge, which surfaces a UK-49xx code + `RepairHint` like any other
-    /// kernel error.
+    /// bridge, which surfaces a UK-49xx code + `RepairHint` like any
+    /// other kernel error.
     Layout,
     /// Unknown property: kept, semantically inert in v1.
     Other,
@@ -168,12 +174,12 @@ impl PropKind {
     /// Resolve a statement's `PropKind` from its name and arguments.
     /// Differs from [`PropKind::of`] for the `\cite` family:
     /// - `\cite(#s, #f)` (the *only* args are marker refs) becomes a
-    ///   `Reference` segment so the doc-text between `#s` and `#f` can
-    ///   be cited and popped up;
-    /// - `\cite(key1, key2, ...)` (any literal args) is a `Cite`
-    ///   (no segment, just a labeled bibliography reference). The
-    ///   marker refs in mixed form (`\cite(#s, #f, "key1", ...)`)
-    ///   are spatial context only and don't make a `Reference` segment.
+    ///   `Reference` segment so the doc-text between `#s` and `#f`
+    ///   can be cited and popped up;
+    /// - `\cite(key1, key2, ...)` (any literal args) is a `Cite` (no
+    ///   segment, just a labeled bibliography reference). The marker
+    ///   refs in mixed form (`\cite(#s, #f, "key1", ...)`) are
+    ///   spatial context only and don't make a `Reference` segment.
     pub fn resolve(name: &str, args: &[Arg]) -> Self {
         if matches!(name, "cite" | "citation")
             && !args.is_empty()
@@ -189,9 +195,10 @@ impl PropKind {
     }
 
     /// Kernel statements populate `SemanticIndex.kernel_statements`
-    /// and drive the probability kernel bridge. `Translator` populates
-    /// `SemanticIndex.translators` instead (a separate collection), but
-    /// is kernel-affiliated so it is surfaced to the dispatcher.
+    /// and drive the probability kernel bridge. `Translator`
+    /// populates `SemanticIndex.translators` instead (a separate
+    /// collection), but is kernel-affiliated so it is surfaced to
+    /// the dispatcher.
     pub fn is_kernel(self) -> bool {
         matches!(
             self,
@@ -205,8 +212,9 @@ impl PropKind {
         )
     }
 
-    /// Bibliography statements populate `SemanticIndex.biblio_statements`
-    /// and drive the `mathed_biblio` citation bridge (P11.21) instead of
+    /// Bibliography statements populate
+    /// `SemanticIndex.biblio_statements` and drive the
+    /// `mathed_biblio` citation bridge (P11.21) instead of
     /// the probability kernel.
     pub fn is_biblio(self) -> bool {
         matches!(self, Self::Bibliography | Self::Cite)
@@ -219,8 +227,9 @@ impl PropKind {
         matches!(self, Self::Did | Self::Content | Self::Resolve)
     }
 
-    /// H13: skill catalog statements (`\skill`) render the skills registry
-    /// surface (discovery/sharing over the existing module path).
+    /// H13: skill catalog statements (`\skill`) render the skills
+    /// registry surface (discovery/sharing over the existing
+    /// module path).
     pub fn is_skill(self) -> bool {
         matches!(self, Self::Skill)
     }
@@ -229,9 +238,9 @@ impl PropKind {
 /// A property applied to the text span between two markers.
 ///
 /// `span` is the content between the markers (exclusive of the marker
-/// tokens themselves); `None` when a referenced marker is missing or the
-/// markers are out of order — the statement is then dangling and the
-/// editor flags it instead of applying it.
+/// tokens themselves); `None` when a referenced marker is missing or
+/// the markers are out of order — the statement is then dangling and
+/// the editor flags it instead of applying it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     pub prop: String,
@@ -241,7 +250,8 @@ pub struct Segment {
     pub span: Option<Range<usize>>,
     /// Index of the defining statement in [`MarkerScan::stmts`].
     pub stmt: usize,
-    /// Arguments beyond the two marker refs (e.g. a definition name).
+    /// Arguments beyond the two marker refs (e.g. a definition
+    /// name).
     pub extra_args: Vec<Arg>,
 }
 
@@ -257,7 +267,8 @@ pub fn scan(text: &str) -> MarkerScan {
                     i = stmt.range.end;
                     out.stmts.push(stmt);
                 } else {
-                    // Typst escape: skip the backslash and the escaped char.
+                    // Typst escape: skip the backslash and the
+                    // escaped char.
                     i += 1;
                     if i < bytes.len() {
                         i += utf8_len(bytes[i]);
@@ -278,12 +289,12 @@ pub fn scan(text: &str) -> MarkerScan {
     out
 }
 
-/// Build a first-wins marker-id index, used by the statement passes that
-/// resolve marker refs. A per-statement linear marker search would make
-/// those passes quadratic in the number of markers — and they run on every
-/// rescan (every keystroke), so the index must be built in O(markers). The
-/// first marker with a given id wins, matching the precedence of the
-/// previous linear `find`.
+/// Build a first-wins marker-id index, used by the statement passes
+/// that resolve marker refs. A per-statement linear marker search
+/// would make those passes quadratic in the number of markers — and
+/// they run on every rescan (every keystroke), so the index must be
+/// built in O(markers). The first marker with a given id wins,
+/// matching the precedence of the previous linear `find`.
 fn marker_index(scan: &MarkerScan) -> HashMap<&str, &Marker> {
     let mut by_id = HashMap::with_capacity(scan.markers.len());
     for m in &scan.markers {
@@ -292,11 +303,13 @@ fn marker_index(scan: &MarkerScan) -> HashMap<&str, &Marker> {
     by_id
 }
 
-/// Resolve statements whose first two args are marker refs into segments.
+/// Resolve statements whose first two args are marker refs into
+/// segments.
 ///
-/// Marker ids are matched against the *first* marker with that id; the
-/// span runs from the end of the start marker token to the start of the
-/// end marker token. Out-of-order or missing markers yield `span: None`.
+/// Marker ids are matched against the *first* marker with that id;
+/// the span runs from the end of the start marker token to the start
+/// of the end marker token. Out-of-order or missing markers yield
+/// `span: None`.
 pub fn resolve_segments(scan: &MarkerScan) -> Vec<Segment> {
     let by_id = marker_index(scan);
     let mut segments = Vec::new();
@@ -338,11 +351,12 @@ pub fn next_marker_id(scan: &MarkerScan) -> u64 {
 }
 
 /// The `count` smallest numbers ≥ 1 whose RFC 1751 word (see
-/// [`auto_marker_id`]) is not already used as *any* existing marker's id
-/// string in the document. Auto-generated ids are pure words now (no digit
-/// prefix, so a document-level "number" isn't embedded in the text
-/// anymore) — uniqueness is just "is this exact id string already taken,"
-/// checked against the word each candidate number would produce.
+/// [`auto_marker_id`]) is not already used as *any* existing marker's
+/// id string in the document. Auto-generated ids are pure words now
+/// (no digit prefix, so a document-level "number" isn't embedded in
+/// the text anymore) — uniqueness is just "is this exact id string
+/// already taken," checked against the word each candidate number
+/// would produce.
 pub fn lowest_free_marker_numbers(
     scan: &MarkerScan,
     count: usize,
@@ -355,17 +369,17 @@ pub fn lowest_free_marker_numbers(
         .collect()
 }
 
-/// Memorable auto-generated marker id for number `n`: its RFC 1751 word
-/// encoding alone, e.g. 3 → "ad" (no digit — see
-/// [`lowest_free_marker_numbers`] for how collisions are avoided without
-/// one). The word is deterministic from the number, so knowing either
-/// recalls the other.
+/// Memorable auto-generated marker id for number `n`: its RFC 1751
+/// word encoding alone, e.g. 3 → "ad" (no digit — see
+/// [`lowest_free_marker_numbers`] for how collisions are avoided
+/// without one). The word is deterministic from the number, so
+/// knowing either recalls the other.
 pub fn auto_marker_id(n: u64) -> String {
     crate::rfc1751::u64_to_rfc1751(n)
 }
 
-/// `true` when a `#` typed at byte offset `at` would be escaped, i.e. is
-/// preceded by an odd run of backslashes (`\#` is a literal `#`).
+/// `true` when a `#` typed at byte offset `at` would be escaped, i.e.
+/// is preceded by an odd run of backslashes (`\#` is a literal `#`).
 pub fn backslash_escaped(text: &str, at: usize) -> bool {
     text.as_bytes()[..at]
         .iter()
@@ -376,10 +390,11 @@ pub fn backslash_escaped(text: &str, at: usize) -> bool {
         == 1
 }
 
-/// Token to insert when the user types `#` at `at`: a fresh auto-named
-/// marker (`#ad`), or `None` when the position is escaped and a literal
-/// `#` should be inserted instead. Call *after* any selection has been
-/// deleted so words freed by the deletion are reusable.
+/// Token to insert when the user types `#` at `at`: a fresh
+/// auto-named marker (`#ad`), or `None` when the position is escaped
+/// and a literal `#` should be inserted instead. Call *after* any
+/// selection has been deleted so words freed by the deletion are
+/// reusable.
 pub fn auto_marker_token(text: &str, at: usize) -> Option<String> {
     if backslash_escaped(text, at) {
         return None;
@@ -393,21 +408,23 @@ pub fn auto_marker_token(text: &str, at: usize) -> Option<String> {
 pub struct ReferenceEntry {
     /// Index into [`MarkerScan::stmts`].
     pub stmt_idx: usize,
-    /// Sequential numbers assigned to this cite, starting at 1 across
-    /// the whole document. A doc-ref cite gets one number; a bib-key
-    /// cite gets one number per key.
+    /// Sequential numbers assigned to this cite, starting at 1
+    /// across the whole document. A doc-ref cite gets one
+    /// number; a bib-key cite gets one number per key.
     pub numbers: Vec<u64>,
     /// Where the cite points.
     pub kind: ReferenceKind,
 }
 
-/// Target of a `\cite(...)` statement (cite_popup_boxes plan, Stage 2).
+/// Target of a `\cite(...)` statement (cite_popup_boxes plan, Stage
+/// 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferenceKind {
-    /// `\cite(#s, #f)` — references the document part between `#s` and
-    /// `#f`. `body` is the segment's body span (text between the
-    /// markers), or `None` if `#s`/`#f` are missing or out of order
-    /// (the cite is then dangling and the popup shows a placeholder).
+    /// `\cite(#s, #f)` — references the document part between `#s`
+    /// and `#f`. `body` is the segment's body span (text between
+    /// the markers), or `None` if `#s`/`#f` are missing or out of
+    /// order (the cite is then dangling and the popup shows a
+    /// placeholder).
     DocumentRef {
         start_id: String,
         end_id: String,
@@ -496,8 +513,8 @@ pub fn cite_label_text(entry: &ReferenceEntry) -> String {
 }
 
 /// First 10 alphanumeric characters of `body_text`. Non-alphanumeric
-/// characters are stripped; falls back to `"untitled"` if the body has
-/// none. Used as the visible tag for the references panel
+/// characters are stripped; falls back to `"untitled"` if the body
+/// has none. Used as the visible tag for the references panel
 /// (`tag1 [1], tag2 [2], ...`). ASCII-only on purpose: the tag is
 /// intended to be a short, typeable identifier, and Unicode scripts
 /// beyond Latin/digits are out of scope for v1.
@@ -517,8 +534,8 @@ pub fn derive_tag(body_text: &str) -> String {
 /// One entry in the "references at cursor" panel: a marker-defined
 /// segment that contains the caret, paired with a 10-character
 /// alphanumeric tag derived from its body. See
-/// [`references_for_cursor`] and the marker_overlay_and_references_panel
-/// plan.
+/// [`references_for_cursor`] and the
+/// marker_overlay_and_references_panel plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferencesEntry {
     /// The first 10 alphanumeric chars of the segment body (or
@@ -609,7 +626,8 @@ fn try_parse_stmt(text: &str, at: usize) -> Option<PropertyStmt> {
     }
     let name = text[at + 1..j].to_owned();
     let args_start = j + 1;
-    // Find the matching close paren (nesting allowed inside literals).
+    // Find the matching close paren (nesting allowed inside
+    // literals).
     let mut depth = 1usize;
     let mut k = args_start;
     let mut arg_bounds = Vec::new();
@@ -786,16 +804,19 @@ mod tests {
         assert_eq!(s.markers.len(), 2);
     }
 
-    // ── H13: skill catalog marker ───────────────────────────────────────
+    // ── H13: skill catalog marker
+    // ───────────────────────────────────────
 
     #[test]
     fn skill_marker_resolves_and_is_skill() {
-        // `\skill` names a registry entry (discovery/sharing over the module
-        // path). With literal args (a skill id) it is a statement that
-        // resolves to PropKind::Skill; is_skill() is true.
+        // `\skill` names a registry entry (discovery/sharing over the
+        // module path). With literal args (a skill id) it is
+        // a statement that resolves to PropKind::Skill;
+        // is_skill() is true.
         let s = scan(r"\skill(acme/carbon-audit, scope:org)");
         assert_eq!(s.stmts.len(), 1);
-        let kind = PropKind::resolve(&s.stmts[0].name, &s.stmts[0].args);
+        let kind =
+            PropKind::resolve(&s.stmts[0].name, &s.stmts[0].args);
         assert_eq!(kind, PropKind::Skill);
         assert!(kind.is_skill());
         assert!(!kind.is_kernel());
@@ -935,7 +956,8 @@ mod tests {
 
     #[test]
     fn scan_references_dangling_doc_ref_still_numbered() {
-        // Missing end marker — body is None but the cite still gets a number.
+        // Missing end marker — body is None but the cite still gets a
+        // number.
         let text = "#1 a \\cite(#1,#9)";
         let s = scan(text);
         let refs = scan_references(&s);
@@ -1002,7 +1024,8 @@ mod tests {
         // inside the inner segment is inside both.
         let doc = "#1 a #2 b #3 \\bold(#1,#3) \\italic(#2,#3)";
         let s = scan(doc);
-        // Caret at byte 9 (between 'a' and 'b' boundaries) is in both.
+        // Caret at byte 9 (between 'a' and 'b' boundaries) is in
+        // both.
         let entries = references_for_cursor(doc, &s, 9);
         assert_eq!(entries.len(), 2);
         // Tags are derived from the *rendered* body, so inner

@@ -18,7 +18,8 @@ fn apply_qho_hamiltonian(
         .collect()
 }
 
-/// Resolvent application: (H + i*gamma)^{-1} |n> = |n> / (n + 0.5 + i*gamma)
+/// Resolvent application: (H + i*gamma)^{-1} |n> = |n> / (n + 0.5 +
+/// i*gamma)
 fn apply_qho_resolvent(
     states: &[HermiteState],
     gamma: f32,
@@ -41,8 +42,8 @@ fn apply_qho_resolvent(
         .collect()
 }
 
-/// Initial state: Coherent state |alpha> representing vacuum shifted by x0.
-/// alpha = x0 / sqrt(2)
+/// Initial state: Coherent state |alpha> representing vacuum shifted
+/// by x0. alpha = x0 / sqrt(2)
 fn coherent_state(x0: f32, max_n: u32) -> Vec<HermiteState> {
     let alpha = x0 / 2.0_f32.sqrt();
     let mut states = Vec::new();
@@ -92,19 +93,23 @@ pub async fn run_symbolic_delta_sirk(
                 engine.inner_product(v, &v_ortho);
             // v_ortho -= <v_j | v_next> * v_j
             for _s in v_ortho.iter_mut() {
-                // We need to subtract the component of each state in the superposition
-                // This is a bit complex for a superposition, but engine.inner_product gives the scalar.
+                // We need to subtract the component of each state in
+                // the superposition This is a bit
+                // complex for a superposition, but
+                // engine.inner_product gives the scalar.
                 // We'd need a way to scale and subtract vectors.
             }
-            // Actually, in the Fock basis, we can just merge the superpositions.
-            // But wait, the Fock basis itself is orthogonal!
-            // If we have superpositions v = sum c_n |n>,
+            // Actually, in the Fock basis, we can just merge the
+            // superpositions. But wait, the Fock basis
+            // itself is orthogonal! If we have
+            // superpositions v = sum c_n |n>,
             // then v - alpha*u = sum (c_n - alpha*d_n) |n>.
         }
 
         // For simplicity and matching the "fan-less" philosophy,
-        // let's assume the basis vectors are just the results of the resolvent apps
-        // and we'll compute the matrix elements directly.
+        // let's assume the basis vectors are just the results of the
+        // resolvent apps and we'll compute the matrix
+        // elements directly.
         basis.push(apply_qho_resolvent(&basis[k], shifts[k]));
     }
 
@@ -113,8 +118,9 @@ pub async fn run_symbolic_delta_sirk(
     for i in 0..m {
         for j in 0..m {
             // We want H_ij = <v_i | H | v_j>
-            // Wait, the basis might not be orthogonal if we didn't GS.
-            // But Delta-SIRK usually expects the matrix in the Krylov basis.
+            // Wait, the basis might not be orthogonal if we didn't
+            // GS. But Delta-SIRK usually expects the
+            // matrix in the Krylov basis.
             let hj = apply_qho_hamiltonian(&basis[j]);
             let (re, im) = engine.inner_product(&basis[i], &hj);
             matrix[(i * m + j) * 2] = re;
@@ -135,9 +141,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_qho_shifted_vacuum_energy() {
-        // Skip gracefully without a GPU (Cadabra2 skip pattern in unfer).
+        // Skip gracefully without a GPU (Cadabra2 skip pattern in
+        // unfer).
         if DeltaAlgebraEngine::try_new().await.is_none() {
-            eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
+            eprintln!(
+                "SKIP: no wgpu adapter available — GPU test skipped"
+            );
             return;
         }
         // Shifted vacuum at x0 = 1.0 should have mean energy 1.0
@@ -154,22 +163,31 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_matrix_elements_match_cpu_reference() {
-        // Differential test at the SIRK level: the Krylov-basis matrix
-        // elements <v_i | H | v_j> computed through the wgpu engine must match
-        // the pure-CPU reference inner products (correctness oracle).
+        // Differential test at the SIRK level: the Krylov-basis
+        // matrix elements <v_i | H | v_j> computed through
+        // the wgpu engine must match the pure-CPU reference
+        // inner products (correctness oracle).
         let Some(engine) = DeltaAlgebraEngine::try_new().await else {
-            eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
+            eprintln!(
+                "SKIP: no wgpu adapter available — GPU test skipped"
+            );
             return;
         };
 
         let v0 = coherent_state(0.5, 8);
-        // Normalize on the GPU (as the pipeline does), using the reference
-        // only for the final comparison.
+        // Normalize on the GPU (as the pipeline does), using the
+        // reference only for the final comparison.
         let (v0_re, _) = engine.inner_product(&v0, &v0);
         let v0_norm = v0_re.sqrt();
         let v0: Vec<HermiteState> = v0
             .iter()
-            .map(|s| HermiteState::new(s.n, s.coeff_re / v0_norm, s.coeff_im / v0_norm))
+            .map(|s| {
+                HermiteState::new(
+                    s.n,
+                    s.coeff_re / v0_norm,
+                    s.coeff_im / v0_norm,
+                )
+            })
             .collect();
 
         let v1 = apply_qho_resolvent(&v0, 10.0);
@@ -179,10 +197,13 @@ mod tests {
         let (gpu_re, gpu_im) = engine.inner_product(&v0, &h_v1);
         // CPU reference matrix element.
         let (cpu_re, cpu_im) =
-            delta_algebra::reference::inner_product_reference(&v0, &h_v1);
+            delta_algebra::reference::inner_product_reference(
+                &v0, &h_v1,
+            );
 
         assert!(
-            (gpu_re - cpu_re).abs() < 1e-5 && (gpu_im - cpu_im).abs() < 1e-5,
+            (gpu_re - cpu_re).abs() < 1e-5
+                && (gpu_im - cpu_im).abs() < 1e-5,
             "GPU <v0|H|v1> = ({gpu_re}, {gpu_im}) but CPU reference = ({cpu_re}, {cpu_im})",
         );
     }

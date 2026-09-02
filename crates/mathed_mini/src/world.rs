@@ -1,10 +1,11 @@
 //! A minimal, Bevy-free [`typst::World`].
 //!
-//! Mirrors `velyst`'s `VelystWorld` but without Bevy resources: fonts come from
-//! the embedded `typst-assets` set (no system-font discovery, so it is fully
-//! portable and works on constrained hardware), the document is a single
-//! in-memory [`Source`], and there is no package/file I/O — imports are
-//! intentionally unsupported in this minimal frontend.
+//! Mirrors `velyst`'s `VelystWorld` but without Bevy resources: fonts
+//! come from the embedded `typst-assets` set (no system-font
+//! discovery, so it is fully portable and works on constrained
+//! hardware), the document is a single in-memory [`Source`], and
+//! there is no package/file I/O — imports are intentionally
+//! unsupported in this minimal frontend.
 
 use typst::comemo::Track;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
@@ -20,7 +21,8 @@ use typst::utils::{LazyHash, Protected};
 use typst::{Library, LibraryExt, World};
 use typst_layout::layout_frame as typst_layout_frame;
 
-/// Load every font embedded in `typst-assets` into a book + slot list.
+/// Load every font embedded in `typst-assets` into a book + slot
+/// list.
 fn load_fonts() -> (FontBook, Vec<Font>) {
     let mut book = FontBook::new();
     let mut fonts = Vec::new();
@@ -59,13 +61,14 @@ impl MiniWorld {
         self.main = Source::detached(markup);
     }
 
-    /// The main source document — needed to resolve glyph spans to byte
-    /// offsets when building a glyph index.
+    /// The main source document — needed to resolve glyph spans to
+    /// byte offsets when building a glyph index.
     pub fn main_source(&self) -> &Source {
         &self.main
     }
 
-    /// Evaluate the main source into a [`Content`] tree, or `None` on error.
+    /// Evaluate the main source into a [`Content`] tree, or `None` on
+    /// error.
     pub fn eval_main(&self) -> Option<Content> {
         let world: &dyn World = self;
         let mut sink = Sink::new();
@@ -86,15 +89,16 @@ impl MiniWorld {
         }
     }
 
-    /// Evaluate the main source as a Typst module and read a top-level
-    /// `#let` binding from its scope.
+    /// Evaluate the main source as a Typst module and read a
+    /// top-level `#let` binding from its scope.
     ///
-    /// Returns `Ok(Some(value))` when the module evaluates and the binding
-    /// exists, `Ok(None)` when evaluation succeeds but the binding is
-    /// absent, and `Err(message)` when evaluation itself fails (a
-    /// concatenation of the Typst diagnostics). Used by the translator
-    /// pipeline (P3 #10) to read the JSON string a translator produced,
-    /// without constructing a full layout `Vm`.
+    /// Returns `Ok(Some(value))` when the module evaluates and the
+    /// binding exists, `Ok(None)` when evaluation succeeds but
+    /// the binding is absent, and `Err(message)` when evaluation
+    /// itself fails (a concatenation of the Typst diagnostics).
+    /// Used by the translator pipeline (P3 #10) to read the JSON
+    /// string a translator produced, without constructing a full
+    /// layout `Vm`.
     pub fn eval_binding(
         &self,
         name: &str,

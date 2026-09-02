@@ -470,36 +470,31 @@ fn find_text_index_in_frame(
                             let span = glyph.span.0;
                             if let Some(id) = span.id()
                                 && let Ok(source) = world.source(id)
-                                && let Some(node) =
-                                    source.find(span)
+                                && let Some(node) = source.find(span)
                             {
-                                        let index = node
-                                            .range()
-                                            .start
-                                            + glyph.span.1 as usize;
+                                let index = node.range().start
+                                    + glyph.span.1 as usize;
 
-                                        let mut math_range = None;
-                                        let mut curr = node;
-                                        loop {
-                                            if curr.kind()
+                                let mut math_range = None;
+                                let mut curr = node;
+                                loop {
+                                    if curr.kind()
                                                 == velyst::typst::syntax::SyntaxKind::Equation
                                             {
                                                 math_range =
                                                     Some(curr.range());
                                                 break;
                                             }
-                                            if let Some(parent) =
-                                                curr.parent()
-                                            {
-                                                curr = parent.clone();
-                                            } else {
-                                                break;
-                                            }
-                                        }
+                                    if let Some(parent) =
+                                        curr.parent()
+                                    {
+                                        curr = parent.clone();
+                                    } else {
+                                        break;
+                                    }
+                                }
 
-                                        return Some((
-                                            index, math_range,
-                                        ));
+                                return Some((index, math_range));
                             }
                         }
                         x += width;
@@ -588,26 +583,22 @@ fn get_glyph_position_at_byte_index(
             && let Ok(source) = world.source(id)
             && let Some(node) = source.find(*span_id)
         {
-                    let range = node.range();
-                    let exact_byte =
-                        range.start + (*span_offset as usize);
+            let range = node.range();
+            let exact_byte = range.start + (*span_offset as usize);
 
-                    if target_byte == exact_byte {
-                        best_match =
-                            Some((Vec2::new(pos.x, *y), *size));
-                        break;
-                    }
+            if target_byte == exact_byte {
+                best_match = Some((Vec2::new(pos.x, *y), *size));
+                break;
+            }
 
-                    if exact_byte < target_byte {
-                        let dist = target_byte - exact_byte;
-                        if dist < min_dist {
-                            min_dist = dist;
-                            best_match = Some((
-                                Vec2::new(pos.x + advance, *y),
-                                *size,
-                            ));
-                        }
-                    }
+            if exact_byte < target_byte {
+                let dist = target_byte - exact_byte;
+                if dist < min_dist {
+                    min_dist = dist;
+                    best_match =
+                        Some((Vec2::new(pos.x + advance, *y), *size));
+                }
+            }
         }
     }
 

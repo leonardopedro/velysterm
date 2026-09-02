@@ -18,23 +18,25 @@ pub struct DeltaAlgebraEngine {
 impl DeltaAlgebraEngine {
     /// Initialise a new GPU engine.
     ///
-    /// Panics if no suitable GPU adapter exists. Use [`Self::try_new`]
-    /// (`Self::try_new`) for a graceful skip when a GPU is not available.
+    /// Panics if no suitable GPU adapter exists. Use
+    /// [`Self::try_new`] (`Self::try_new`) for a graceful skip
+    /// when a GPU is not available.
     pub async fn new() -> Self {
         Self::try_new()
             .await
             .expect("Failed to find a suitable GPU adapter")
     }
 
-    /// Initialise a new GPU engine, returning `None` when no suitable adapter
-    /// (or device) is available — the graceful-skip path for CI machines
-    /// without a GPU (same skip pattern as the Cadabra2-dependent tests in
-    /// `unfer/prob_kernel`).
+    /// Initialise a new GPU engine, returning `None` when no suitable
+    /// adapter (or device) is available — the graceful-skip path
+    /// for CI machines without a GPU (same skip pattern as the
+    /// Cadabra2-dependent tests in `unfer/prob_kernel`).
     pub async fn try_new() -> Option<Self> {
         let instance = wgpu::Instance::default();
         // wgpu 27 returns `Result<Adapter, RequestAdapterError>` from
-        // `request_adapter` (no `Option` since 24): `.ok()?` returns None on
-        // any adapter failure — the graceful-skip path.
+        // `request_adapter` (no `Option` since 24): `.ok()?` returns
+        // None on any adapter failure — the graceful-skip
+        // path.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
@@ -99,8 +101,9 @@ impl DeltaAlgebraEngine {
         let pipeline_layout = device.create_pipeline_layout(
             &wgpu::PipelineLayoutDescriptor {
                 label: Some("Delta-Algebra Pipeline Layout"),
-                // wgpu 29: single bind-group slot, push constants replaced
-                // by `immediate_size` (zero = no push-constant space).
+                // wgpu 29: single bind-group slot, push constants
+                // replaced by `immediate_size` (zero
+                // = no push-constant space).
                 bind_group_layouts: &[Some(&bind_group_layout)],
                 immediate_size: 0,
             },
@@ -125,10 +128,12 @@ impl DeltaAlgebraEngine {
             bind_group_layout,
         })
     }
-    /// Applies the action of a Hamiltonian string on an initial state.
+    /// Applies the action of a Hamiltonian string on an initial
+    /// state.
     ///
-    /// If the Hamiltonian consists of multiple terms that should be summed,
-    /// each term is computed independently and the results are merged.
+    /// If the Hamiltonian consists of multiple terms that should be
+    /// summed, each term is computed independently and the
+    /// results are merged.
     pub async fn apply_operator(
         &self,
         initial_states: &[HermiteState],
@@ -337,7 +342,8 @@ impl DeltaAlgebraEngine {
             let k_key = k.sort_key();
 
             if b_key == k_key {
-                // (br - i*bi) * (kr + i*ki) = (br*kr + bi*ki) + i*(br*ki - bi*kr)
+                // (br - i*bi) * (kr + i*ki) = (br*kr + bi*ki) +
+                // i*(br*ki - bi*kr)
                 total_re +=
                     b.coeff_re * k.coeff_re + b.coeff_im * k.coeff_im;
                 total_im +=
@@ -358,16 +364,21 @@ impl DeltaAlgebraEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::{apply_operator_reference, inner_product_reference};
+    use crate::reference::{
+        apply_operator_reference, inner_product_reference,
+    };
 
-    /// Build the engine, skipping the test (with a clear message) when no GPU
-    /// adapter is available — the CI-without-GPU path, matching the Cadabra2
-    /// skip pattern in `unfer/prob_kernel` (`eprintln!("SKIP..."); return;`).
+    /// Build the engine, skipping the test (with a clear message)
+    /// when no GPU adapter is available — the CI-without-GPU
+    /// path, matching the Cadabra2 skip pattern in
+    /// `unfer/prob_kernel` (`eprintln!("SKIP..."); return;`).
     async fn engine_or_skip() -> Option<DeltaAlgebraEngine> {
         match DeltaAlgebraEngine::try_new().await {
             Some(engine) => Some(engine),
             None => {
-                eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
+                eprintln!(
+                    "SKIP: no wgpu adapter available — GPU test skipped"
+                );
                 None
             }
         }
@@ -442,9 +453,9 @@ mod tests {
         assert!((x_vac[0].coeff_re - expected_amp).abs() < 1e-6);
     }
 
-    /// Differential test: the GPU engine and the CPU reference must agree on
-    /// every operator sequence (correctness oracle — never trust an
-    /// unverified accelerator path).
+    /// Differential test: the GPU engine and the CPU reference must
+    /// agree on every operator sequence (correctness oracle —
+    /// never trust an unverified accelerator path).
     async fn differential_case(
         engine: &DeltaAlgebraEngine,
         input: &[HermiteState],
@@ -487,7 +498,8 @@ mod tests {
             return;
         };
         let vac = vec![HermiteState::vacuum()];
-        let excited = vec![HermiteState::new([2, 1, 0, 3], 0.5, -0.25)];
+        let excited =
+            vec![HermiteState::new([2, 1, 0, 3], 0.5, -0.25)];
 
         for dim in 0..4 {
             differential_case(
@@ -499,7 +511,12 @@ mod tests {
             differential_case(
                 &engine,
                 &excited,
-                &[OperatorTerm::new(OpType::Annihilation, dim, 0.7, 0.3)],
+                &[OperatorTerm::new(
+                    OpType::Annihilation,
+                    dim,
+                    0.7,
+                    0.3,
+                )],
             )
             .await;
             differential_case(
@@ -517,13 +534,34 @@ mod tests {
             return;
         };
         let vac = vec![HermiteState::vacuum()];
-        let excited = vec![HermiteState::new([3, 0, 0, 0], 0.25, 0.5)];
+        let excited =
+            vec![HermiteState::new([3, 0, 0, 0], 0.25, 0.5)];
 
         for dim in 0..4 {
-            differential_case(&engine, &vac, &OperatorTerm::position(dim, 1.0)).await;
-            differential_case(&engine, &excited, &OperatorTerm::position(dim, 2.0)).await;
-            differential_case(&engine, &vac, &OperatorTerm::momentum(dim, 1.0)).await;
-            differential_case(&engine, &excited, &OperatorTerm::momentum(dim, 1.5)).await;
+            differential_case(
+                &engine,
+                &vac,
+                &OperatorTerm::position(dim, 1.0),
+            )
+            .await;
+            differential_case(
+                &engine,
+                &excited,
+                &OperatorTerm::position(dim, 2.0),
+            )
+            .await;
+            differential_case(
+                &engine,
+                &vac,
+                &OperatorTerm::momentum(dim, 1.0),
+            )
+            .await;
+            differential_case(
+                &engine,
+                &excited,
+                &OperatorTerm::momentum(dim, 1.5),
+            )
+            .await;
         }
     }
 
@@ -536,8 +574,18 @@ mod tests {
         let excited = vec![HermiteState::new([4, 0, 0, 0], 1.0, 1.0)];
 
         for dim in 0..4 {
-            differential_case(&engine, &vac, &OperatorTerm::number_op(dim)).await;
-            differential_case(&engine, &excited, &OperatorTerm::number_op(dim)).await;
+            differential_case(
+                &engine,
+                &vac,
+                &OperatorTerm::number_op(dim),
+            )
+            .await;
+            differential_case(
+                &engine,
+                &excited,
+                &OperatorTerm::number_op(dim),
+            )
+            .await;
         }
     }
 
@@ -566,11 +614,22 @@ mod tests {
         };
         let vac = vec![HermiteState::vacuum()];
         for dim in 0..4 {
-            let terms = [OperatorTerm::new(OpType::Annihilation, dim, 1.0, 0.0)];
+            let terms = [OperatorTerm::new(
+                OpType::Annihilation,
+                dim,
+                1.0,
+                0.0,
+            )];
             let gpu = engine.apply_operator(&vac, &terms).await;
             let cpu = apply_operator_reference(&vac, &terms);
-            assert!(gpu.is_empty(), "annihilation on vacuum must vanish on GPU");
-            assert!(cpu.is_empty(), "annihilation on vacuum must vanish on CPU");
+            assert!(
+                gpu.is_empty(),
+                "annihilation on vacuum must vanish on GPU"
+            );
+            assert!(
+                cpu.is_empty(),
+                "annihilation on vacuum must vanish on CPU"
+            );
         }
     }
 

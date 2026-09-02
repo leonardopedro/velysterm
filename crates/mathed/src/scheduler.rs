@@ -48,18 +48,19 @@ impl Scheduler {
         self.first_damage.get_or_insert(now);
     }
 
-    /// Note that reveal state changed (caret, selection, show_hidden).
+    /// Note that reveal state changed (caret, selection,
+    /// show_hidden).
     pub fn note_reveal(&mut self) {
         self.reveal_dirty = true;
     }
 
     /// Try to fire. Returns `Some(FireSet)` when work should be done.
     ///
-    /// - Content fires when dirty blocks exist and either the deadline
-    ///   or the upper staleness bound has passed.
+    /// - Content fires when dirty blocks exist and either the
+    ///   deadline or the upper staleness bound has passed.
     /// - Reveal fires unconditionally on the next call.
-    /// - Up to `MAX_BLOCKS_PER_FIRE` blocks per fire; remaining blocks
-    ///   re-arm the deadline.
+    /// - Up to `MAX_BLOCKS_PER_FIRE` blocks per fire; remaining
+    ///   blocks re-arm the deadline.
     pub fn take(&mut self, now: f64) -> Option<FireSet> {
         let content_ready = !self.dirty.is_empty()
             && (self.deadline.is_some_and(|d| now >= d)

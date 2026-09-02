@@ -53,7 +53,8 @@ pub struct ReferencesPanelEntry {
 
 /// The panel's current state: the cursor byte it was last updated
 /// for, and the ordered list of entries (outermost first, matching
-/// the order returned by [`mathed_core::markers::references_for_cursor`]).
+/// the order returned by
+/// [`mathed_core::markers::references_for_cursor`]).
 pub struct ReferencesPanelData {
     pub cursor_byte: usize,
     pub entries: Vec<ReferencesPanelEntry>,
@@ -145,7 +146,8 @@ pub fn render_entry_body(
 /// Compute the panel's total pixel height based on the current
 /// entries. The header is fixed at 25 px; each entry gets 5 px
 /// padding + its body's height (capped at `BODY_MAX_HEIGHT_PX`).
-/// The total is capped at `min(PANEL_MAX_PX, win_h * PANEL_MAX_FRAC)`.
+/// The total is capped at `min(PANEL_MAX_PX, win_h *
+/// PANEL_MAX_FRAC)`.
 pub fn panel_height(
     panel: &ReferencesPanelData,
     win_h: usize,

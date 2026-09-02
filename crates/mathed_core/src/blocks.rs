@@ -28,7 +28,8 @@ pub struct BlockDamage {
 
 impl BlockIndex {
     /// Updates the block index based on the new document text.
-    /// Returns the damage report specifying which blocks changed or were removed.
+    /// Returns the damage report specifying which blocks changed or
+    /// were removed.
     pub fn update(&mut self, text: &str) -> BlockDamage {
         let new_ranges = split_blocks(text);
         let mut new_blocks = Vec::with_capacity(new_ranges.len());
@@ -68,7 +69,8 @@ impl BlockIndex {
             if let Some(old) =
                 old_blocks.iter().find(|o| o.hash == new_block.hash)
             {
-                // If the block is reasonably close to the old one, assume it's the same block moved
+                // If the block is reasonably close to the old one,
+                // assume it's the same block moved
                 let dist = (new_block.range.start as isize
                     - old.range.start as isize)
                     .abs();
@@ -80,7 +82,8 @@ impl BlockIndex {
             }
         }
 
-        // 3. Fallback: Positional match for blocks that changed content
+        // 3. Fallback: Positional match for blocks that changed
+        //    content
         let mut old_idx = 0;
         for new_block in &mut new_blocks {
             if matched_old.contains(&new_block.id) {
@@ -98,7 +101,8 @@ impl BlockIndex {
                 matched_old.insert(old_blocks[old_idx].id);
                 old_idx += 1;
             } else {
-                // Truly new block: generate unique ID based on range and text
+                // Truly new block: generate unique ID based on range
+                // and text
                 let mut s =
                     std::collections::hash_map::DefaultHasher::new();
                 new_block.range.start.hash(&mut s);

@@ -1,16 +1,18 @@
 //! Core document model for the `mathed` editor.
 //!
-//! `mathed` is a math-specialized editor: its document is Typst-flavored
-//! source text held in a Loro CRDT, extended with *hidden markers*
-//! (`#1`, `#2`, ...) and *property statements* (`\function(#1,#2)`) that
-//! attach visual and semantic properties to the text segments between
-//! marker pairs — the textual form of Loro's start/finish rich-text
-//! segments.
+//! `mathed` is a math-specialized editor: its document is
+//! Typst-flavored source text held in a Loro CRDT, extended with
+//! *hidden markers* (`#1`, `#2`, ...) and *property statements*
+//! (`\function(#1,#2)`) that attach visual and semantic properties to
+//! the text segments between marker pairs — the textual form of
+//! Loro's start/finish rich-text segments.
 //!
-//! This crate is free of Bevy/GPU dependencies and fully unit-testable:
+//! This crate is free of Bevy/GPU dependencies and fully
+//! unit-testable:
 //!
-//! - [`doc`]: the Loro-backed document ([`doc::MathDoc`]) with byte-offset
-//!   editing, undo/redo, snapshots and rich-text mark mirroring.
+//! - [`doc`]: the Loro-backed document ([`doc::MathDoc`]) with
+//!   byte-offset editing, undo/redo, snapshots and rich-text mark
+//!   mirroring.
 //! - [`markers`]: scanning markers/statements and resolving segments.
 //! - [`transform`]: doc text → renderable Typst markup with hiding,
 //!   reveal-on-caret, visual wrapping and a bidirectional offset map.

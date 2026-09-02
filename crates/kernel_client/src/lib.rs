@@ -20,7 +20,8 @@ pub enum KernelRequest {
     Probability {
         /// Session to query (the `\\model` block).
         model_id: BlockId,
-        /// Result key, echoed back in the response (the `\\prob` block).
+        /// Result key, echoed back in the response (the `\\prob`
+        /// block).
         block_id: BlockId,
         event_json: String,
     },
@@ -52,9 +53,10 @@ pub enum KernelRequest {
         cid: String,
     },
     Shutdown,
-    /// Test-only: injects a deterministic panic into the worker's request
-    /// handling, so tests can pin the "a panicked request gets a visible
-    /// error and the worker survives" contract without relying on a real bug.
+    /// Test-only: injects a deterministic panic into the worker's
+    /// request handling, so tests can pin the "a panicked request
+    /// gets a visible error and the worker survives" contract
+    /// without relying on a real bug.
     #[cfg(test)]
     PanicTest {
         block_id: BlockId,
@@ -62,10 +64,11 @@ pub enum KernelRequest {
 }
 
 impl KernelRequest {
-    /// The result key the worker will (or would) echo in the response, if the
-    /// request has one. `Shutdown` has none. The worker uses this to answer a
-    /// request whose handling panicked, so the editor never waits forever for
-    /// a response that will not arrive.
+    /// The result key the worker will (or would) echo in the
+    /// response, if the request has one. `Shutdown` has none. The
+    /// worker uses this to answer a request whose handling
+    /// panicked, so the editor never waits forever for a response
+    /// that will not arrive.
     pub fn block_id(&self) -> Option<BlockId> {
         match self {
             KernelRequest::DefineModel { block_id, .. }
@@ -111,10 +114,11 @@ impl KernelClient {
         }
     }
 
-    /// Queue `req` to the worker thread. Returns `false` when the worker is
-    /// gone (the channel disconnected — e.g. the worker thread panicked), so
-    /// a caller can surface a visible error instead of silently waiting for a
-    /// response that will never arrive. The request is dropped on failure.
+    /// Queue `req` to the worker thread. Returns `false` when the
+    /// worker is gone (the channel disconnected — e.g. the worker
+    /// thread panicked), so a caller can surface a visible error
+    /// instead of silently waiting for a response that will never
+    /// arrive. The request is dropped on failure.
     pub fn submit(&self, req: KernelRequest) -> bool {
         self.tx.send(req).is_ok()
     }
@@ -149,10 +153,12 @@ mod tests {
         let client = KernelClient::new();
         // The worker is alive: a request is accepted.
         assert!(client.submit(KernelRequest::Shutdown));
-        // Wait for the worker loop to observe Shutdown and exit (the channel
-        // then disconnects, so a later submit must report failure rather than
-        // silently dropping the request).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // Wait for the worker loop to observe Shutdown and exit (the
+        // channel then disconnects, so a later submit must
+        // report failure rather than silently dropping the
+        // request).
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(5);
         while client.submit(KernelRequest::Shutdown) {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -160,8 +166,9 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        // The bridge relies on this: a dead worker surfaces a visible error
-        // instead of a request that never gets a response.
+        // The bridge relies on this: a dead worker surfaces a visible
+        // error instead of a request that never gets a
+        // response.
         assert!(!client.submit(KernelRequest::Shutdown));
     }
 }

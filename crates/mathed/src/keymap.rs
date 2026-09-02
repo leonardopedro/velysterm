@@ -1,14 +1,16 @@
 //! Keymap table: maps keyboard input to editor commands.
 //!
 //! Bindings (first match wins):
-//! - searching: Enter → SearchPrev (if shift) else SearchNext;
-//!   Escape → SearchCancel.
-//! - Arrows → Move (extend = shift); Ctrl+arrows → WordLeft/WordRight.
+//! - searching: Enter → SearchPrev (if shift) else SearchNext; Escape
+//!   → SearchCancel.
+//! - Arrows → Move (extend = shift); Ctrl+arrows →
+//!   WordLeft/WordRight.
 //! - Home/End → LineStart/LineEnd; Ctrl → DocStart/DocEnd.
 //! - Enter → Newline; Tab → InsertTab; Backspace/Delete.
 //! - Ctrl+Z → Undo (Redo if shift), Ctrl+Y → Redo.
 //! - Ctrl+X/C/V → Cut/Copy/Paste; Ctrl+S → Save.
-//! - Ctrl+B/U → InsertSegment; Ctrl+M → function; Ctrl+F → SearchStart.
+//! - Ctrl+B/U → InsertSegment; Ctrl+M → function; Ctrl+F →
+//!   SearchStart.
 //! - Ctrl+E → ExportTyp.
 //! - F12 → GotoDefinition; F2 → RenameAtCursor.
 //! - Otherwise printable text → InsertText.
