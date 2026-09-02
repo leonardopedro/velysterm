@@ -16,7 +16,7 @@
 //! re-dispatched when its body or its associated model's body changes. So
 //! editing a model recomputes the probabilities that depend on it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use kernel_client::worker::BlockResponse;
@@ -64,6 +64,11 @@ pub struct KernelBridge {
     model_hashes: HashMap<usize, u64>,
     /// prob offset → hash of the last-dispatched (prob body, model body) pair.
     prob_hashes: HashMap<usize, u64>,
+    /// Statement offsets present in the last-refreshed index. `poll` drops
+    /// any late response whose key is not live so a deleted statement can
+    /// never resurrect a stale annotation, and refresh prunes every scratch
+    /// map against it.
+    live: HashSet<usize>,
     /// translator offset → error message (P5 #28). Populated during refresh
     /// when a dispatch error involves a translator (bad Typst code, wrong JSON
     /// output, …). Consumed by [`translator_errors`](Self::translator_errors)
@@ -87,6 +92,7 @@ impl KernelBridge {
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
             translator_errors: HashMap::new(),
+            live: HashSet::new(),
         }
     }
 
@@ -241,6 +247,16 @@ impl KernelBridge {
         // Clear stale translator errors from the previous scan (P5 #28).
         // They're re-populated below if dispatch errors recur.
         self.translator_errors.clear();
+
+        // The set of statements actually present in THIS scan. Used at the
+        // end to prune scratch maps (a deleted `\prob`/`\model` must not keep
+        // displaying its old annotation) and by `poll` to drop late responses
+        // for statements that no longer exist.
+        self.live = idx
+            .kernel_statements
+            .iter()
+            .map(|s| s.span.start)
+            .collect();
 
         // Models in document order.
         let mut models: Vec<&KernelStatement> = idx
@@ -403,6 +419,24 @@ impl KernelBridge {
             let Some(model) =
                 resolve_model(&models, stmt, &mut self.results)
             else {
+                // The prob's model binding is gone. `resolve_model` replaces
+                // the entry with a `model-not-found` error when a *named*
+                // model vanished; in the nearest-preceding case it leaves the
+                // previous VALUE in place — a stale number computed under the
+                // dead model must not keep annotating the document. Drop only
+                // a computed value (keep the named-case error), and clear the
+                // dispatch hash so a later reappearing model recomputes.
+                if matches!(
+                    self.results.get(&stmt.span.start),
+                    Some(
+                        KernelResult::Value(_)
+                            | KernelResult::StringValue(_)
+                    )
+                ) {
+                    self.results.remove(&stmt.span.start);
+                    changed = true;
+                }
+                self.prob_hashes.remove(&stmt.span.start);
                 continue;
             };
 
@@ -504,6 +538,18 @@ impl KernelBridge {
                 changed = true;
             }
         }
+
+        // Reconcile every scratch map against the statements now in the
+        // document. A deleted statement's stale annotation (or dispatch hash)
+        // must not persist across refreshes.
+        self.results
+            .retain(|k, _| self.live.contains(k));
+        self.prob_hashes
+            .retain(|k, _| self.live.contains(k));
+        self.model_hashes
+            .retain(|k, _| self.live.contains(k));
+        self.prob_names
+            .retain(|k, _| self.live.contains(k));
         changed
     }
 
@@ -512,6 +558,20 @@ impl KernelBridge {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         while let Some(resp) = self.client.try_recv() {
+            // A late response for a statement that has since been deleted must
+            // not resurrect its stale annotation: the key is not live anymore.
+            let key_live = match &resp {
+                BlockResponse::Value(id, _)
+                | BlockResponse::StringValue(id, _)
+                | BlockResponse::Error(id, _) => {
+                    self.live.contains(&(*id as usize))
+                }
+                // Model (re)definition carries no displayed result.
+                BlockResponse::Success(_) => true,
+            };
+            if !key_live {
+                continue;
+            }
             match resp {
                 BlockResponse::Value(id, v) => {
                     self.results
@@ -1318,6 +1378,64 @@ mod tests {
             }
             other => panic!("expected a Value result, got {other:?}"),
         }
+    }
+
+    /// REGRESSION: a prob computed under a model must not keep showing its
+    /// value after the model is deleted (the nearest-preceding binding
+    /// vanishes) — the stale annotation would silently present a number from
+    /// a dead model. The cleanup must also drop the dispatch hash so a
+    /// reappearing model recomputes. The prob keeps its byte offset between
+    /// the two documents: only the model semantics disappear.
+    #[test]
+    fn stale_prob_result_cleared_when_model_deleted() {
+        let doc1 =
+            "#1 m #2 \\model(#1,#2)\n\n\
+             #7 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } \
+             #8 \\translator(#7,#8, name: \"ev\")\n\n\
+             #5 vac #6 \\prob(#5,#6, translator: \"ev\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc1);
+        let key = prob_offset(doc1);
+        match wait_for(&mut bridge, key, Duration::from_secs(15)) {
+            Some(KernelResult::Value(p)) => {
+                assert!(
+                    (p - 1.0).abs() < 1e-9,
+                    "P(vacuum) under the model should be 1.0, got {p}"
+                );
+            }
+            other => panic!("expected computed value, got {other:?}"),
+        }
+        assert!(
+            bridge.results.contains_key(&key),
+            "the value must be displayed before the model is removed"
+        );
+
+        // The model statement becomes equal-length inert text so every
+        // subsequent byte offset (incl. the prob) is identical between the
+        // two documents — the stale entry stays keyed by a LIVE offset, and
+        // only the dangling-binding cleanup can remove it.
+        let doc2 =
+            "#1 m #2 xxxxxxxxxxxxx\n\n\
+             #7 #let translate(b) = { \"{\\\"kind\\\":\\\"vacuum\\\"}\" } \
+             #8 \\translator(#7,#8, name: \"ev\")\n\n\
+             #5 vac #6 \\prob(#5,#6, translator: \"ev\")";
+        assert_eq!(
+            prob_offset(doc2),
+            key,
+            "the two docs must differ only in the model line"
+        );
+        bridge.refresh(doc2);
+        bridge.poll();
+        assert!(
+            !bridge.results.contains_key(&key),
+            "stale value computed under the deleted model must not keep \
+             annotating the document"
+        );
+        assert!(
+            !bridge.prob_hashes.contains_key(&key),
+            "stale dispatch hash must be cleared so a reappearing model \
+             recomputes"
+        );
     }
 
     #[test]
