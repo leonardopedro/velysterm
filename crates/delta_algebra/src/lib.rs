@@ -99,8 +99,10 @@ impl DeltaAlgebraEngine {
         let pipeline_layout = device.create_pipeline_layout(
             &wgpu::PipelineLayoutDescriptor {
                 label: Some("Delta-Algebra Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                // wgpu 29: single bind-group slot, push constants replaced
+                // by `immediate_size` (zero = no push-constant space).
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
             },
         );
 

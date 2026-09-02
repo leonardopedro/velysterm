@@ -54,7 +54,8 @@ typst-assets = "0.15"
 unicode-math-class = "0.1"
 ttf-parser = "0.25"
 hayro = "0.4"
-wgpu = "27"
+# wgpu generation aligned with the bevy 0.19 / vello-0-9 stack (wgpu 29)
+wgpu = "29"
 hayro-svg = "0.7"
 usvg = { version = "0.47.0", default-features = false, features = ["text"] }
 image = { version = "0.25", default-features = false }
