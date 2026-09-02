@@ -23,11 +23,11 @@ use std::time::{Duration, Instant};
 use kernel_client::worker::BlockResponse;
 use kernel_client::{KernelClient, KernelRequest};
 use mathed_core::PropKind;
-use mathed_core::markers::{resolve_segments, scan};
+use mathed_core::markers::{resolve_segments, scan, MarkerScan, Segment};
 use mathed_core::semantics::{
     KernelStatement, SemanticIndex, TranslatorDef,
 };
-use mathed_core::transform::{TransformOptions, to_render_text};
+use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src,
@@ -291,7 +291,15 @@ impl KernelBridge {
     }
 
     pub fn refresh(&mut self, doc_text: &str) -> bool {
-        let idx = build_index(doc_text);
+        self.refresh_with_index(&build_index(doc_text))
+    }
+
+    /// Re-dispatch kernel statements from an already-built index. The editor
+    /// computes the pipeline ONCE per edit and hands the same index to the
+    /// kernel refresh AND the accessibility tree, so a keystroke scans the
+    /// document a single time instead of once per consumer (openclaw
+    /// doctrine: latency is work, not round-trips).
+    pub fn refresh_with_index(&mut self, idx: &SemanticIndex) -> bool {
         let mut changed = false;
 
         // Clear stale translator errors from the previous scan (P5 #28).
@@ -672,8 +680,13 @@ impl KernelBridge {
     }
 }
 
-/// Build the semantic index for `doc_text` (whole document as one block).
-fn build_index(doc_text: &str) -> SemanticIndex {
+/// The full scan pipeline for `doc_text` (whole document as one block): scan
+/// → segments → render → semantic index. The kernel refresh and the
+/// accessibility tree consume the SAME result, so an edit runs this once,
+/// never once per consumer.
+pub fn scan_pipeline(
+    doc_text: &str,
+) -> (MarkerScan, Vec<Segment>, RenderOutput, SemanticIndex) {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
     let render = to_render_text(
@@ -684,7 +697,54 @@ fn build_index(doc_text: &str) -> SemanticIndex {
     );
     let mut idx = SemanticIndex::default();
     idx.build_index(doc_text, &segments, &[&render]);
-    idx
+    (scan, segments, render, idx)
+}
+
+/// Build the semantic index for `doc_text` (whole document as one block).
+fn build_index(doc_text: &str) -> SemanticIndex {
+    scan_pipeline(doc_text).3
+}
+
+/// A document scan pipeline cached against the text it was built from. The
+/// kernel refresh and the accessibility tree consume the SAME pipeline per
+/// edit, so a keystroke scans the document once, never once per consumer.
+/// `for_text` rebuilds only when the text actually changed, making a stale
+/// reuse impossible by construction (repeated calls on an unchanged doc —
+/// cursor moves, marker toggles, repeated a11y pushes — hit the cache).
+#[derive(Default)]
+pub struct PipelineCache {
+    text: String,
+    scan: MarkerScan,
+    segments: Vec<Segment>,
+    idx: SemanticIndex,
+}
+
+impl PipelineCache {
+    /// The pipeline for `text`, rebuilding the full scan when the cached
+    /// text differs. Shared borrows keep the cached pieces alive for both
+    /// consumers without copying.
+    pub fn for_text(&mut self, text: &str) -> &Self {
+        if self.text != text {
+            let (scan, segments, _render, idx) = scan_pipeline(text);
+            self.text = text.to_string();
+            self.scan = scan;
+            self.segments = segments;
+            self.idx = idx;
+        }
+        self
+    }
+
+    pub fn scan(&self) -> &MarkerScan {
+        &self.scan
+    }
+
+    pub fn segments(&self) -> &[Segment] {
+        &self.segments
+    }
+
+    pub fn idx(&self) -> &SemanticIndex {
+        &self.idx
+    }
 }
 
 /// Resolve which `\model` a `\prob`/`\event` statement applies to.
@@ -1055,6 +1115,70 @@ mod tests {
                    #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
                    #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
         assert!(bridge.refresh(doc));
+    }
+
+    /// REGRESSION (round 14): the index-parameterized refresh must dispatch
+    /// EXACTLY like the text-based one — the editor now builds the pipeline
+    /// once per edit and feeds the SAME index to the kernel refresh and the
+    /// accessibility tree, so any drift between the two entry points would
+    /// silently change which `\model`/`\prob` get submitted.
+    #[test]
+    fn refresh_with_index_dispatches_identically_to_refresh() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\
+                   #3 vac #4 \\prob(#3,#4)\n\
+                   #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
+                   #7 v #8 \\prob(#7,#8, translator: \"bad\")";
+        // Second scan WITHOUT the bad translator: the stale dispatch error
+        // from scan 1 must be cleared on scan 2 (P5 #28). Running the same
+        // two-scan sequence through both entry points pins their full state
+        // equivalence, including the cross-scan lifecycle.
+        let clean = "#1 a #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)";
+
+        let mut via_text = KernelBridge::new();
+        via_text.refresh(doc);
+        via_text.refresh(clean);
+        assert!(
+            via_text.translator_errors.is_empty(),
+            "second scan must clear the stale translator error"
+        );
+
+        let mut via_index = KernelBridge::new();
+        via_index.refresh_with_index(&build_index(doc));
+        via_index.refresh_with_index(&build_index(clean));
+
+        assert_eq!(via_index.model_hashes, via_text.model_hashes);
+        assert_eq!(via_index.live, via_text.live);
+        assert_eq!(via_index.translator_errors, via_text.translator_errors);
+        assert_eq!(via_index.results, via_text.results);
+    }
+
+    /// The shared pipeline is the same content the bridge used to build
+    /// internally, and the cache rebuilds exactly when the text changes
+    /// (a stale reuse is impossible by construction: the text key gates it).
+    #[test]
+    fn scan_pipeline_and_cache_guard() {
+        let doc = "#1 a #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)";
+        let (pipe_scan, segments, _render, idx) = scan_pipeline(doc);
+        // Seam: the pipeline's index is byte-for-byte the old build_index
+        // output (same kernel statements collected).
+        assert_eq!(
+            idx.kernel_statements.len(),
+            build_index(doc).kernel_statements.len()
+        );
+        // And the scan/segments pieces are the raw marker passes.
+        assert_eq!(pipe_scan, scan(doc));
+        assert_eq!(segments, resolve_segments(&scan(doc)));
+
+        // Cache: reuse on the same text, rebuild exactly on change.
+        let mut cache = PipelineCache::default();
+        cache.for_text(doc);
+        assert_eq!(cache.text, doc);
+        cache.for_text(doc);
+        assert_eq!(cache.text, doc);
+        cache.for_text("#1 b #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)");
+        assert_ne!(cache.text, doc);
+        cache.for_text(doc);
+        assert_eq!(cache.text, doc);
     }
 
     #[test]

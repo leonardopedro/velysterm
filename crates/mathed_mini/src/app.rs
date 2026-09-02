@@ -20,7 +20,6 @@ use mathed_core::MathDoc;
 use mathed_core::blocks::{BlockId, BlockIndex};
 use mathed_core::glyphs::{CaretGeom, RectF};
 use mathed_core::markers::{resolve_segments, scan};
-use mathed_core::semantics::SemanticIndex;
 use winit::application::ApplicationHandler;
 use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, WindowEvent,
@@ -41,7 +40,7 @@ const FAR_LEFT: f32 = -1.0e7;
 const FAR_RIGHT: f32 = 1.0e7;
 
 use crate::a11y::build_tree_update;
-use crate::kernel_bridge::KernelBridge;
+use crate::kernel_bridge::{KernelBridge, PipelineCache};
 use crate::references_panel::{
     ReferencesPanelData, open_references_panel,
     panel_height as references_panel_height,
@@ -132,6 +131,9 @@ struct App {
     pref_x: Option<f32>,
     /// Probability kernel bridge (P3 #11): computes `\prob` results off-thread.
     bridge: KernelBridge,
+    /// One scan pipeline per edit, shared by the kernel refresh and the
+    /// accessibility tree (a keystroke scans the document once, not twice).
+    pipeline: PipelineCache,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry is the
@@ -199,6 +201,7 @@ impl App {
             layout_width: 0,
             pref_x: None,
             bridge: KernelBridge::new(),
+            pipeline: PipelineCache::default(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
             show_marker_overlay: false,
@@ -295,19 +298,15 @@ impl App {
         let Some(adapter) = self.adapter.as_mut() else {
             return;
         };
+        // One pipeline shared with the kernel refresh: the doc was scanned
+        // on the last edit (or on the previous push if the text only moved
+        // under the caret), so this is a cache hit, not a second scan.
         let text = self.doc.text();
-        let scan = scan(text);
-        let segments = resolve_segments(&scan);
-        let mut idx = SemanticIndex::default();
-        let render = mathed_core::transform::to_render_text(
-            text,
-            &scan,
-            &segments,
-            &TransformOptions::default(),
-        );
-        idx.build_index(text, &segments, &[&render]);
+        let cached = self.pipeline.for_text(text);
         let nodes = mathed_core::accessibility::build_access_nodes(
-            text, &segments, &idx,
+            text,
+            cached.segments(),
+            cached.idx(),
         );
         let update = build_tree_update(&nodes);
         adapter.update_if_active(|| update);
@@ -430,7 +429,12 @@ impl App {
     /// Re-run the kernel on the current document and open a polling window so
     /// async `\prob` results get picked up. Called after every edit.
     fn refresh_kernel(&mut self) {
-        self.bridge.refresh(self.doc.text());
+        // Build the scan pipeline ONCE for this edit and feed the same index
+        // to the kernel dispatch; `push_a11y_update` reuses the cached
+        // scan/segments for the accessibility tree. One scan per keystroke.
+        let text = self.doc.text();
+        let cached = self.pipeline.for_text(text);
+        self.bridge.refresh_with_index(cached.idx());
         self.kernel_deadline =
             Some(Instant::now() + KERNEL_POLL_WINDOW);
     }
