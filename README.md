@@ -22,12 +22,16 @@ document (Loro CRDT)
 
 | Crate | Description |
 |---|---|
-| `mathed_core` | Loro doc model: markers, properties, semantic index, glyphs, accessibility. 126 tests. |
-| `mathed_mini` | Bevy-free CPU frontend (winit + softbuffer). Full editor with caret, kernel bridge, translator pipeline. 105 tests. |
-| `mathed` | Bevy editor — thin wrapper over `mathed_mini::KernelBridge`. 29 tests. |
-| `mathed_biblio` | Hayagriva citation backend. 11 tests. |
+| `mathed_core` | Loro doc model: markers, properties, semantic index, glyphs, accessibility. |
+| `mathed_mini` | Bevy-free CPU frontend (winit + softbuffer). Full editor with caret, kernel bridge, translator pipeline. |
+| `mathed` | Bevy editor — thin wrapper over `mathed_mini::KernelBridge`. |
+| `mathed_biblio` | Hayagriva citation backend. |
 | `kernel_client` | Worker-thread client over `prob_kernel::Session`. `unfer_agent` NDJSON binary (AI-agent interface). |
 | `delta_algebra` / `delta_sirk` | Orphaned GPU (wgpu) experiments — archived. |
+
+(Test counts are intentionally not listed here: they change with every test
+added and would silently rot — run the `Verify` commands below for the live
+numbers.)
 
 ## Verify
 
@@ -233,9 +237,9 @@ cargo test --workspace
 Quick sanity:
 
 ```bash
-cargo test -p mathed_core --lib     # 98 tests: marker / property / cite / reference helpers
-cargo test -p mathed_mini --lib     # 76 tests: render + popup + overlay + panel helpers
-cargo test -p mathed_biblio --lib   # 11 tests: citation bridge to hayagriva
+cargo test -p mathed_core --lib     # marker / property / cite / reference helpers
+cargo test -p mathed_mini --lib     # render + popup + overlay + panel helpers
+cargo test -p mathed_biblio --lib   # citation bridge to hayagriva
 ```
 
 If you only want the headless render path (no GPU, no GUI):
