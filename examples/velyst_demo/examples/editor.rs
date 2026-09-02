@@ -83,8 +83,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             parent.spawn((
                 Text::new(""),
                 TextFont {
-                    font: asset_server.load("fonts/dejavu.ttf"),
-                    font_size: 20.0,
+                    font: FontSource::Handle(
+                        asset_server.load("fonts/dejavu.ttf"),
+                    ),
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(Color::Srgba(Srgba::new(

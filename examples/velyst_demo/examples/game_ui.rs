@@ -155,7 +155,7 @@ typst_func!(
 impl LabelFunc {
     pub fn title(text: &str) -> Self {
         Self {
-            body: elem::heading(elem::text(text).pack()).pack(),
+            body: heading_content(text),
             size: Some(Abs::pt(48.0)),
             ..default()
         }
@@ -179,7 +179,7 @@ typst_func!(
 impl ButtonFunc {
     pub fn text(text: &str) -> Self {
         Self {
-            body: elem::heading(elem::text(text).pack()).pack(),
+            body: heading_content(text),
             ..default()
         }
     }
@@ -188,4 +188,17 @@ impl ButtonFunc {
         self.fill = Some(fill);
         self
     }
+}
+
+/// Build `#heading[text]` content for a func's `body`.
+///
+/// The fork dropped the `typst_element` crate's
+/// `elem::heading`/`elem::text` helpers (fork-sync commit e1256d2);
+/// construct the elements through the typst facade that `velyst`
+/// re-exports instead.
+fn heading_content(text: &str) -> Content {
+    velyst::typst::model::HeadingElem::new(
+        velyst::typst::text::TextElem::packed(text),
+    )
+    .pack()
 }

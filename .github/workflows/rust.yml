@@ -35,8 +35,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks
-      # (P4 #16 — stale velyst examples referencing removed APIs).
+      # Note: not --all-features: delta_algebra/delta_sirk pin wgpu 27 while
+      # bevy 0.19 pulls wgpu 29; naga 27 fails codespan-reporting's termcolor
+      # gate when both stacks build in one combined check (round-18 follow-up
+      # in IMPROVEMENT_PLAN.md). Individual crates and subsets build clean.
       - run: cargo check --workspace --all-targets
 
   check-no-defaults:
@@ -56,7 +58,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
       - run: rustup component add clippy
-      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      # Note: not --all-features (round-18 follow-up, IMPROVEMENT_PLAN.md):
+      # wgpu-27 (delta_*) + wgpu-29 (bevy) break naga 27 in one combined build.
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   doc:
@@ -66,7 +69,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      # Note: not --all-features (round-18 follow-up, IMPROVEMENT_PLAN.md):
+      # wgpu-27 (delta_*) + wgpu-29 (bevy) break naga 27 in one combined build.
       - run: cargo doc --workspace --no-deps --document-private-items --features="bevy/wayland"
         env:
           RUSTDOCFLAGS: -D warnings
@@ -78,7 +82,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      # Note: not --all-features (round-18 follow-up, IMPROVEMENT_PLAN.md):
+      # wgpu-27 (delta_*) + wgpu-29 (bevy) break naga 27 in one combined build.
       - run: cargo test --workspace --all-targets
 
   # Note: cargo test --all-targets disables doc tests, so we have to add this to test docs
@@ -89,7 +94,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      # Note: not --all-features: 'upstream-stale-examples' deliberately breaks.
+      # Note: not --all-features (round-18 follow-up, IMPROVEMENT_PLAN.md):
+      # wgpu-27 (delta_*) + wgpu-29 (bevy) break naga 27 in one combined build.
       - run: cargo test --workspace --doc
 
   # Stage C10: headless kernel smoke — no display server needed.
