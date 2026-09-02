@@ -77,8 +77,12 @@ impl KernelClient {
         }
     }
 
-    pub fn submit(&self, req: KernelRequest) {
-        let _ = self.tx.send(req);
+    /// Queue `req` to the worker thread. Returns `false` when the worker is
+    /// gone (the channel disconnected — e.g. the worker thread panicked), so
+    /// a caller can surface a visible error instead of silently waiting for a
+    /// response that will never arrive. The request is dropped on failure.
+    pub fn submit(&self, req: KernelRequest) -> bool {
+        self.tx.send(req).is_ok()
     }
 
     pub fn try_recv(&self) -> Option<BlockResponse> {
@@ -99,5 +103,31 @@ impl Drop for KernelClient {
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submit_returns_false_after_worker_exits() {
+        let client = KernelClient::new();
+        // The worker is alive: a request is accepted.
+        assert!(client.submit(KernelRequest::Shutdown));
+        // Wait for the worker loop to observe Shutdown and exit (the channel
+        // then disconnects, so a later submit must report failure rather than
+        // silently dropping the request).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while client.submit(KernelRequest::Shutdown) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker never exited after Shutdown"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // The bridge relies on this: a dead worker surfaces a visible error
+        // instead of a request that never gets a response.
+        assert!(!client.submit(KernelRequest::Shutdown));
     }
 }

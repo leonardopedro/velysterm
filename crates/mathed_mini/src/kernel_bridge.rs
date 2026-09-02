@@ -203,6 +203,37 @@ impl KernelBridge {
     /// solver). Async worker responses are reported by [`poll`](Self::poll).
     /// A frontend that renders inline annotations should re-transform the
     /// affected blocks when this returns `true` (or when `poll` does).
+    /// Submit a kernel request, keyed by `block_id` (the statement's doc
+    /// offset). If the worker thread is gone (channel disconnected — a
+    /// panicked worker), record a visible error at the block instead of
+    /// silently dropping the request and waiting forever for a response that
+    /// will never arrive (no dead-ends: the UI shows why the annotation is
+    /// missing).
+    fn submit_or_error(
+        &mut self,
+        block_id: u64,
+        req: KernelRequest,
+    ) {
+        if !self.client.submit(req) {
+            self.results.insert(
+                block_id as usize,
+                KernelResult::Error {
+                    code_name: "kernel-worker-down".to_string(),
+                    message: "the kernel worker thread is not running; \
+                              restart the editor to re-establish the kernel \
+                              connection"
+                        .to_string(),
+                    hints: vec![RepairHint::new(
+                        HintKind::SetParam,
+                        "kernel.worker",
+                        "restart the editor; a panicked worker cannot be \
+                         revived in place",
+                    )],
+                },
+            );
+        }
+    }
+
     pub fn refresh(&mut self, doc_text: &str) -> bool {
         let idx = build_index(doc_text);
         let mut changed = false;
@@ -322,10 +353,13 @@ impl KernelBridge {
                     if let Some(off) = trans_off {
                         self.translator_errors.remove(&off);
                     }
-                    self.client.submit(KernelRequest::DefineModel {
-                        block_id: m.span.start as u64,
-                        spec,
-                    });
+                    self.submit_or_error(
+                        m.span.start as u64,
+                        KernelRequest::DefineModel {
+                            block_id: m.span.start as u64,
+                            spec,
+                        },
+                    );
                     self.model_hashes.insert(m.span.start, h);
                 }
                 Err(ref e)
@@ -407,7 +441,8 @@ impl KernelBridge {
                         self.translator_errors.remove(&off);
                     }
                     if let Some(cond_json) = &stmt.condition_event {
-                        self.client.submit(
+                        self.submit_or_error(
+                            stmt.span.start as u64,
                             KernelRequest::Condition {
                                 model_id: model.span.start as u64,
                                 block_id: stmt.span.start as u64,
@@ -415,11 +450,14 @@ impl KernelBridge {
                             },
                         );
                     }
-                    self.client.submit(KernelRequest::Probability {
-                        model_id: model.span.start as u64,
-                        block_id: stmt.span.start as u64,
-                        event_json,
-                    });
+                    self.submit_or_error(
+                        stmt.span.start as u64,
+                        KernelRequest::Probability {
+                            model_id: model.span.start as u64,
+                            block_id: stmt.span.start as u64,
+                            event_json,
+                        },
+                    );
                     self.prob_hashes.insert(stmt.span.start, key);
                 }
                 Err(ref e)
