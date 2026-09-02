@@ -29,6 +29,7 @@
 //! (e.g. `#ad` for the third free slot) — see [`auto_marker_token`].
 //! So a bare `#` never appears in a document except via `\#`.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
 /// A `#id` anchor in the text. `range` covers the whole token (`#` + id).
@@ -277,13 +278,27 @@ pub fn scan(text: &str) -> MarkerScan {
     out
 }
 
+/// Build a first-wins marker-id index, used by the statement passes that
+/// resolve marker refs. A per-statement linear marker search would make
+/// those passes quadratic in the number of markers — and they run on every
+/// rescan (every keystroke), so the index must be built in O(markers). The
+/// first marker with a given id wins, matching the precedence of the
+/// previous linear `find`.
+fn marker_index(scan: &MarkerScan) -> HashMap<&str, &Marker> {
+    let mut by_id = HashMap::with_capacity(scan.markers.len());
+    for m in &scan.markers {
+        by_id.entry(m.id.as_str()).or_insert(m);
+    }
+    by_id
+}
+
 /// Resolve statements whose first two args are marker refs into segments.
 ///
 /// Marker ids are matched against the *first* marker with that id; the
 /// span runs from the end of the start marker token to the start of the
 /// end marker token. Out-of-order or missing markers yield `span: None`.
 pub fn resolve_segments(scan: &MarkerScan) -> Vec<Segment> {
-    let find = |id: &str| scan.markers.iter().find(|m| m.id == id);
+    let by_id = marker_index(scan);
     let mut segments = Vec::new();
     for (idx, stmt) in scan.stmts.iter().enumerate() {
         let [a, b, rest @ ..] = stmt.args.as_slice() else {
@@ -294,7 +309,7 @@ pub fn resolve_segments(scan: &MarkerScan) -> Vec<Segment> {
         else {
             continue;
         };
-        let span = match (find(start_id), find(end_id)) {
+        let span = match (by_id.get(start_id), by_id.get(end_id)) {
             (Some(s), Some(e)) if s.range.end <= e.range.start => {
                 Some(s.range.end..e.range.start)
             }
@@ -408,6 +423,7 @@ pub enum ReferenceKind {
 /// starting at 1. Document-ref and bib-key cites share the same
 /// counter so a document with both has a single `[N]` sequence.
 pub fn scan_references(scan: &MarkerScan) -> Vec<ReferenceEntry> {
+    let by_id = marker_index(scan);
     let mut out = Vec::new();
     let mut n: u64 = 1;
     for (idx, stmt) in scan.stmts.iter().enumerate() {
@@ -425,10 +441,8 @@ pub fn scan_references(scan: &MarkerScan) -> Vec<ReferenceEntry> {
                 .all(|a| matches!(a, Arg::MarkerRef { .. })) =>
             {
                 let body = (|| -> Option<Range<usize>> {
-                    let s_m =
-                        scan.markers.iter().find(|m| &m.id == s)?;
-                    let e_m =
-                        scan.markers.iter().find(|m| &m.id == e)?;
+                    let s_m = by_id.get(s.as_str())?;
+                    let e_m = by_id.get(e.as_str())?;
                     (s_m.range.end <= e_m.range.start)
                         .then_some(s_m.range.end..e_m.range.start)
                 })();
