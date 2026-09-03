@@ -12,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer is cloned with
+      # plain git instead of a second checkout action.
       - name: Checkout unfer as sibling (op-census cross-check)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Run scripts/verify-invariants (H1)
         run: bash scripts/verify-invariants
 
@@ -24,16 +24,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: rustup component add rustfmt
@@ -46,16 +45,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
@@ -67,16 +65,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
@@ -86,16 +83,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
@@ -107,16 +103,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
@@ -129,16 +124,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
@@ -150,16 +144,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
@@ -176,16 +169,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # actions/checkout refuses paths outside $GITHUB_WORKSPACE ("Repository
+      # path ... is not under ..." guard), so the sibling unfer +
+      # dynamic-arctic are cloned with plain git: the workspace crates
+      # path-dep on ../../../unfer, whose unfer_consensus in turn
+      # path-depends on ../../dynamic-arctic.
       - name: Checkout unfer as sibling (path deps)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/unfer
-          path: ../unfer
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
-        uses: actions/checkout@v4
-        with:
-          repository: leonardopedro/dynamic-arctic
-          path: ../dynamic-arctic
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
