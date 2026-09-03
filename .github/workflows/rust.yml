@@ -1,4 +1,5 @@
 name: CI
+# (touch) force re-registration after repo-level Actions enablement
 on: 
   pull_request:
   push:
