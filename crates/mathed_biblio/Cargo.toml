@@ -1,0 +1,13 @@
+[package]
+name = "mathed_biblio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bibliography & citation backend for velysterm's math editor, wrapping ../hayagriva (P11.21)."
+
+[dependencies]
+hayagriva = "0.10"
+mathed_core = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

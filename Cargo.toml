@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "crates/delta_sirk"]
+members = ["crates/*", "examples/*"]
+exclude = [
+    "/.github/",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,32 +13,52 @@ repository = "https://github.com/voxell-tech/velyst"
 readme = "README.md"
 
 [workspace.dependencies]
-typst_element = { path = "crates/typst_element", version = "0.1.0" }
+velyst = { path = "crates/velyst", version = "0.1.0" }
 typst_imaging = { path = "crates/typst_imaging", version = "0.1.0" }
 kanva = { path = "crates/kanva", version = "0.1.0" }
+kanva_svg = { path = "crates/kanva_svg", version = "0.1.0" }
+kanva_typst = { path = "crates/kanva_typst", version = "0.1.0" }
 
-# Bevy dependencies
-bevy = { version = "0.18.1", default-features = false }
-bevy_vello = "0.13.1"
+# Bevy dependencies (in sync with upstream velyst main: bevy 0.19 / vello 0.9).
+# Feature set avoids the `2d`/`default_platform` aggregates, which pull
+# `bevy_gilrs` → libudev-sys (a system udev dev dependency not present in this
+# project's build environments). The specific pieces cover everything mathed /
+# the vendored velyst use: windowing, 2D render + camera, UI, remote, state.
+bevy = { version = "0.19", default-features = false, features = [
+  "std",
+  "default_app",
+  "2d_bevy_render",
+  "bevy_ui",
+  "bevy_winit",
+  "x11",
+  "wayland",
+  "multi_threaded",
+  "default_font",
+  "bevy_remote",
+] }
+bevy_vello = "0.14"
 # Vello dependencies
-vello = "0.7.0"
+vello = "0.9.0"
 vello_svg = "0.9.0"
 # Imaging dependencies
-imaging = { git = "https://github.com/forest-rs/imaging", rev = "79f02ae", default-features = false }
-svg_imaging = { git = "https://github.com/forest-rs/imaging", rev = "79f02ae", default-features = false }
-imaging_vello = { git = "https://github.com/forest-rs/imaging", rev = "79f02ae", default-features = false, features = ["vello-0-7"] }
-# Peniko/Kurbo
-peniko = { version = "0.6", features = ["std"] }
+imaging = { version = "0.0.1", default-features = false }
+svg_imaging = { version = "0.0.1", default-features = false }
+imaging_vello = { version = "0.0.2", default-features = false, features = ["vello-0-9"] }
 # Typst dependencies
-typst = "0.14.2"
-typst-library = "0.14.2"
-typst-eval = "0.14.2"
-typst-layout = "0.14.2"
-typst-assets = "0.14.2"
+typst = "0.15"
+typst-library = "0.15"
+typst-eval = "0.15"
+typst-layout = "0.15"
+typst-assets = "0.15"
 # In sync with Typst:
 unicode-math-class = "0.1"
 ttf-parser = "0.25"
-hayro-svg = "0.2"
+hayro = "0.4"
+# wgpu generation aligned with the bevy 0.19 / vello-0-9 stack (wgpu 29)
+wgpu = "29"
+hayro-svg = "0.7"
+usvg = { version = "0.47.0", default-features = false, features = ["text"] }
+image = { version = "0.25", default-features = false }
 # Other
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ureq = "2"
@@ -44,13 +67,28 @@ tar = "0.4"
 dirs = "5"
 hashbrown = "0.17"
 ecow = { version = "0.2", features = ["serde"] }
-thiserror = "1"
-smallvec = "1"
+thiserror = "2.0.18"
+smallvec = "1.15.1"
 paste = "1"
+num-complex = "0.4.6"
+rustc-hash = "2.1.1"
+rayon = "1.11.0"
+nalgebra = "0.34.1"
+pest = "2.8.6"
+pest_derive = "2.8.6"
+serde = { version = "1", features = ["derive"] }
+
+# Document model
+loro = "1.13"
+
+# Property-based testing
+proptest = "1"
+mathed_core = { path = "crates/mathed_core", version = "0.1.0" }
 
 # Terminal
 alacritty_terminal = "0.25.1"
 portable-pty = "0.9.0"
+arboard = "3.6.1"
 
 [workspace.lints.clippy]
 redundant_type_annotations = "warn"

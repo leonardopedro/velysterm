@@ -4,52 +4,124 @@ on:
   push:
     branches:
       - main
+      - gitbutler/workspace
 jobs:
+  # H1 (PLAN_HARNESS): maintenance-invariant gate. Cross-checks the op-count
+  # header against the sibling unfer AGENT_OPS census.
+  verify-invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (op-census cross-check)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Run scripts/verify-invariants (H1)
+        run: bash scripts/verify-invariants
+
   format:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - run: rustup component add rustfmt
-      - run: cargo fmt --all -- --check
+      # cargo +nightly fmt --all also formats path-dependency sources (the
+      # sibling unfer/dynamic-arctic repos), so scope to this repo's own
+      # files with rustfmt directly (rustfmt.toml is read from the cwd).
+      - run: rustup run nightly rustfmt --edition 2024 --check $(git ls-files '*.rs')
 
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      # --all-features guards feature-unification rot (round-19: the wgpu-27/29
+      # dual stack that broke naga 27 is fixed; all-features builds green).
       - run: cargo check --workspace --all-features --all-targets
 
   check-no-defaults:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
       - run: cargo check --workspace --no-default-features
 
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
       - run: rustup component add clippy
+      # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
   doc:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
-      - run: cargo doc --workspace --all-features --no-deps --document-private-items --features="bevy/wayland"
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      # --all-features: green since round 19 (wgpu 27/29 unification fixed).
+      - run: cargo doc --workspace --all-features --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
     
@@ -57,9 +129,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo test --workspace --all-features --all-targets
 
   # Note: cargo test --all-targets disables doc tests, so we have to add this to test docs
@@ -67,7 +150,46 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libudev-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo test --workspace --all-features --doc
+
+  # Stage C10: headless kernel smoke — no display server needed.
+  # mathed: document → KernelBridge → worker → prob_kernel → annotation
+  #   appears in the transformed Typst source (green value / red error).
+  # mathed_mini: same document rendered to an RGBA8 image; green pixels
+  #   for a successful prob, red pixels for an error.
+  # Fails if the kernel path breaks end-to-end.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout unfer as sibling (path deps)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/unfer
+          path: ../unfer
+      - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
+        uses: actions/checkout@v4
+        with:
+          repository: leonardopedro/dynamic-arctic
+          path: ../dynamic-arctic
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - name: mathed headless kernel smoke (transformed source)
+        run: cargo test -p mathed kernel_smoke
+      - name: mathed_mini headless kernel smoke (rasterized pixels)
+        run: cargo test -p mathed_mini overlay_renders_green

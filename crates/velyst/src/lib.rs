@@ -6,14 +6,15 @@ use bevy::ui::UiSystems;
 use renderer::VelystRendererPlugin;
 use world::VelystWorldPlugin;
 
+pub use bevy_vello;
 pub use imaging;
 pub use kanva;
 pub use typst;
-pub use typst_element;
 
 pub mod prelude {
     pub use crate::VelystSet;
     pub use crate::asset::{VelystModules, VelystSource};
+    pub use crate::ext::{ScopeError, ScopeExt, UnitExt};
     pub use crate::func::{
         TypstFunc, TypstFuncAppExt, TypstValue, VelystContent,
         VelystFunc, VelystSourceReady,
@@ -23,10 +24,14 @@ pub mod prelude {
     };
     pub use crate::typst_func;
     pub use crate::world::VelystWorld;
-    pub use typst_element::prelude::*;
+    pub use typst::foundations::Content;
+    pub use typst::foundations::NativeElement;
+    pub use typst::layout::Abs;
+    pub use typst::visualize as viz;
 }
 
 pub mod asset;
+pub mod ext;
 pub mod func;
 pub mod renderer;
 pub mod world;
@@ -65,7 +70,9 @@ pub enum VelystSet {
     ///
     /// One system per registered [`func::TypstFunc`] type runs here.
     Compile,
-    /// Layout [`func::VelystContent`] and render into [`UiVelloScene`][bevy_vello::prelude::UiVelloScene] or [`VelloScene2d`][bevy_vello::prelude::VelloScene2d].
+    /// Layout [`func::VelystContent`] and render into
+    /// [`UiVelloScene`][bevy_vello::prelude::UiVelloScene] or
+    /// [`VelloScene2d`][bevy_vello::prelude::VelloScene2d].
     Layout,
     /// Post-layout hook for downstream systems.
     PostLayout,

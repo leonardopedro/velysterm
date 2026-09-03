@@ -12,7 +12,7 @@ use bevy::time::common_conditions::on_timer;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use ecow::eco_format;
 use fonts::TypstFonts;
-use typst::comemo::{Constraint, Track};
+use typst::comemo::Track;
 use typst::diag::{
     FileError, FileResult, PackageError, Severity, SourceDiagnostic,
 };
@@ -20,13 +20,14 @@ use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{
     Bytes, Content, Datetime, Module, StyleChain,
 };
-use typst::introspection::Introspector;
+use typst::introspection::EmptyIntrospector;
 use typst::layout::{Frame, Region};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{FileId, Source};
+use typst::syntax::{FileId, Source, VirtualRoot};
 use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
-use typst::{Library, LibraryExt};
+use typst::utils::{LazyHash, Protected};
+use typst::{Library, LibraryExt, World, WorldExt};
+use typst_layout::layout_frame;
 
 pub mod fonts;
 
@@ -76,8 +77,8 @@ impl Default for TypstLibrary {
     }
 }
 
-/// The current datetime if requested. This is stored here to ensure it is
-/// always the same within one frame. Reset between frames.
+/// The current datetime if requested. This is stored here to ensure
+/// it is always the same within one frame. Reset between frames.
 #[derive(Resource, Deref, DerefMut)]
 pub struct TypstDateTime(DateTime<Local>);
 
@@ -94,8 +95,8 @@ pub type FileSlots = HashMap<FileId, FileSlot>;
 #[derive(Resource, Default, Deref, DerefMut)]
 pub struct TypstFileSlots(Mutex<FileSlots>);
 
-/// Controls whether typst packages can be downloaded from the internet,
-/// and where they are cached locally.
+/// Controls whether typst packages can be downloaded from the
+/// internet, and where they are cached locally.
 ///
 /// Enabled by default in debug builds, disabled in release builds.
 /// Change this resource at runtime to override the default behavior.
@@ -137,8 +138,8 @@ impl VelystWorld<'_> {
 
         // Try to evaluate the source file into a module.
         let module = typst_eval::eval(
-            &typst::ROUTINES,
             world.track(),
+            world.library(),
             Traced::default().track(),
             sink.track_mut(),
             Route::default().track(),
@@ -148,7 +149,7 @@ impl VelystWorld<'_> {
         match module {
             Ok(module) => {
                 for warning in sink.warnings() {
-                    log_diagnostic(warning);
+                    log_diagnostic(self, warning);
                 }
 
                 Some(module)
@@ -156,7 +157,7 @@ impl VelystWorld<'_> {
             Err(errors) => {
                 error!("Evaluation failed for {:?}!", source.id());
                 for error in errors {
-                    log_diagnostic(error);
+                    log_diagnostic(self, error);
                 }
 
                 None
@@ -172,8 +173,7 @@ impl VelystWorld<'_> {
         let world: &dyn typst::World = self;
         let styles = StyleChain::new(&world.library().styles);
 
-        let introspector = Introspector::default();
-        let constraint = Constraint::default();
+        let introspector = EmptyIntrospector;
 
         let traced = Traced::default();
         let mut sink = Sink::new();
@@ -186,9 +186,9 @@ impl VelystWorld<'_> {
             sink.delayed();
 
             let mut engine = Engine {
-                routines: &typst::ROUTINES,
                 world: world.track(),
-                introspector: introspector.track_with(&constraint),
+                library: world.library(),
+                introspector: Protected::new(introspector.track()),
                 traced: traced.track(),
                 sink: sink.track_mut(),
                 route: Route::default(),
@@ -197,7 +197,7 @@ impl VelystWorld<'_> {
             let locator = typst::introspection::Locator::root();
 
             // Layout!
-            (typst::ROUTINES.layout_frame)(
+            layout_frame(
                 &mut engine,
                 content,
                 locator,
@@ -208,13 +208,13 @@ impl VelystWorld<'_> {
 
         // Log delayed errors.
         for delay in sink.delayed() {
-            log_diagnostic(delay);
+            log_diagnostic(self, delay);
         }
 
         match frame {
             Ok(frame) => {
                 for warning in sink.warnings() {
-                    log_diagnostic(warning);
+                    log_diagnostic(self, warning);
                 }
 
                 Some(frame)
@@ -222,7 +222,7 @@ impl VelystWorld<'_> {
             Err(errors) => {
                 error!("Layout failed!");
                 for error in errors {
-                    log_diagnostic(error);
+                    log_diagnostic(self, error);
                 }
 
                 None
@@ -269,12 +269,17 @@ impl typst::World for VelystWorld<'_> {
         self.fonts.fonts[index].get()
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
+    fn today(
+        &self,
+        offset: Option<typst::foundations::Duration>,
+    ) -> Option<Datetime> {
         let naive = match offset {
             None => self.date_time.naive_local(),
-            Some(o) => {
+            Some(offset) => {
                 self.date_time.naive_utc()
-                    + chrono::Duration::hours(o)
+                    + chrono::Duration::seconds(
+                        offset.seconds() as i64
+                    )
             }
         };
 
@@ -291,7 +296,8 @@ impl typst::World for VelystWorld<'_> {
 
 /// Holds the processed data for a file ID.
 ///
-/// Both fields can be populated if the file is both imported and read().
+/// Both fields can be populated if the file is both imported and
+/// read().
 pub struct FileSlot {
     /// The slot's file id.
     id: FileId,
@@ -356,7 +362,8 @@ struct SlotCell<T> {
     data: Option<FileResult<T>>,
     /// A hash of the raw file contents / access error.
     fingerprint: u128,
-    /// Whether the slot has been accessed in the current compilation.
+    /// Whether the slot has been accessed in the current
+    /// compilation.
     accessed: bool,
 }
 
@@ -381,7 +388,8 @@ impl<T: Clone> SlotCell<T> {
         path: impl FnOnce() -> FileResult<PathBuf>,
         f: impl FnOnce(Vec<u8>, Option<T>) -> FileResult<T>,
     ) -> FileResult<T> {
-        // If we accessed the file already in this compilation, retrieve it.
+        // If we accessed the file already in this compilation,
+        // retrieve it.
         if mem::replace(&mut self.accessed, true)
             && let Some(data) = &self.data
         {
@@ -392,7 +400,8 @@ impl<T: Clone> SlotCell<T> {
         let result = path().and_then(|p| read(&p));
         let fingerprint = typst::utils::hash128(&result);
 
-        // If the file contents didn't change, yield the old processed data.
+        // If the file contents didn't change, yield the old processed
+        // data.
         if mem::replace(&mut self.fingerprint, fingerprint)
             == fingerprint
             && let Some(data) = &self.data
@@ -408,14 +417,14 @@ impl<T: Clone> SlotCell<T> {
     }
 }
 
-/// Resolves the path of a file id on the system, downloading a package if
-/// necessary.
+/// Resolves the path of a file id on the system, downloading a
+/// package if necessary.
 fn system_path(
     project_root: &Path,
     id: FileId,
     download: &TypstPackageDownload,
 ) -> FileResult<PathBuf> {
-    let root = if let Some(spec) = id.package() {
+    let root = if let VirtualRoot::Package(spec) = id.root() {
         prepare_package(spec, download)?
     } else {
         project_root.to_path_buf()
@@ -423,11 +432,13 @@ fn system_path(
 
     // Join the path to the root. If it tries to escape, deny
     // access. Note: It can still escape via symlinks.
-    id.vpath().resolve(&root).ok_or(FileError::AccessDenied)
+    id.vpath()
+        .realize(&root)
+        .map_err(|_| FileError::AccessDenied)
 }
 
-/// Returns the local cache directory for a package, downloading it first if
-/// it is not already present and downloading is enabled.
+/// Returns the local cache directory for a package, downloading it
+/// first if it is not already present and downloading is enabled.
 fn prepare_package(
     spec: &PackageSpec,
     download: &TypstPackageDownload,
@@ -457,7 +468,8 @@ fn prepare_package(
     Ok(package_dir)
 }
 
-/// Downloads a package from `packages.typst.org` and extracts it into `dest`.
+/// Downloads a package from `packages.typst.org` and extracts it into
+/// `dest`.
 fn download_package(
     spec: &PackageSpec,
     dest: &Path,
@@ -518,17 +530,42 @@ fn decode_utf8(buf: &[u8]) -> FileResult<&str> {
     )?)
 }
 
-fn log_diagnostic(diagnostic: SourceDiagnostic) {
+fn log_diagnostic(world: &VelystWorld, diagnostic: SourceDiagnostic) {
     let mut log_msg = String::new();
     log_msg.push('\n');
     log_msg.push_str(&diagnostic.message);
     log_msg.push('\n');
-    log_msg.push_str(&format!("In file: {:?}", diagnostic.span.id()));
+
+    let location = diagnostic.span.id().map(|id| {
+        let line_col = world
+            .source(id)
+            .ok()
+            .zip(world.range(diagnostic.span))
+            .and_then(|(source, range)| {
+                source.lines().byte_to_line_column(range.start)
+            });
+        match line_col {
+            Some((line, col)) => {
+                format!("In file: {:?}:{}:{}", id, line + 1, col + 1)
+            }
+            None => format!("In file: {:?}", id),
+        }
+    });
+    log_msg.push_str(
+        &location.unwrap_or_else(|| "In file: <unknown>".to_string()),
+    );
     log_msg.push('\n');
     log_msg.push_str(&format!("Trace: {:?}", diagnostic.trace));
     log_msg.push('\n');
-    log_msg
-        .push_str(&format!("Hints: {}", diagnostic.hints.join("\n")));
+    log_msg.push_str(&format!(
+        "Hints: {}",
+        diagnostic
+            .hints
+            .iter()
+            .map(|h| h.v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
 
     match diagnostic.severity {
         Severity::Error => error!("{log_msg}"),

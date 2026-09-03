@@ -1,0 +1,60 @@
+[package]
+name = "mathed_mini"
+description = "Minimal, Bevy-free math editor frontend: typst_imaging (CPU) renderer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mathed_core = { path = "../mathed_core" }
+mathed_biblio = { path = "../mathed_biblio" }
+typst_imaging = { workspace = true }
+
+# Kernel contract types: the translator pipeline parses translator output
+# into TermSpec/ModelSpec (P3 #10). Serde types only — no Bevy, no solver.
+unfer_protocol = { path = "../../../unfer/unfer_protocol" }
+serde_json = "1.0"
+
+# The probability kernel client (worker thread + Session). Pulls prob_kernel
+# (P3 #11: wire kernel_client into mathed_mini) so a \prob computes a real
+# number off the render thread.
+kernel_client = { path = "../kernel_client" }
+# H4 durable-store status dashboard: the TUI consults the unfer kernel's
+# store read-only (backend, persist counter, stream lengths, corrupt-
+# snapshot recovery report). unfer_ffi is rlib-compatible.
+unfer_ffi = { path = "../../../unfer/unfer_ffi" }
+
+typst = { workspace = true }
+typst-library = { workspace = true }
+typst-eval = { workspace = true }
+typst-layout = { workspace = true }
+typst-assets = { workspace = true, features = ["fonts"] }
+
+# CPU rasterizer (software vello) + the shared RGBA8 image type. No GPU, so the
+# renderer runs on constrained hardware.
+imaging = { workspace = true, features = ["std"] }
+imaging_vello_cpu = { version = "0.0.2", features = ["std"] }
+
+# Optional lightweight windowing — kept behind the `gui` feature so the render
+# core stays headless-capable. winit 0.30 matches the one Bevy already pulls.
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+# AccessKit bridge over mathed_core::accessibility (P4 #22). Optional so the
+# headless render core stays dependency-free.
+accesskit = { version = "0.21", optional = true }
+accesskit_winit = { version = "0.29", optional = true }
+# System clipboard for copy/paste (P5 #25). Reuses the workspace version Bevy
+# already pulls; optional so the headless render core stays dependency-free.
+arboard = { version = "3.6.1", optional = true }
+
+[features]
+default = ["gui"]
+gui = ["dep:winit", "dep:softbuffer", "dep:accesskit", "dep:accesskit_winit", "dep:arboard"]
+
+[[bin]]
+name = "mathed_mini"
+required-features = ["gui"]
+
+[lints]
+workspace = true

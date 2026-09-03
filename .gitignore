@@ -2,3 +2,5 @@
 *.pdf
 *.svg
 **/typst_packages/
+.DS_Store
+repomix-output.xml

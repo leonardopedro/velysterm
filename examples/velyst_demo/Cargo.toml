@@ -1,0 +1,38 @@
+[package]
+name = "velyst_demo"
+description = "Examples demonstrating velyst."
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mathed_core = { workspace = true }
+velyst = { workspace = true }
+
+bevy = { workspace = true, features = [
+  # velysterm-local: upstream's `2d` aggregate pulls `default_platform` →
+  # `bevy_gilrs` → libudev-sys (system udev dev dependency this workspace
+  # deliberately avoids — see root Cargo.toml + crates/velyst/Cargo.toml).
+  # Enable only the granular pieces these examples actually use: camera/
+  # render (2d_bevy_render), UI + text (bevy_ui/bevy_text), winit windowing
+  # on x11/wayland, and asset file watching.
+  "2d_bevy_render",
+  "bevy_ui",
+  "bevy_text",
+  "bevy_winit",
+  "x11",
+  "wayland",
+  "file_watcher",
+] }
+bevy_vello = { workspace = true, features = ["svg"] }
+
+# Vendored terminal editor example (P5 #28 velysterm-fork) uses
+# alacritty_terminal + portable-pty + arboard.
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+arboard = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "kernel_client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+unfer_protocol = { path = "../../../unfer/unfer_protocol" }
+prob_kernel = { path = "../../../unfer/prob_kernel" }
+unfer_consensus = { path = "../../../unfer/unfer_consensus" }
+unfer_identity = { path = "../../../unfer/unfer_identity" }
+unfer_data = { path = "../../../unfer/unfer_data" }
+logos = { path = "../../../unfer/logos" }
+ode_sirk = { path = "../../../unfer/ode_sirk" }
+mathed_core = { path = "../mathed_core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+thiserror = "1.0"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+# Add tests dependencies if needed
