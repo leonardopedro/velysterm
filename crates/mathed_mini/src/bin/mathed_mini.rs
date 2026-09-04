@@ -29,47 +29,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rest = &args[2..];
         match flag.as_str() {
             "--dashboard-typst" => {
-                let path = rest.first().ok_or(
-                    "--dashboard-typst requires a file path",
-                )?;
+                let path = rest
+                    .first()
+                    .ok_or("--dashboard-typst requires a file path")?;
                 let out = mathed_mini::durable_dashboard::dashboard_document();
                 std::fs::write(path, out)?;
-                eprintln!(
-                    "Exported durable dashboard Typst to {path}"
-                );
+                eprintln!("Exported durable dashboard Typst to {path}");
                 return Ok(());
             }
             "--dashboard" => {
                 // Open the editor on the durable-status dashboard
                 // document.
-                return mathed_mini::app::run(
-                    &mathed_mini::durable_dashboard::dashboard_document(),
-                );
+                return mathed_mini::app::run(&mathed_mini::durable_dashboard::dashboard_document());
             }
             "--export-typst" => {
-                let path = rest
-                    .first()
-                    .ok_or("--export-typst requires a file path")?;
+                let path = rest.first().ok_or("--export-typst requires a file path")?;
                 let out = mathed_mini::export::export_typst(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported Typst to {path}");
                 return Ok(());
             }
             "--export-json" => {
-                let path = rest
-                    .first()
-                    .ok_or("--export-json requires a file path")?;
+                let path = rest.first().ok_or("--export-json requires a file path")?;
                 let out = mathed_mini::export::export_json(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported JSON to {path}");
                 return Ok(());
             }
             "--export-md" => {
-                let path = rest
-                    .first()
-                    .ok_or("--export-md requires a file path")?;
-                let out =
-                    mathed_mini::export::export_markdown(initial);
+                let path = rest.first().ok_or("--export-md requires a file path")?;
+                let out = mathed_mini::export::export_markdown(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported Markdown to {path}");
                 return Ok(());

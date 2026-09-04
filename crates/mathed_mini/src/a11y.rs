@@ -248,9 +248,7 @@ mod tests {
         // round-trip through `byte_offset_for_node`.
         use mathed_core::markers::{resolve_segments, scan};
         use mathed_core::semantics::SemanticIndex;
-        use mathed_core::transform::{
-            TransformOptions, to_render_text,
-        };
+        use mathed_core::transform::{TransformOptions, to_render_text};
 
         // Fixture: a model + a prob. The `#N` markers are
         // placeholders that `markers::scan` resolves to
@@ -266,16 +264,9 @@ mod tests {
         );
 
         let mut idx = SemanticIndex::default();
-        let render = to_render_text(
-            doc,
-            &scan,
-            &segments,
-            &TransformOptions::default(),
-        );
+        let render = to_render_text(doc, &scan, &segments, &TransformOptions::default());
         idx.build_index(doc, &segments, &[&render]);
-        let nodes = mathed_core::accessibility::build_access_nodes(
-            doc, &segments, &idx,
-        );
+        let nodes = mathed_core::accessibility::build_access_nodes(doc, &segments, &idx);
         assert!(
             nodes.len() >= 2,
             "expected at least model + prob nodes, got {nodes:?}"
@@ -290,8 +281,7 @@ mod tests {
             if id.0 == ROOT_ID {
                 continue;
             }
-            let offset = byte_offset_for_node(*id)
-                .expect("non-root node must carry a byte offset");
+            let offset = byte_offset_for_node(*id).expect("non-root node must carry a byte offset");
             assert!(
                 offset <= doc.len(),
                 "node ID {id:?} decoded to offset {offset}, doc len = {}",

@@ -18,10 +18,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn((Camera2d, VelloView));
 
     commands.spawn((
-        VelystFunc::new(
-            asset_server.load("typst/box.typ"),
-            MainFunc::default(),
-        ),
+        VelystFunc::new(asset_server.load("typst/box.typ"), MainFunc::default()),
         WorldScene::default(),
     ));
 }

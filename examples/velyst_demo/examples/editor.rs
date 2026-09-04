@@ -63,10 +63,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
                     rendered_text: "".into(),
                     cursor_index: 0,
                     active_math_range: None,
-                    update_timer: Timer::from_seconds(
-                        1.5,
-                        TimerMode::Once,
-                    ),
+                    update_timer: Timer::from_seconds(1.5, TimerMode::Once),
                 },
                 VelystFunc::new(handle, EditorFunc::default()),
                 Node {
@@ -83,15 +80,11 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             parent.spawn((
                 Text::new(""),
                 TextFont {
-                    font: FontSource::Handle(
-                        asset_server.load("fonts/dejavu.ttf"),
-                    ),
+                    font: FontSource::Handle(asset_server.load("fonts/dejavu.ttf")),
                     font_size: FontSize::Px(20.0),
                     ..default()
                 },
-                TextColor(Color::Srgba(Srgba::new(
-                    0.92, 0.92, 0.95, 0.2,
-                ))),
+                TextColor(Color::Srgba(Srgba::new(0.92, 0.92, 0.95, 0.2))),
                 FastText,
                 Node {
                     position_type: PositionType::Absolute,
@@ -180,8 +173,7 @@ fn handle_input(
                                 if !c.is_control() || c == ' ' {
                                     let idx = editor.cursor_index;
                                     editor.text.insert(idx, c);
-                                    editor.cursor_index +=
-                                        c.len_utf8();
+                                    editor.cursor_index += c.len_utf8();
                                     editor.update_timer.reset();
                                 }
                             }
@@ -200,54 +192,40 @@ fn update_editor(
 ) -> Result {
     for (mut editor, mut func) in &mut editor_query {
         editor.update_timer.tick(time.delta());
-        let is_finished = editor.update_timer.elapsed()
-            >= editor.update_timer.duration();
+        let is_finished = editor.update_timer.elapsed() >= editor.update_timer.duration();
 
         if !is_finished {
             if let Some(range) = &editor.active_math_range {
                 if range.end <= editor.text.len() {
-                    let active =
-                        editor.text[range.clone()].to_string();
+                    let active = editor.text[range.clone()].to_string();
 
-                    let before = if range.start
-                        <= editor.rendered_text.len()
-                    {
-                        editor.rendered_text[..range.start]
-                            .to_string()
+                    let before = if range.start <= editor.rendered_text.len() {
+                        editor.rendered_text[..range.start].to_string()
                     } else {
                         editor.rendered_text.clone()
                     };
 
-                    let after = if range.end
-                        <= editor.rendered_text.len()
-                    {
+                    let after = if range.end <= editor.rendered_text.len() {
                         editor.rendered_text[range.end..].to_string()
                     } else {
                         "".to_string()
                     };
 
-                    if func.active != active
-                        || func.before != before
-                        || func.after != after
-                    {
+                    if func.active != active || func.before != before || func.after != after {
                         func.before = before;
                         func.active = active;
                         func.after = after;
                     }
                 }
             } else {
-                if !func.active.is_empty()
-                    || func.before != editor.rendered_text
-                {
+                if !func.active.is_empty() || func.before != editor.rendered_text {
                     func.before = editor.rendered_text.clone();
                     func.active = "".to_string();
                     func.after = "".to_string();
                 }
             }
         } else {
-            if editor.text != editor.rendered_text
-                || !func.active.is_empty()
-            {
+            if editor.text != editor.rendered_text || !func.active.is_empty() {
                 editor.rendered_text = editor.text.clone();
                 func.before = editor.text.clone();
                 func.active = "".to_string();
@@ -260,33 +238,21 @@ fn update_editor(
 
 fn update_fast_text(
     editor_query: Query<(&Editor, &EditorFunc, &VelystFrame)>,
-    mut fast_text_query: Query<
-        (&mut Text, &mut Node, &mut TextColor),
-        With<FastText>,
-    >,
+    mut fast_text_query: Query<(&mut Text, &mut Node, &mut TextColor), With<FastText>>,
     world: VelystWorld,
 ) -> Result {
     for (editor, func, frame) in &editor_query {
-        for (mut fast_text, mut node, mut text_color) in
-            &mut fast_text_query
-        {
+        for (mut fast_text, mut node, mut text_color) in &mut fast_text_query {
             if let Some(range) = &editor.active_math_range {
                 let current = &editor.text;
-                if !func.active.is_empty()
-                    && range.end <= current.len()
-                {
+                if !func.active.is_empty() && range.end <= current.len() {
                     let diff = &current[range.clone()];
                     fast_text.0 = diff.to_string();
                     text_color.0 = Color::srgb(0.9, 0.9, 0.2);
 
                     if let Some(f) = &frame.0
                         && let Some((pos, _)) =
-                            get_glyph_position_at_byte_index(
-                                f,
-                                Vec2::ZERO,
-                                range.start,
-                                &world,
-                            )
+                            get_glyph_position_at_byte_index(f, Vec2::ZERO, range.start, &world)
                     {
                         node.left = px(pos.x);
                         node.top = px(pos.y - 19.5);
@@ -295,8 +261,7 @@ fn update_fast_text(
                 }
             }
 
-            text_color.0 =
-                Color::Srgba(Srgba::new(0.92, 0.92, 0.95, 0.2));
+            text_color.0 = Color::Srgba(Srgba::new(0.92, 0.92, 0.95, 0.2));
             let current = &editor.text;
             let rendered = &editor.rendered_text;
 
@@ -309,35 +274,24 @@ fn update_fast_text(
             let mut offset_y = 0.0;
             let mut render_end_x = 0.0;
 
-            let target_byte =
-                std::cmp::min(current.len(), rendered.len());
+            let target_byte = std::cmp::min(current.len(), rendered.len());
 
             if let Some(f) = &frame.0
                 && let Some((pos, end_x)) =
-                    get_glyph_position_at_byte_index(
-                        f,
-                        Vec2::ZERO,
-                        target_byte,
-                        &world,
-                    )
+                    get_glyph_position_at_byte_index(f, Vec2::ZERO, target_byte, &world)
             {
                 offset_x = pos.x;
                 render_end_x = end_x;
                 offset_y = pos.y - 19.5;
             }
 
-            if current.len() > rendered.len()
-                && current.starts_with(rendered)
-            {
+            if current.len() > rendered.len() && current.starts_with(rendered) {
                 let diff = &current[rendered.len()..];
                 fast_text.0 = diff.to_string();
                 node.left = px(offset_x);
                 node.top = px(offset_y);
-            } else if rendered.len() > current.len()
-                && rendered.starts_with(current)
-            {
-                let deleted_char_count = rendered.chars().count()
-                    - current.chars().count();
+            } else if rendered.len() > current.len() && rendered.starts_with(current) {
+                let deleted_char_count = rendered.chars().count() - current.chars().count();
                 fast_text.0 = "_".repeat(deleted_char_count);
                 let ghost_width = deleted_char_count as f32 * 12.0;
                 node.left = px(render_end_x - ghost_width);
@@ -362,21 +316,16 @@ fn handle_clicks(
     if mouse_button.just_pressed(MouseButton::Left) {
         for window in window_query.iter() {
             if let Some(cursor_pos) = window.cursor_position() {
-                for (node, transform, frame, mut editor) in
-                    editor_query.iter_mut()
-                {
+                for (node, transform, frame, mut editor) in editor_query.iter_mut() {
                     if let Some(frame) = &frame.0 {
-                        let local_pos = cursor_pos
-                            - transform.translation().truncate()
-                            + node.size / 2.0;
+                        let local_pos =
+                            cursor_pos - transform.translation().truncate() + node.size / 2.0;
                         if local_pos.x >= 0.0
                             && local_pos.y >= 0.0
                             && local_pos.x <= node.size.x
                             && local_pos.y <= node.size.y
                             && let Some((index, math_range)) =
-                                find_text_index_in_frame(
-                                    frame, local_pos, &world,
-                                )
+                                find_text_index_in_frame(frame, local_pos, &world)
                         {
                             info!(
                                 "Clicked at source byte index: {}, math: {:?}",
@@ -432,12 +381,7 @@ fn update_cursor(
         for mut node in &mut cursor_query {
             if let Some(f) = &frame.0
                 && let Some((pos, _)) =
-                    get_glyph_position_at_byte_index(
-                        f,
-                        Vec2::ZERO,
-                        editor.cursor_index,
-                        &world,
-                    )
+                    get_glyph_position_at_byte_index(f, Vec2::ZERO, editor.cursor_index, &world)
             {
                 node.left = px(pos.x);
                 node.top = px(pos.y - 19.5);
@@ -472,22 +416,16 @@ fn find_text_index_in_frame(
                                 && let Ok(source) = world.source(id)
                                 && let Some(node) = source.find(span)
                             {
-                                let index = node.range().start
-                                    + glyph.span.1 as usize;
+                                let index = node.range().start + glyph.span.1 as usize;
 
                                 let mut math_range = None;
                                 let mut curr = node;
                                 loop {
-                                    if curr.kind()
-                                                == velyst::typst::syntax::SyntaxKind::Equation
-                                            {
-                                                math_range =
-                                                    Some(curr.range());
-                                                break;
-                                            }
-                                    if let Some(parent) =
-                                        curr.parent()
-                                    {
+                                    if curr.kind() == velyst::typst::syntax::SyntaxKind::Equation {
+                                        math_range = Some(curr.range());
+                                        break;
+                                    }
+                                    if let Some(parent) = curr.parent() {
                                         curr = parent.clone();
                                     } else {
                                         break;
@@ -502,14 +440,9 @@ fn find_text_index_in_frame(
                 }
             }
             FrameItem::Group(group) => {
-                let offset =
-                    Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
+                let offset = Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
                 if let Some((found_index, math_range)) =
-                    find_text_index_in_frame(
-                        &group.frame,
-                        pos - offset,
-                        world,
-                    )
+                    find_text_index_in_frame(&group.frame, pos - offset, world)
                 {
                     return Some((found_index, math_range));
                 }
@@ -532,24 +465,15 @@ fn get_glyph_position_at_byte_index(
     fn traverse(
         frame: &velyst::typst::layout::Frame,
         offset: Vec2,
-        all_glyphs: &mut Vec<(
-            Vec2,
-            f32,
-            f32,
-            (velyst::typst::syntax::Span, u16),
-            f32,
-        )>,
+        all_glyphs: &mut Vec<(Vec2, f32, f32, (velyst::typst::syntax::Span, u16), f32)>,
     ) {
         for (p, item) in frame.items() {
-            let item_pos = offset
-                + Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
+            let item_pos = offset + Vec2::new(p.x.to_pt() as f32, p.y.to_pt() as f32);
             match item {
                 FrameItem::Text(text) => {
                     let mut x = 0.0;
                     for glyph in &text.glyphs {
-                        let advance =
-                            glyph.x_advance.at(text.size).to_pt()
-                                as f32;
+                        let advance = glyph.x_advance.at(text.size).to_pt() as f32;
                         all_glyphs.push((
                             item_pos + Vec2::new(x, 0.0),
                             text.size.to_pt() as f32,
@@ -577,8 +501,7 @@ fn get_glyph_position_at_byte_index(
     let mut best_match = None;
     let mut min_dist = usize::MAX;
 
-    for (pos, size, y, (span_id, span_offset), advance) in &all_glyphs
-    {
+    for (pos, size, y, (span_id, span_offset), advance) in &all_glyphs {
         if let Some(id) = span_id.id()
             && let Ok(source) = world.source(id)
             && let Some(node) = source.find(*span_id)
@@ -595,8 +518,7 @@ fn get_glyph_position_at_byte_index(
                 let dist = target_byte - exact_byte;
                 if dist < min_dist {
                     min_dist = dist;
-                    best_match =
-                        Some((Vec2::new(pos.x + advance, *y), *size));
+                    best_match = Some((Vec2::new(pos.x + advance, *y), *size));
                 }
             }
         }
@@ -604,8 +526,7 @@ fn get_glyph_position_at_byte_index(
 
     if best_match.is_none() {
         let last = all_glyphs.last().unwrap();
-        best_match =
-            Some((Vec2::new(last.0.x + last.4, last.2), last.1));
+        best_match = Some((Vec2::new(last.0.x + last.4, last.2), last.1));
     }
 
     let (mut pos, _size) = best_match.unwrap();

@@ -64,10 +64,7 @@ mod tests {
 
     fn tmp_path(prefix: &str) -> std::path::PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "mathed_test_{prefix}_{id}_{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("mathed_test_{prefix}_{id}_{}", std::process::id()))
     }
 
     #[test]

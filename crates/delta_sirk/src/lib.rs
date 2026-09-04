@@ -1,29 +1,20 @@
 use delta_algebra::*;
 
 /// QHO Hamiltonian action: H|n> = (n + 0.5)|n>
-fn apply_qho_hamiltonian(
-    states: &[HermiteState],
-) -> Vec<HermiteState> {
+fn apply_qho_hamiltonian(states: &[HermiteState]) -> Vec<HermiteState> {
     states
         .iter()
         .map(|s| {
             let n = s.n[0] as f32;
             let factor = n + 0.5;
-            HermiteState::new(
-                s.n,
-                s.coeff_re * factor,
-                s.coeff_im * factor,
-            )
+            HermiteState::new(s.n, s.coeff_re * factor, s.coeff_im * factor)
         })
         .collect()
 }
 
 /// Resolvent application: (H + i*gamma)^{-1} |n> = |n> / (n + 0.5 +
 /// i*gamma)
-fn apply_qho_resolvent(
-    states: &[HermiteState],
-    gamma: f32,
-) -> Vec<HermiteState> {
+fn apply_qho_resolvent(states: &[HermiteState], gamma: f32) -> Vec<HermiteState> {
     states
         .iter()
         .map(|s| {
@@ -62,10 +53,7 @@ fn coherent_state(x0: f32, max_n: u32) -> Vec<HermiteState> {
     states
 }
 
-pub async fn run_symbolic_delta_sirk(
-    x0: f32,
-    shifts: Vec<f32>,
-) -> (Vec<f32>, f32) {
+pub async fn run_symbolic_delta_sirk(x0: f32, shifts: Vec<f32>) -> (Vec<f32>, f32) {
     let engine = DeltaAlgebraEngine::new().await;
     let m = shifts.len();
 
@@ -89,8 +77,7 @@ pub async fn run_symbolic_delta_sirk(
         // Orthogonalize (Gram-Schmidt)
         let mut v_ortho = v_next_unnorm;
         for v in basis.iter() {
-            let (_overlap_re, _overlap_im) =
-                engine.inner_product(v, &v_ortho);
+            let (_overlap_re, _overlap_im) = engine.inner_product(v, &v_ortho);
             // v_ortho -= <v_j | v_next> * v_j
             for _s in v_ortho.iter_mut() {
                 // We need to subtract the component of each state in
@@ -144,14 +131,11 @@ mod tests {
         // Skip gracefully without a GPU (Cadabra2 skip pattern in
         // unfer).
         if DeltaAlgebraEngine::try_new().await.is_none() {
-            eprintln!(
-                "SKIP: no wgpu adapter available — GPU test skipped"
-            );
+            eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
             return;
         }
         // Shifted vacuum at x0 = 1.0 should have mean energy 1.0
-        let (matrix, _) =
-            run_symbolic_delta_sirk(1.0, vec![10.0]).await;
+        let (matrix, _) = run_symbolic_delta_sirk(1.0, vec![10.0]).await;
 
         // H_00 = <v0 | H | v0>
         let h00_re = matrix[0];
@@ -168,9 +152,7 @@ mod tests {
         // the wgpu engine must match the pure-CPU reference
         // inner products (correctness oracle).
         let Some(engine) = DeltaAlgebraEngine::try_new().await else {
-            eprintln!(
-                "SKIP: no wgpu adapter available — GPU test skipped"
-            );
+            eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
             return;
         };
 
@@ -181,13 +163,7 @@ mod tests {
         let v0_norm = v0_re.sqrt();
         let v0: Vec<HermiteState> = v0
             .iter()
-            .map(|s| {
-                HermiteState::new(
-                    s.n,
-                    s.coeff_re / v0_norm,
-                    s.coeff_im / v0_norm,
-                )
-            })
+            .map(|s| HermiteState::new(s.n, s.coeff_re / v0_norm, s.coeff_im / v0_norm))
             .collect();
 
         let v1 = apply_qho_resolvent(&v0, 10.0);
@@ -196,14 +172,10 @@ mod tests {
         // GPU matrix element.
         let (gpu_re, gpu_im) = engine.inner_product(&v0, &h_v1);
         // CPU reference matrix element.
-        let (cpu_re, cpu_im) =
-            delta_algebra::reference::inner_product_reference(
-                &v0, &h_v1,
-            );
+        let (cpu_re, cpu_im) = delta_algebra::reference::inner_product_reference(&v0, &h_v1);
 
         assert!(
-            (gpu_re - cpu_re).abs() < 1e-5
-                && (gpu_im - cpu_im).abs() < 1e-5,
+            (gpu_re - cpu_re).abs() < 1e-5 && (gpu_im - cpu_im).abs() < 1e-5,
             "GPU <v0|H|v1> = ({gpu_re}, {gpu_im}) but CPU reference = ({cpu_re}, {cpu_im})",
         );
     }

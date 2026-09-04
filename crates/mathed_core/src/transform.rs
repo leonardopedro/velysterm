@@ -72,10 +72,7 @@ impl OffsetMap {
         // Last span whose (source-space) start is <= pos.
         let idx = spans.partition_point(|s| project(s).0 <= pos);
         if idx == 0 {
-            return spans
-                .first()
-                .map(|s| project(s).1)
-                .unwrap_or(empty_default);
+            return spans.first().map(|s| project(s).1).unwrap_or(empty_default);
         }
         let s = &spans[idx - 1];
         let (from, to) = project(s);
@@ -163,9 +160,7 @@ impl VisualState {
     }
 
     fn closer_count(&self) -> usize {
-        (self.bold > 0) as usize
-            + (self.italic > 0) as usize
-            + (self.underline > 0) as usize
+        (self.bold > 0) as usize + (self.italic > 0) as usize + (self.underline > 0) as usize
     }
 
     fn any(&self) -> bool {
@@ -179,13 +174,7 @@ pub fn to_render_text(
     segments: &[Segment],
     opts: &TransformOptions,
 ) -> RenderOutput {
-    to_render_text_range(
-        doc_text,
-        scan,
-        segments,
-        0..doc_text.len(),
-        opts,
-    )
+    to_render_text_range(doc_text, scan, segments, 0..doc_text.len(), opts)
 }
 
 /// Like [`to_render_text`] but restricted to one block: only
@@ -254,16 +243,12 @@ pub fn to_render_text_range(
             r.start <= tok.end && tok.start <= r.end
         })
     };
-    let revealed = |tok: &Range<usize>| {
-        opts.show_hidden || touches(&opts.reveal, tok)
-    };
+    let revealed = |tok: &Range<usize>| opts.show_hidden || touches(&opts.reveal, tok);
     // Statement tokens and translator spans additionally expand when
     // the caret is anywhere inside their wide `opts.expand` span
     // — markers never do (see the `expand` field doc comment on
     // `TransformOptions`).
-    let expanded = |tok: &Range<usize>| {
-        revealed(tok) || touches(&opts.expand, tok)
-    };
+    let expanded = |tok: &Range<usize>| revealed(tok) || touches(&opts.expand, tok);
 
     let marker_starts: std::collections::HashSet<usize> =
         scan.markers.iter().map(|m| m.range.start).collect();
@@ -294,10 +279,7 @@ pub fn to_render_text_range(
         } else {
             let mut end = tok.end;
             let is_cite = cite_label_starts.contains(&tok.start);
-            if !is_cite
-                && end < range.end
-                && doc_text.as_bytes().get(end) == Some(&b' ')
-            {
+            if !is_cite && end < range.end && doc_text.as_bytes().get(end) == Some(&b' ') {
                 end += 1;
             }
             hidden.push(tok.start..end);
@@ -335,28 +317,25 @@ pub fn to_render_text_range(
             hidden.push(span.clone());
         }
     }
-    let translator_title_points: Vec<(usize, String)> =
-        translator_spans
-            .iter()
-            .filter_map(|(span, seg)| {
-                if expanded(span) {
-                    return None; // shown as a fenced code block instead
-                }
-                Some((span.start, translator_title_markup(seg, opts)))
-            })
-            .collect();
+    let translator_title_points: Vec<(usize, String)> = translator_spans
+        .iter()
+        .filter_map(|(span, seg)| {
+            if expanded(span) {
+                return None; // shown as a fenced code block instead
+            }
+            Some((span.start, translator_title_markup(seg, opts)))
+        })
+        .collect();
 
     // 2. Math toggle positions over visible, non-token text.
-    let (toggles, unmatched_dollar) =
-        math_toggles(doc_text, range.clone(), &hidden, &shown);
+    let (toggles, unmatched_dollar) = math_toggles(doc_text, range.clone(), &hidden, &shown);
     // Each balanced `$...$` pair (delimiters included) as one span,
     // for the same reveal-on-cursor treatment as markers and
     // space runs: rendered as real Typst math while the
     // caret/selection is elsewhere, shown as literal source text
     // the moment it touches the span — so the raw formula is
     // always directly editable, not just the typeset result.
-    let math_spans: Vec<Range<usize>> =
-        toggles.chunks_exact(2).map(|c| c[0]..c[1]).collect();
+    let math_spans: Vec<Range<usize>> = toggles.chunks_exact(2).map(|c| c[0]..c[1]).collect();
 
     // 3. Visual segment boundaries (clamped to `range`).
     let mut bounds: Vec<usize> = vec![range.start, range.end];
@@ -381,10 +360,7 @@ pub fn to_render_text_range(
     // revealed (caret/selection over it) — the raw token wins in
     // that case so the user sees/edits the original
     // source instead of the computed annotation.
-    let annotation_points: Vec<(usize, &str)> = if opts
-        .annotations
-        .is_empty()
-    {
+    let annotation_points: Vec<(usize, &str)> = if opts.annotations.is_empty() {
         Vec::new()
     } else {
         segments
@@ -417,9 +393,7 @@ pub fn to_render_text_range(
             let Some(stmt) = scan.stmts.get(entry.stmt_idx) else {
                 continue;
             };
-            if stmt.range.start < range.start
-                || stmt.range.end > range.end
-            {
+            if stmt.range.start < range.start || stmt.range.end > range.end {
                 continue;
             }
             // Don't splice if the cite is revealed (caret/selection
@@ -430,10 +404,7 @@ pub fn to_render_text_range(
             }
             // Bound on the start byte so the splicing loop hits it.
             bounds.push(stmt.range.start);
-            out.push((
-                stmt.range.start,
-                crate::markers::cite_label_text(entry),
-            ));
+            out.push((stmt.range.start, crate::markers::cite_label_text(entry)));
         }
         out
     };
@@ -483,39 +454,29 @@ pub fn to_render_text_range(
                 match seg.kind {
                     crate::markers::PropKind::Bold => v.bold += 1,
                     crate::markers::PropKind::Italic => v.italic += 1,
-                    crate::markers::PropKind::Underline => {
-                        v.underline += 1
-                    }
+                    crate::markers::PropKind::Underline => v.underline += 1,
                     _ => {}
                 }
             }
         }
         v
     };
-    let math_at =
-        |pos: usize| toggles.partition_point(|&t| t <= pos) % 2 == 1;
-    let hidden_at = |pos: usize| {
-        hidden.iter().any(|r| r.start <= pos && pos < r.end)
-    };
-    let shown_token_at = |pos: usize| {
-        shown.iter().any(|r| r.start <= pos && pos < r.end)
-    };
+    let math_at = |pos: usize| toggles.partition_point(|&t| t <= pos) % 2 == 1;
+    let hidden_at = |pos: usize| hidden.iter().any(|r| r.start <= pos && pos < r.end);
+    let shown_token_at = |pos: usize| shown.iter().any(|r| r.start <= pos && pos < r.end);
     // Revealed translator spans are emitted once, whole, as a fenced
     // code block (see below) rather than per-window like plain
     // revealed tokens — tracks which spans (by start byte) have
     // already been emitted so a span split across several windows
     // (e.g. by an internal math toggle) isn't emitted twice.
-    let mut translator_shown_emitted: std::collections::HashSet<
-        usize,
-    > = std::collections::HashSet::new();
+    let mut translator_shown_emitted: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
     // Same "emit once for the whole span, not per-window" tracking as
     // `translator_shown_emitted`, for space runs (below).
-    let mut space_run_emitted: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
+    let mut space_run_emitted: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // Same, for a revealed math span (below).
-    let mut math_span_shown_emitted: std::collections::HashSet<
-        usize,
-    > = std::collections::HashSet::new();
+    let mut math_span_shown_emitted: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
@@ -568,9 +529,7 @@ pub fn to_render_text_range(
             // than plain escaped text — emitted once for the whole
             // span, not per-window.
             if translator_shown_emitted.insert(span.start) {
-                emit_translator_code(
-                    span, seg, doc_text, opts, &mut out, &mut map,
-                );
+                emit_translator_code(span, seg, doc_text, opts, &mut out, &mut map);
             }
             continue;
         }
@@ -584,9 +543,7 @@ pub fn to_render_text_range(
             // of letting Typst typeset it as math — emitted once
             // for the whole span, not per-window.
             if math_span_shown_emitted.insert(span.start) {
-                emit_revealed_math_span(
-                    span, doc_text, &mut out, &mut map,
-                );
+                emit_revealed_math_span(span, doc_text, &mut out, &mut map);
             }
             continue;
         }
@@ -655,9 +612,7 @@ pub fn to_render_text_range(
         // Whitespace-only chunks need no styling; math chunks keep
         // their own syntax (v1: visual props are not applied
         // inside `$..$`).
-        let wrap = v.any()
-            && !math_at(start)
-            && !chunk.chars().all(char::is_whitespace);
+        let wrap = v.any() && !math_at(start) && !chunk.chars().all(char::is_whitespace);
         if wrap {
             out.push_str(&v.openers());
         }
@@ -819,10 +774,7 @@ fn translator_name(seg: &Segment) -> Option<String> {
 /// `opts.translator_errors` has an entry for it) — render-only
 /// markup, spliced in by `translator_title_points` the same way a
 /// `\prob` annotation or a `\cite` label is spliced.
-fn translator_title_markup(
-    seg: &Segment,
-    opts: &TransformOptions,
-) -> String {
+fn translator_title_markup(seg: &Segment, opts: &TransformOptions) -> String {
     let span_start = seg.span.as_ref().map(|s| s.start);
     let error = span_start
         .and_then(|s| opts.translator_errors.get(&s))
@@ -863,8 +815,7 @@ fn emit_translator_code(
     let body = raw.trim();
     // Doc offset of the first non-whitespace byte, so the copied body
     // maps back to the right place.
-    let body_start =
-        span.start + (raw.len() - raw.trim_start().len());
+    let body_start = span.start + (raw.len() - raw.trim_start().len());
     // No language tag: a `typ` tag would enable Typst's built-in
     // syntax highlighting (keywords, strings, punctuation each in
     // their own styled sub-run), but those sub-runs' glyphs come
@@ -904,10 +855,7 @@ fn emit_translator_code(
 /// the anchor point at most once even at the seam between two blank
 /// lines (e.g. `"a\n\n\nb"` has anchors right after each of
 /// the two interior newlines).
-fn blank_line_anchors(
-    doc_text: &str,
-    range: &Range<usize>,
-) -> std::collections::HashSet<usize> {
+fn blank_line_anchors(doc_text: &str, range: &Range<usize>) -> std::collections::HashSet<usize> {
     let bytes = doc_text.as_bytes();
     let mut anchors = std::collections::HashSet::new();
     let mut line_start = range.start;
@@ -938,11 +886,7 @@ fn blank_line_anchors(
 /// requires, silently preventing Down-arrow (or any caret move) from
 /// ever entering/expanding it. Call immediately before pushing the
 /// spliced text.
-fn pin_splice_point(
-    doc_pos: usize,
-    out: &mut str,
-    map: &mut OffsetMap,
-) {
+fn pin_splice_point(doc_pos: usize, out: &mut str, map: &mut OffsetMap) {
     map.spans.push(CopySpan {
         doc_start: doc_pos,
         render_start: out.len(),
@@ -960,11 +904,7 @@ fn pin_splice_point(
 /// for band geometry too, but Typst (like most layout engines) trims
 /// leading whitespace after a forced line break;
 /// U+00A0 is specifically exempt from that trimming.
-fn push_blank_line_anchor(
-    doc_pos: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn push_blank_line_anchor(doc_pos: usize, out: &mut String, map: &mut OffsetMap) {
     map.spans.push(CopySpan {
         doc_start: doc_pos,
         render_start: out.len(),
@@ -990,10 +930,7 @@ fn push_blank_line_anchor(
 /// ranges to decide whether the caret/selection's *touch* on a given
 /// run changed since the last layout — the only thing that should
 /// force a relayout for this, matching the marker-reveal cache key.
-pub fn space_run_ranges(
-    doc_text: &str,
-    range: &Range<usize>,
-) -> Vec<Range<usize>> {
+pub fn space_run_ranges(doc_text: &str, range: &Range<usize>) -> Vec<Range<usize>> {
     let bytes = doc_text.as_bytes();
     let mut runs = Vec::new();
     let mut i = range.start;
@@ -1018,11 +955,7 @@ pub fn space_run_ranges(
 /// would render for the whole run anyway); the rest are deliberately
 /// left uncopied, like a hidden token's bytes — clicking there snaps
 /// to the nearest real content, same as any other collapsed gap.
-fn emit_collapsed_space_run(
-    run: &Range<usize>,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn emit_collapsed_space_run(run: &Range<usize>, out: &mut String, map: &mut OffsetMap) {
     push_copy(" ", run.start, out, map);
 }
 
@@ -1034,11 +967,7 @@ fn emit_collapsed_space_run(
 /// anchor above) so each one gets its own real glyph, pinned to its
 /// own doc byte the same way `push_blank_line_anchor` pins its
 /// anchor.
-fn emit_expanded_space_run(
-    run: &Range<usize>,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn emit_expanded_space_run(run: &Range<usize>, out: &mut String, map: &mut OffsetMap) {
     push_copy(" ", run.start, out, map);
     for doc_pos in (run.start + 1)..run.end {
         map.spans.push(CopySpan {
@@ -1050,12 +979,7 @@ fn emit_expanded_space_run(
     }
 }
 
-fn push_copy(
-    chunk: &str,
-    doc_start: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn push_copy(chunk: &str, doc_start: usize, out: &mut String, map: &mut OffsetMap) {
     if chunk.is_empty() {
         return;
     }
@@ -1093,21 +1017,11 @@ fn is_bare_markup_delim(c: char) -> bool {
     matches!(c, '_' | '*' | '`')
 }
 
-fn emit_escaped(
-    chunk: &str,
-    doc_start: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn emit_escaped(chunk: &str, doc_start: usize, out: &mut String, map: &mut OffsetMap) {
     let mut run_start = 0;
     for (i, c) in chunk.char_indices() {
         if c == '#' || c == '\\' || is_bare_markup_delim(c) {
-            push_copy(
-                &chunk[run_start..i],
-                doc_start + run_start,
-                out,
-                map,
-            );
+            push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
             // Typst parses `\#`/`\\` as one "Escape" syntax node and
             // attributes the resulting glyph's source span to *this*
             // byte (the escape lead-in), not the escaped character
@@ -1141,11 +1055,7 @@ fn emit_escaped(
 /// it is). Same escape-byte pin as `emit_escaped`, for the same
 /// reason: without it, the escaped `$`'s glyph would map back to the
 /// wrong doc byte.
-fn emit_escaped_dollar(
-    doc_pos: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn emit_escaped_dollar(doc_pos: usize, out: &mut String, map: &mut OffsetMap) {
     map.spans.push(CopySpan {
         doc_start: doc_pos,
         render_start: out.len(),
@@ -1169,12 +1079,7 @@ fn emit_escaped_dollar(
 /// characters it can't start Typst code or stray markup on its own,
 /// so double-escaping it would only corrupt text the user already
 /// wrote correctly.
-fn emit_plain_text(
-    chunk: &str,
-    doc_start: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn emit_plain_text(chunk: &str, doc_start: usize, out: &mut String, map: &mut OffsetMap) {
     let bytes = chunk.as_bytes();
     let mut run_start = 0;
     let mut i = 0;
@@ -1187,12 +1092,7 @@ fn emit_plain_text(
                 }
             }
             b'#' | b'_' | b'*' | b'`' => {
-                push_copy(
-                    &chunk[run_start..i],
-                    doc_start + run_start,
-                    out,
-                    map,
-                );
+                push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
                 // Same escape-byte pin as `emit_escaped` — see there.
                 map.spans.push(CopySpan {
                     doc_start: doc_start + i,
@@ -1239,12 +1139,7 @@ fn emit_revealed_math_span(
                 }
             }
             b'#' | b'$' | b'_' | b'*' | b'`' => {
-                push_copy(
-                    &chunk[run_start..i],
-                    span.start + run_start,
-                    out,
-                    map,
-                );
+                push_copy(&chunk[run_start..i], span.start + run_start, out, map);
                 map.spans.push(CopySpan {
                     doc_start: span.start + i,
                     render_start: out.len(),
@@ -1284,10 +1179,7 @@ mod tests {
         to_render_text(text, &s, &segs, opts)
     }
 
-    fn render_with_refs(
-        text: &str,
-        opts: &TransformOptions,
-    ) -> RenderOutput {
+    fn render_with_refs(text: &str, opts: &TransformOptions) -> RenderOutput {
         let s = scan(text);
         let refs = crate::markers::scan_references(&s);
         let segs = resolve_segments(&s);
@@ -1298,10 +1190,7 @@ mod tests {
 
     #[test]
     fn markers_hidden_with_trailing_space() {
-        let out = render(
-            "#1 f(x) #2 \\function(#1,#2)",
-            &TransformOptions::default(),
-        );
+        let out = render("#1 f(x) #2 \\function(#1,#2)", &TransformOptions::default());
         assert_eq!(out.text, "f(x) ");
     }
 
@@ -1406,8 +1295,7 @@ mod tests {
     #[test]
     fn doc_ref_cite_label_inserted() {
         let text = "#1 a #2 \\cite(#1,#2)";
-        let out =
-            render_with_refs(text, &TransformOptions::default());
+        let out = render_with_refs(text, &TransformOptions::default());
         // Cite token is hidden; body `a` is rendered; label `[1]`
         // appears at the cite's start (after `a `).
         assert_eq!(out.text, "a [1]");
@@ -1416,16 +1304,14 @@ mod tests {
     #[test]
     fn bib_key_cite_label_inserted() {
         let text = "see \\cite(authorA89, authorB94) for details";
-        let out =
-            render_with_refs(text, &TransformOptions::default());
+        let out = render_with_refs(text, &TransformOptions::default());
         assert_eq!(out.text, "see [1, 2] for details");
     }
 
     #[test]
     fn cite_labels_number_sequentially() {
         let text = "#1 a #2 \\cite(#1,#2) and \\cite(k1) and #3 b #4 \\cite(#3,#4)";
-        let out =
-            render_with_refs(text, &TransformOptions::default());
+        let out = render_with_refs(text, &TransformOptions::default());
         // Cite 1 → [1], cite 2 → [2], cite 3 → [3]. The body of cite
         // 1 (`a`) appears first, then the label, etc.
         assert_eq!(out.text, "a [1] and [2] and b [3]");
@@ -1447,10 +1333,7 @@ mod tests {
 
     #[test]
     fn math_renders_as_math_when_caret_is_elsewhere() {
-        let out = render(
-            "before $x+y$ after",
-            &TransformOptions::default(),
-        );
+        let out = render("before $x+y$ after", &TransformOptions::default());
         assert_eq!(out.text, "before $x+y$ after");
     }
 
@@ -1530,8 +1413,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_unmatched_dollar_with_underscore_after_it_still_works()
-     {
+    fn trailing_unmatched_dollar_with_underscore_after_it_still_works() {
         // Same failure mode, reached through the *other* path: an
         // in-progress, still-unclosed `$x_` (no closing `$` typed
         // yet). The unmatched `$` gets escaped (existing
@@ -1548,15 +1430,9 @@ mod tests {
         // layout ("unclosed delimiter"/"unclosed raw text") if a
         // lone, unpaired one appears anywhere — e.g. "5 * 3"
         // or a bare "`".
-        let out = render(
-            "the result is 5 * 3 today",
-            &TransformOptions::default(),
-        );
+        let out = render("the result is 5 * 3 today", &TransformOptions::default());
         assert_eq!(out.text, "the result is 5 \\* 3 today");
-        let out = render(
-            "the variable `x today",
-            &TransformOptions::default(),
-        );
+        let out = render("the variable `x today", &TransformOptions::default());
         assert_eq!(out.text, "the variable \\`x today");
     }
 
@@ -1569,8 +1445,7 @@ mod tests {
         // *entire* layout and leaving nothing on screen
         // (reported as: clicking near a `$` produces that
         // exact error and a fully black editor).
-        let out =
-            render("cost is $5 today", &TransformOptions::default());
+        let out = render("cost is $5 today", &TransformOptions::default());
         assert_eq!(out.text, "cost is \\$5 today");
     }
 
@@ -1639,10 +1514,7 @@ mod tests {
         // ("expected expression"), emptying `self.layout` and
         // freezing arrow-key navigation and reflow right along with
         // it — not just corrupting the one character.
-        let out = render(
-            "see # here and #3tails",
-            &TransformOptions::default(),
-        );
+        let out = render("see # here and #3tails", &TransformOptions::default());
         // "#3tails" is a valid marker (alphanumeric right after `#`)
         // and stays hidden by default; the earlier lone `#` has
         // nothing alphanumeric right after it, isn't a marker, and
@@ -1652,8 +1524,7 @@ mod tests {
 
     #[test]
     fn bare_hash_escaped_even_when_not_immediately_after_start() {
-        let out =
-            render("issue #! is open", &TransformOptions::default());
+        let out = render("issue #! is open", &TransformOptions::default());
         assert_eq!(out.text, "issue \\#! is open");
     }
 
@@ -1764,10 +1635,7 @@ mod tests {
     #[test]
     fn leading_and_trailing_blank_lines_get_anchors() {
         let leading = render("\n\nfoo", &TransformOptions::default());
-        assert_eq!(
-            leading.text,
-            "\u{00A0}#linebreak()\u{00A0}#linebreak()foo"
-        );
+        assert_eq!(leading.text, "\u{00A0}#linebreak()\u{00A0}#linebreak()foo");
         assert_eq!(leading.map.render_to_doc(0), 0);
 
         let trailing = render("foo\n", &TransformOptions::default());
@@ -1779,18 +1647,13 @@ mod tests {
     #[test]
     fn three_consecutive_newlines_get_two_blank_anchors() {
         let out = render("a\n\n\nb", &TransformOptions::default());
-        let anchors: Vec<_> =
-            out.text.match_indices('\u{00A0}').collect();
+        let anchors: Vec<_> = out.text.match_indices('\u{00A0}').collect();
         assert_eq!(anchors.len(), 2, "text: {:?}", out.text);
         assert_eq!(out.map.render_to_doc(anchors[0].0), 2);
         assert_eq!(out.map.render_to_doc(anchors[1].0), 3);
     }
 
-    fn render_range(
-        text: &str,
-        range: Range<usize>,
-        opts: &TransformOptions,
-    ) -> RenderOutput {
+    fn render_range(text: &str, range: Range<usize>, opts: &TransformOptions) -> RenderOutput {
         let s = scan(text);
         let segs = resolve_segments(&s);
         to_render_text_range(text, &s, &segs, range, opts)
@@ -1801,12 +1664,10 @@ mod tests {
         let text = "#1 a #2 \\bold(#1,#2)\n\nplain";
         // Block 1: the marked line. Markers/statement hidden, "a "
         // bold-wrapped exactly as in the full transform.
-        let out =
-            render_range(text, 0..20, &TransformOptions::default());
+        let out = render_range(text, 0..20, &TransformOptions::default());
         assert_eq!(out.text, "#strong[a ]");
         // Block 2: plain text with absolute doc offsets in the map.
-        let out =
-            render_range(text, 22..27, &TransformOptions::default());
+        let out = render_range(text, 22..27, &TransformOptions::default());
         assert_eq!(out.text, "plain");
         assert_eq!(out.map.doc_to_render(22), 0);
         assert_eq!(out.map.render_to_doc(0), 22);
@@ -1818,11 +1679,9 @@ mod tests {
         // Bold segment runs from block 1 into block 2; each block
         // wraps only its own part.
         let text = "#1 a\n\nb #2 \\bold(#1,#2)";
-        let out =
-            render_range(text, 0..4, &TransformOptions::default());
+        let out = render_range(text, 0..4, &TransformOptions::default());
         assert_eq!(out.text, "#strong[a]");
-        let out =
-            render_range(text, 6..23, &TransformOptions::default());
+        let out = render_range(text, 6..23, &TransformOptions::default());
         assert_eq!(out.text, "#strong[b ]");
     }
 
@@ -1838,8 +1697,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_translator_title_maps_back_to_the_marker_not_the_text_before_it()
-     {
+    fn collapsed_translator_title_maps_back_to_the_marker_not_the_text_before_it() {
         // The collapsed title is caller-invisible, render-only markup
         // spliced at the `#3` marker's own doc position — before the
         // splice was pinned, `render_to_doc` for its glyphs fell
@@ -1888,11 +1746,7 @@ mod tests {
         );
         // Raw block fences present and the code shown literally.
         assert!(out.text.contains("```"), "got: {}", out.text);
-        assert!(
-            out.text.contains("#let translate"),
-            "got: {}",
-            out.text
-        );
+        assert!(out.text.contains("#let translate"), "got: {}", out.text);
         // Markers are not revealed by a reveal point that only
         // touches the body span, not the marker tokens
         // themselves.
@@ -1916,11 +1770,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(
-            out.text.contains("#let translate"),
-            "got: {}",
-            out.text
-        );
+        assert!(out.text.contains("#let translate"), "got: {}", out.text);
         // The leading `#3` marker (right before `#let`) is never
         // emitted, revealed or not — the fenced block opens
         // immediately.
@@ -1936,16 +1786,11 @@ mod tests {
         // *definitions* being revealed. The statement's own
         // leading `\` is itself escaped (so Typst
         // doesn't parse it as markup), hence the doubled backslash.
-        assert!(
-            out.text.contains("```\\\\translator("),
-            "got: {}",
-            out.text
-        );
+        assert!(out.text.contains("```\\\\translator("), "got: {}", out.text);
     }
 
     #[test]
-    fn show_hidden_still_reveals_markers_inside_an_expanded_translator()
-     {
+    fn show_hidden_still_reveals_markers_inside_an_expanded_translator() {
         // Ctrl+Shift ("show hidden") is the *only* thing that should
         // reveal the markers delimiting an already-expanded segment.
         let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
@@ -1962,8 +1807,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_line_inside_a_collapsed_translator_body_does_not_leak_an_anchor()
-     {
+    fn blank_line_inside_a_collapsed_translator_body_does_not_leak_an_anchor() {
         // A blank line in the *raw source* of a still-collapsed
         // translator must not leak a blank-line NBSP anchor into the
         // one-line "▸ translator: ..." summary the user actually sees
@@ -1984,11 +1828,9 @@ mod tests {
         let text = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\")";
         let s = scan(text);
         let segs = resolve_segments(&s);
-        let key =
-            segs[0].span.clone().expect("translator span").start;
+        let key = segs[0].span.clone().expect("translator span").start;
         let mut translator_errors = HashMap::new();
-        translator_errors
-            .insert(key, "unknown variable: x".to_string());
+        translator_errors.insert(key, "unknown variable: x".to_string());
 
         // Collapsed: red "⚠" marker instead of the plain "▸".
         let collapsed = to_render_text(
@@ -2000,16 +1842,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(
-            collapsed.text.contains("⚠"),
-            "got: {}",
-            collapsed.text
-        );
-        assert!(
-            !collapsed.text.contains("▸"),
-            "got: {}",
-            collapsed.text
-        );
+        assert!(collapsed.text.contains("⚠"), "got: {}", collapsed.text);
+        assert!(!collapsed.text.contains("▸"), "got: {}", collapsed.text);
         assert!(
             !collapsed.text.contains("unknown variable"),
             "the message itself is collapsed-view-only, not shown \
@@ -2028,11 +1862,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(
-            expanded.text.contains("```"),
-            "got: {}",
-            expanded.text
-        );
+        assert!(expanded.text.contains("```"), "got: {}", expanded.text);
         assert!(
             expanded.text.contains("unknown variable: x"),
             "got: {}",
@@ -2063,8 +1893,7 @@ mod tests {
         );
         // The annotation appears in the render, after the body text.
         let vac = out.text.find("vacuum").expect("body rendered");
-        let ann =
-            out.text.find("= 0.4231").expect("annotation spliced");
+        let ann = out.text.find("= 0.4231").expect("annotation spliced");
         assert!(ann > vac, "annotation after body in {:?}", out.text);
     }
 
@@ -2079,11 +1908,7 @@ mod tests {
     fn full_text_delegates_to_range() {
         let text = "#1 f(x) #2 tail";
         let full = render(text, &TransformOptions::default());
-        let ranged = render_range(
-            text,
-            0..text.len(),
-            &TransformOptions::default(),
-        );
+        let ranged = render_range(text, 0..text.len(), &TransformOptions::default());
         assert_eq!(full.text, ranged.text);
         assert_eq!(full.map, ranged.map);
     }
@@ -2123,12 +1948,8 @@ mod tests {
         // A bare `$` (currency sign, or in-progress formula missing
         // its closing `$`) must be escaped so Typst doesn't try to
         // parse it as a math toggle.
-        let out =
-            render("cost is $5 today", &TransformOptions::default());
-        assert!(
-            out.text.contains("\\$"),
-            "unmatched $ should be escaped"
-        );
+        let out = render("cost is $5 today", &TransformOptions::default());
+        assert!(out.text.contains("\\$"), "unmatched $ should be escaped");
         // No bare `$` (one not preceded by `\`) may reach Typst.
         let mut chars = out.text.chars().peekable();
         while let Some(c) = chars.next() {
@@ -2143,8 +1964,7 @@ mod tests {
 
     #[test]
     fn bare_hash_not_a_marker_is_escaped() {
-        let out =
-            render("issue #! is open", &TransformOptions::default());
+        let out = render("issue #! is open", &TransformOptions::default());
         assert!(out.text.contains("\\#"), "bare # should be escaped");
     }
 
@@ -2222,13 +2042,7 @@ mod tests {
         }
         // Any render position in [0, render_len) maps to a valid doc
         // position.
-        for r in [
-            0,
-            1,
-            out.text.len() / 2,
-            out.text.len() - 1,
-            out.text.len(),
-        ] {
+        for r in [0, 1, out.text.len() / 2, out.text.len() - 1, out.text.len()] {
             let d = out.map.render_to_doc(r);
             assert!(
                 d <= out.map.doc_len,
@@ -2295,11 +2109,7 @@ mod tests {
     fn newline_becomes_linebreak() {
         let text = "line one\nline two";
         let out = render(text, &TransformOptions::default());
-        assert!(
-            out.text.contains("#linebreak()"),
-            "got: {}",
-            out.text
-        );
+        assert!(out.text.contains("#linebreak()"), "got: {}", out.text);
     }
 
     #[test]
@@ -2315,10 +2125,7 @@ mod tests {
         // Outside math: typeset math — Typst renders `$a+b$` as math,
         // so the raw source delimiters are present in the output.
         let hidden = render(text, &TransformOptions::default());
-        assert!(
-            hidden.text.contains("$a+b$"),
-            "math should be typeset"
-        );
+        assert!(hidden.text.contains("$a+b$"), "math should be typeset");
         // Touching the math span reveals raw source — the `$`
         // delimiters are escaped so Typst shows them
         // literally, not as a math toggle.
@@ -2365,8 +2172,7 @@ mod tests {
                 Just("\\`".into()),
             ],
             // Math.
-            string_regex("\\$[a-zA-Z0-9_^()+\\-\\*]{1,8}\\$")
-                .unwrap(),
+            string_regex("\\$[a-zA-Z0-9_^()+\\-\\*]{1,8}\\$").unwrap(),
             // Operators and punctuation liable to cause issues.
             prop_oneof![
                 Just("_".into()),
@@ -2381,8 +2187,7 @@ mod tests {
                 Just("\n".into()),
             ],
         ];
-        proptest::collection::vec(token, 1..12)
-            .prop_map(|v| v.concat())
+        proptest::collection::vec(token, 1..12).prop_map(|v| v.concat())
     }
 
     proptest! {

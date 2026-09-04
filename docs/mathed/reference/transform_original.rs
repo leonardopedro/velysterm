@@ -71,10 +71,7 @@ impl OffsetMap {
         // Last span whose (source-space) start is <= pos.
         let idx = spans.partition_point(|s| project(s).0 <= pos);
         if idx == 0 {
-            return spans
-                .first()
-                .map(|s| project(s).1)
-                .unwrap_or(empty_default);
+            return spans.first().map(|s| project(s).1).unwrap_or(empty_default);
         }
         let s = &spans[idx - 1];
         let (from, to) = project(s);
@@ -122,9 +119,7 @@ impl VisualState {
     }
 
     fn closer_count(&self) -> usize {
-        (self.bold > 0) as usize
-            + (self.italic > 0) as usize
-            + (self.underline > 0) as usize
+        (self.bold > 0) as usize + (self.italic > 0) as usize + (self.underline > 0) as usize
     }
 
     fn any(&self) -> bool {
@@ -212,23 +207,16 @@ pub fn to_render_text(
                 match seg.kind {
                     crate::markers::PropKind::Bold => v.bold += 1,
                     crate::markers::PropKind::Italic => v.italic += 1,
-                    crate::markers::PropKind::Underline => {
-                        v.underline += 1
-                    }
+                    crate::markers::PropKind::Underline => v.underline += 1,
                     _ => {}
                 }
             }
         }
         v
     };
-    let math_at =
-        |pos: usize| toggles.partition_point(|&t| t <= pos) % 2 == 1;
-    let hidden_at = |pos: usize| {
-        hidden.iter().any(|r| r.start <= pos && pos < r.end)
-    };
-    let shown_token_at = |pos: usize| {
-        shown.iter().any(|r| r.start <= pos && pos < r.end)
-    };
+    let math_at = |pos: usize| toggles.partition_point(|&t| t <= pos) % 2 == 1;
+    let hidden_at = |pos: usize| hidden.iter().any(|r| r.start <= pos && pos < r.end);
+    let shown_token_at = |pos: usize| shown.iter().any(|r| r.start <= pos && pos < r.end);
 
     for w in bounds.windows(2) {
         let (start, end) = (w[0], w[1]);
@@ -246,9 +234,7 @@ pub fn to_render_text(
         // Whitespace-only chunks need no styling; math chunks keep
         // their own syntax (v1: visual props are not applied
         // inside `$..$`).
-        let wrap = v.any()
-            && !math_at(start)
-            && !chunk.chars().all(char::is_whitespace);
+        let wrap = v.any() && !math_at(start) && !chunk.chars().all(char::is_whitespace);
         if wrap {
             out.push_str(&v.openers());
         }
@@ -267,11 +253,7 @@ pub fn to_render_text(
 /// hidden/shown token ranges). The opening `$` toggles at its own
 /// index, the closing `$` right after itself, so both delimiters
 /// count as math.
-fn math_toggles(
-    text: &str,
-    hidden: &[Range<usize>],
-    shown: &[Range<usize>],
-) -> Vec<usize> {
+fn math_toggles(text: &str, hidden: &[Range<usize>], shown: &[Range<usize>]) -> Vec<usize> {
     let in_token = |pos: usize| {
         hidden
             .iter()
@@ -306,20 +288,13 @@ fn math_toggles(
     toggles
 }
 
-fn push_copy(
-    chunk: &str,
-    doc_start: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn push_copy(chunk: &str, doc_start: usize, out: &mut String, map: &mut OffsetMap) {
     if chunk.is_empty() {
         return;
     }
     // Merge with the previous span when contiguous in both spaces.
     if let Some(last) = map.spans.last_mut() {
-        if last.doc_start + last.len == doc_start
-            && last.render_start + last.len == out.len()
-        {
+        if last.doc_start + last.len == doc_start && last.render_start + last.len == out.len() {
             last.len += chunk.len();
             out.push_str(chunk);
             return;
@@ -333,21 +308,11 @@ fn push_copy(
     out.push_str(chunk);
 }
 
-fn emit_escaped(
-    chunk: &str,
-    doc_start: usize,
-    out: &mut String,
-    map: &mut OffsetMap,
-) {
+fn emit_escaped(chunk: &str, doc_start: usize, out: &mut String, map: &mut OffsetMap) {
     let mut run_start = 0;
     for (i, c) in chunk.char_indices() {
         if c == '#' || c == '\\' {
-            push_copy(
-                &chunk[run_start..i],
-                doc_start + run_start,
-                out,
-                map,
-            );
+            push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
             out.push('\\'); // render-only escape byte, not in the map
             run_start = i;
         }
@@ -377,10 +342,7 @@ mod tests {
 
     #[test]
     fn markers_hidden_with_trailing_space() {
-        let out = render(
-            "#1 f(x) #2 \\function(#1,#2)",
-            &TransformOptions::default(),
-        );
+        let out = render("#1 f(x) #2 \\function(#1,#2)", &TransformOptions::default());
         assert_eq!(out.text, "f(x) ");
     }
 

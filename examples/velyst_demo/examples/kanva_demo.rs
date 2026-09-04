@@ -54,16 +54,13 @@ fn animate_connections(
         return;
     }
 
-    let Some(start_idx) = kanva.query_group("connections-start")
-    else {
+    let Some(start_idx) = kanva.query_group("connections-start") else {
         return;
     };
     let Some(end_idx) = kanva.query_group("connections-end") else {
         return;
     };
-    let Some(range) =
-        kanva.get_paths_between_groups(start_idx, end_idx)
-    else {
+    let Some(range) = kanva.get_paths_between_groups(start_idx, end_idx) else {
         return;
     };
     let indices = range.collect::<Box<_>>();
@@ -75,10 +72,8 @@ fn animate_connections(
                 continue;
             };
             let els = entry.path.elements().to_vec();
-            if let (
-                Some(PathEl::MoveTo(start)),
-                Some(PathEl::LineTo(end)),
-            ) = (els.first(), els.get(1))
+            if let (Some(PathEl::MoveTo(start)), Some(PathEl::LineTo(end))) =
+                (els.first(), els.get(1))
             {
                 originals.0.push((*start, *end));
             }
@@ -92,11 +87,8 @@ fn animate_connections(
     let cycle = n * stagger + duration + 0.5;
     let t = time.elapsed_secs() % cycle;
 
-    for (i, (&path_idx, &(start, end))) in
-        indices.iter().zip(originals.0.iter()).enumerate()
-    {
-        let progress = ((t - i as f32 * stagger) / duration)
-            .clamp(0.0, 1.0) as f64;
+    for (i, (&path_idx, &(start, end))) in indices.iter().zip(originals.0.iter()).enumerate() {
+        let progress = ((t - i as f32 * stagger) / duration).clamp(0.0, 1.0) as f64;
 
         let cur_end = Point::new(
             start.x + progress * (end.x - start.x),

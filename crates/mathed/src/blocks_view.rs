@@ -31,10 +31,7 @@ impl Blocks {
         &self.index.blocks
     }
 
-    pub fn block_for_cursor(
-        &self,
-        cursor: usize,
-    ) -> Option<&mathed_core::blocks::Block> {
+    pub fn block_for_cursor(&self, cursor: usize) -> Option<&mathed_core::blocks::Block> {
         self.index.blocks.iter().find(|b| b.range.contains(&cursor))
     }
 }

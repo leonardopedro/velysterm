@@ -12,13 +12,9 @@
 //! [`crate::render::DocLayout`] is reused, and the box is drawn on
 //! top of the blitted image with `softbuffer`-style CPU pixel writes.
 
-use mathed_core::markers::{
-    ReferenceEntry, ReferenceKind, scan, scan_references,
-};
+use mathed_core::markers::{ReferenceEntry, ReferenceKind, scan, scan_references};
 use mathed_core::semantics::SemanticIndex;
-use mathed_core::transform::{
-    RenderOutput, TransformOptions, to_render_text,
-};
+use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::render::DocLayout;
 
@@ -45,10 +41,7 @@ pub struct CiteLabelPos {
 }
 
 impl CiteLabelPos {
-    fn from_caret(
-        geom: mathed_core::glyphs::CaretGeom,
-        label_w: f64,
-    ) -> Self {
+    fn from_caret(geom: mathed_core::glyphs::CaretGeom, label_w: f64) -> Self {
         Self {
             x: f64::from(geom.x),
             top: f64::from(geom.top),
@@ -118,10 +111,7 @@ fn truncate(s: &str, n: usize) -> String {
 /// Resolve the `target` cite to a `PopupBody`. Returns `None` when no
 /// cite with that number exists in `doc_text` (e.g. the user typed
 /// `Ctrl+5` for `[5]` but only `[1..3]` are present).
-pub fn resolve_popup_body(
-    doc_text: &str,
-    target: u64,
-) -> Option<PopupBody> {
+pub fn resolve_popup_body(doc_text: &str, target: u64) -> Option<PopupBody> {
     let refs = scan_references(&scan(doc_text));
     for entry in &refs {
         if !entry.numbers.contains(&target) {
@@ -168,14 +158,12 @@ pub fn resolve_popup_body(
 /// when the document has no `\bibliography` binding for these keys,
 /// or the citation cannot be rendered (the caller then falls back to
 /// the key placeholder).
-fn resolve_bib_rendered(
-    doc_text: &str,
-    keys: &[String],
-) -> Option<String> {
+fn resolve_bib_rendered(doc_text: &str, keys: &[String]) -> Option<String> {
     let statements = SemanticIndex::scan_biblio_statements(doc_text);
-    if statements.iter().all(|s| {
-        s.kind != mathed_core::markers::PropKind::Bibliography
-    }) {
+    if statements
+        .iter()
+        .all(|s| s.kind != mathed_core::markers::PropKind::Bibliography)
+    {
         return None;
     }
     let resolved = mathed_biblio::resolve_citations(&statements);
@@ -207,10 +195,7 @@ fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
             if t.contains(':') {
                 return None;
             }
-            let t = if t.len() >= 2
-                && t.starts_with('"')
-                && t.ends_with('"')
-            {
+            let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
                 &t[1..t.len() - 1]
             } else {
                 t
@@ -226,11 +211,7 @@ fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
 /// `target` is the auto-assigned number `N` of the cite to find.
 /// Returns `None` when the cite or its glyph is not found (e.g. the
 /// label was hidden in the current reveal mode).
-pub fn cite_label_pos(
-    doc_text: &str,
-    layout: &DocLayout,
-    target: u64,
-) -> Option<CiteLabelPos> {
+pub fn cite_label_pos(doc_text: &str, layout: &DocLayout, target: u64) -> Option<CiteLabelPos> {
     let scan = scan(doc_text);
     let refs = scan_references(&scan);
     let entry = refs.iter().find(|e| e.numbers.contains(&target))?;
@@ -238,8 +219,7 @@ pub fn cite_label_pos(
     // The label is rendered at stmt.range.start. Look up the closest
     // glyph at that byte offset.
     let geom = layout.glyphs.caret_for_byte(stmt.range.start)?;
-    let label_width = cite_label_width(entry) * layout.width as f64
-        / BOX_MAX_WIDTH_PT;
+    let label_width = cite_label_width(entry) * layout.width as f64 / BOX_MAX_WIDTH_PT;
     Some(CiteLabelPos::from_caret(geom, label_width))
 }
 
@@ -260,9 +240,7 @@ pub fn render_popup_body(
     _opts: &TransformOptions,
 ) -> Option<(imaging::RgbaImage, u32, u32)> {
     let markup = match body {
-        PopupBody::DocumentRef { body_markup, .. } => {
-            body_markup.clone()
-        }
+        PopupBody::DocumentRef { body_markup, .. } => body_markup.clone(),
         PopupBody::Bibliography { keys, rendered } => {
             // Prefer the resolved citation (mathed_biblio); fall back
             // to the key placeholder when the document
@@ -274,9 +252,7 @@ pub fn render_popup_body(
                 _ => {
                     let escaped = keys
                         .iter()
-                        .map(|k| {
-                            k.replace('[', "\\[").replace(']', "\\]")
-                        })
+                        .map(|k| k.replace('[', "\\[").replace(']', "\\]"))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("```\n[{}]\n```", escaped)
@@ -287,8 +263,7 @@ pub fn render_popup_body(
     if markup.is_empty() {
         return None;
     }
-    let img = crate::render::render_markup(&markup, BOX_MAX_WIDTH_PT)
-        .ok()?;
+    let img = crate::render::render_markup(&markup, BOX_MAX_WIDTH_PT).ok()?;
     let w = img.width;
     // Cap the height to BOX_MAX_HEIGHT_PT.
     let h = (img.height as f64).min(BOX_MAX_HEIGHT_PT) as u32;
@@ -299,10 +274,7 @@ pub fn render_popup_body(
 /// its own `\cite(...)` statements (recursive expansion); the markup
 /// splices their labels so the sub-render produces its own `[1]`,
 /// `[2]`, etc. (the user's "press Ctrl+number2" use case).
-pub fn doc_ref_body_markup(
-    doc_text: &str,
-    body_range: std::ops::Range<usize>,
-) -> RenderOutput {
+pub fn doc_ref_body_markup(doc_text: &str, body_range: std::ops::Range<usize>) -> RenderOutput {
     // Treat the body as a self-contained doc: take the substring,
     // scan it, resolve segments, and transform with references.
     let body_text = &doc_text[body_range];
@@ -327,8 +299,7 @@ mod tests {
         // cite label [1] — it includes just the body text. The
         // cite label is the *entry* that opens the box.
         let doc = "#1 a #2 \\cite(#1,#2)";
-        let body =
-            resolve_popup_body(doc, 1).expect("cite [1] exists");
+        let body = resolve_popup_body(doc, 1).expect("cite [1] exists");
         match body {
             PopupBody::DocumentRef {
                 body_text,
@@ -349,21 +320,11 @@ mod tests {
         // No `\bibliography` binding → the placeholder is kept,
         // `rendered` is None.
         let doc = "\\cite(authorA89, authorB94)";
-        let body =
-            resolve_popup_body(doc, 1).expect("cite [1] exists");
+        let body = resolve_popup_body(doc, 1).expect("cite [1] exists");
         match body {
             PopupBody::Bibliography { keys, rendered } => {
-                assert_eq!(
-                    keys,
-                    vec![
-                        "authorA89".to_string(),
-                        "authorB94".to_string()
-                    ]
-                );
-                assert!(
-                    rendered.is_none(),
-                    "no bibliography to resolve against"
-                );
+                assert_eq!(keys, vec!["authorA89".to_string(), "authorB94".to_string()]);
+                assert!(rendered.is_none(), "no bibliography to resolve against");
             }
             _ => panic!("expected Bibliography"),
         }
@@ -382,8 +343,7 @@ mod tests {
                    \x20   publisher: Anchor Books\n\
                    #2 \\bibliography(#1,#2, refs)\n\
                    #3 x #4 \\cite(#3,#4, \"crazy-rich\", bib: \"refs\")";
-        let body =
-            resolve_popup_body(doc, 1).expect("cite [1] exists");
+        let body = resolve_popup_body(doc, 1).expect("cite [1] exists");
         match body {
             PopupBody::Bibliography { keys, rendered } => {
                 // The popup's `keys` are the raw scan form (quotes +
@@ -391,8 +351,7 @@ mod tests {
                 // meaningful assertion is that the citation text
                 // resolves through mathed_biblio.
                 assert!(!keys.is_empty());
-                let text =
-                    rendered.expect("a real citation is resolved");
+                let text = rendered.expect("a real citation is resolved");
                 assert!(
                     text.contains("Kwan") || text.contains("2014"),
                     "resolved citation should mention the author or year: {text}"
@@ -422,9 +381,7 @@ mod tests {
         assert_eq!(refs.len(), 3);
         let top = &refs[2];
         let body_range = match &top.kind {
-            ReferenceKind::DocumentRef { body: Some(r), .. } => {
-                r.clone()
-            }
+            ReferenceKind::DocumentRef { body: Some(r), .. } => r.clone(),
             _ => panic!("expected top doc-ref with body"),
         };
         let out = doc_ref_body_markup(doc, body_range);

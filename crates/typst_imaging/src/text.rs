@@ -10,17 +10,10 @@ use crate::RenderState;
 use crate::convert::convert_fixed_stroke;
 use crate::paint::text_paint;
 
-pub(crate) fn render_text(
-    text: &TextItem,
-    sink: &mut impl PaintSink,
-    state: RenderState,
-) {
+pub(crate) fn render_text(text: &TextItem, sink: &mut impl PaintSink, state: RenderState) {
     let bytes = text.font.data();
 
-    let font_data = FontData::new(
-        Blob::new(Arc::new(bytes.clone())),
-        text.font.index(),
-    );
+    let font_data = FontData::new(Blob::new(Arc::new(bytes.clone())), text.font.index());
     let font_size = text.size.to_pt() as f32;
 
     let glyphs: Vec<Glyph> = {
@@ -28,8 +21,7 @@ pub(crate) fn render_text(
         text.glyphs
             .iter()
             .map(|g| {
-                let glyph_x =
-                    (x + g.x_offset.at(text.size).to_pt()) as f32;
+                let glyph_x = (x + g.x_offset.at(text.size).to_pt()) as f32;
                 x += g.x_advance.at(text.size).to_pt();
                 Glyph {
                     id: g.id as u32,
@@ -44,8 +36,7 @@ pub(crate) fn render_text(
         return;
     }
 
-    let (fill_brush, fill_brush_transform) =
-        text_paint(&text.fill, &state);
+    let (fill_brush, fill_brush_transform) = text_paint(&text.fill, &state);
 
     let fill_style = Style::Fill(Fill::NonZero);
     sink.glyph_run(
@@ -66,11 +57,9 @@ pub(crate) fn render_text(
     );
 
     if let Some(stroke) = &text.stroke {
-        let (stroke_brush, stroke_brush_transform) =
-            text_paint(&stroke.paint, &state);
+        let (stroke_brush, stroke_brush_transform) = text_paint(&stroke.paint, &state);
 
-        let stroke_style =
-            Style::Stroke(convert_fixed_stroke(stroke));
+        let stroke_style = Style::Stroke(convert_fixed_stroke(stroke));
 
         sink.glyph_run(
             GlyphRunRef {

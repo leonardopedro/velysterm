@@ -62,15 +62,8 @@ fn layout_ui_content(
         ),
     >,
 ) {
-    for (
-        content,
-        mut scene,
-        viz,
-        node,
-        computed_node,
-        mut content_size,
-        target_info,
-    ) in q_contents.iter_mut()
+    for (content, mut scene, viz, node, computed_node, mut content_size, target_info) in
+        q_contents.iter_mut()
     {
         let scale_factor = target_info.scale_factor();
         if scale_factor == 0.0 {
@@ -84,23 +77,16 @@ fn layout_ui_content(
         let mut size = Size::splat(Abs::inf());
 
         if node.width != Val::Auto {
-            size.x =
-                Abs::pt((computed_node.size.x / scale_factor) as f64);
+            size.x = Abs::pt((computed_node.size.x / scale_factor) as f64);
         }
         if node.height != Val::Auto {
-            size.y =
-                Abs::pt((computed_node.size.y / scale_factor) as f64);
+            size.y = Abs::pt((computed_node.size.y / scale_factor) as f64);
         }
 
-        if let Some(frame) = world.layout_frame(
-            &content.0,
-            Region::new(size, Axes::splat(false)),
-        ) {
+        if let Some(frame) = world.layout_frame(&content.0, Region::new(size, Axes::splat(false))) {
             let frame_size = frame.size();
-            let size = Vec2::new(
-                frame_size.x.to_pt() as f32,
-                frame_size.y.to_pt() as f32,
-            ) * scale_factor;
+            let size =
+                Vec2::new(frame_size.x.to_pt() as f32, frame_size.y.to_pt() as f32) * scale_factor;
             *content_size = ContentSize::fixed_size(size);
             scene.0 = Some(frame);
         }
@@ -129,9 +115,7 @@ fn layout_world_content(
         ),
     >,
 ) {
-    for (content, mut scene, world_scene, viz, mut aabb) in
-        q_contents.iter_mut()
-    {
+    for (content, mut scene, world_scene, viz, mut aabb) in q_contents.iter_mut() {
         if viz == Visibility::Hidden {
             continue;
         }
@@ -145,10 +129,7 @@ fn layout_world_content(
             size.y = Abs::pt(height);
         }
 
-        if let Some(frame) = world.layout_frame(
-            &content.0,
-            Region::new(size, Axes::splat(false)),
-        ) {
+        if let Some(frame) = world.layout_frame(&content.0, Region::new(size, Axes::splat(false))) {
             let frame_size = frame.size();
             let width = frame_size.x.to_pt() as f32;
             let height = frame_size.y.to_pt() as f32;
@@ -158,13 +139,8 @@ fn layout_world_content(
             // scene occupies [0, width] × [0, -height] in
             // local space. Anchor shifts the origin
             // within that rect (normalized 0..1).
-            let center = Vec3A::new(
-                width * (0.5 - anchor.x),
-                height * (anchor.y - 0.5),
-                0.0,
-            );
-            let half_extents =
-                Vec3A::new(width / 2.0, height / 2.0, 0.0);
+            let center = Vec3A::new(width * (0.5 - anchor.x), height * (anchor.y - 0.5), 0.0);
+            let half_extents = Vec3A::new(width / 2.0, height / 2.0, 0.0);
             *aabb = Aabb {
                 center,
                 half_extents,
@@ -195,8 +171,7 @@ fn render_ui_scene(
             continue;
         }
         let Some(frame) = &scene.0 else { continue };
-        *vello_scene =
-            UiVelloScene::from(frame_to_scene(frame, Vec2::ZERO));
+        *vello_scene = UiVelloScene::from(frame_to_scene(frame, Vec2::ZERO));
     }
 }
 
@@ -211,27 +186,17 @@ fn render_world_scene(
         ),
     >,
 ) {
-    for (scene, world_scene, mut vello_scene, viz) in
-        q_scenes.iter_mut()
-    {
+    for (scene, world_scene, mut vello_scene, viz) in q_scenes.iter_mut() {
         if viz == Visibility::Hidden {
             continue;
         }
         let Some(frame) = &scene.0 else { continue };
-        *vello_scene = VelloScene2d::from(frame_to_scene(
-            frame,
-            world_scene.anchor,
-        ));
+        *vello_scene = VelloScene2d::from(frame_to_scene(frame, world_scene.anchor));
     }
 }
 
 /// Build a [`VelystKanva`] from the laid-out [`VelystFrame`] frame.
-fn build_kanva_scene(
-    mut q_scenes: Query<
-        (&VelystFrame, &mut VelystKanva),
-        Changed<VelystFrame>,
-    >,
-) {
+fn build_kanva_scene(mut q_scenes: Query<(&VelystFrame, &mut VelystKanva), Changed<VelystFrame>>) {
     for (scene, mut kanva) in q_scenes.iter_mut() {
         let Some(frame) = &scene.0 else { continue };
         let mut builder = KanvaBuilder::new();
@@ -255,11 +220,7 @@ fn render_ui_kanva(
             continue;
         }
         let Some(frame) = &scene.0 else { continue };
-        *vello_scene = UiVelloScene::from(kanva_to_scene(
-            &kanva.0,
-            frame,
-            Vec2::ZERO,
-        ));
+        *vello_scene = UiVelloScene::from(kanva_to_scene(&kanva.0, frame, Vec2::ZERO));
     }
 }
 
@@ -279,26 +240,16 @@ fn render_world_kanva(
         ),
     >,
 ) {
-    for (kanva, scene, world_scene, mut vello_scene, viz) in
-        q_scenes.iter_mut()
-    {
+    for (kanva, scene, world_scene, mut vello_scene, viz) in q_scenes.iter_mut() {
         if viz == Visibility::Hidden {
             continue;
         }
         let Some(frame) = &scene.0 else { continue };
-        *vello_scene = VelloScene2d::from(kanva_to_scene(
-            &kanva.0,
-            frame,
-            world_scene.anchor,
-        ));
+        *vello_scene = VelloScene2d::from(kanva_to_scene(&kanva.0, frame, world_scene.anchor));
     }
 }
 
-fn kanva_to_scene(
-    kanva: &Kanva,
-    frame: &Frame,
-    anchor: Vec2,
-) -> Scene {
+fn kanva_to_scene(kanva: &Kanva, frame: &Frame, anchor: Vec2) -> Scene {
     let frame_size = frame.size();
     let w = frame_size.x.to_pt();
     let h = frame_size.y.to_pt();

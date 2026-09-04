@@ -26,15 +26,13 @@ use typst::foundations::Value;
 /// segment names no translator. It is intentionally minimal — real
 /// documents define a model-specific translator — but it is valid
 /// Typst returning valid JSON.
-pub const BUILTIN_TRANSLATOR: &str =
-    include_str!("builtin_translator.typ");
+pub const BUILTIN_TRANSLATOR: &str = include_str!("builtin_translator.typ");
 
 /// The default event translator, used when a `\event`/`\prob` segment
 /// names no translator. Emits the `Vacuum` predicate — the simplest
 /// valid `EventPredicate` — so a document with no event translator
 /// still produces a well-formed kernel request.
-pub const BUILTIN_EVENT_TRANSLATOR: &str =
-    include_str!("builtin_event_translator.typ");
+pub const BUILTIN_EVENT_TRANSLATOR: &str = include_str!("builtin_event_translator.typ");
 
 /// The scope binding the engine reads back after evaluation.
 const RESULT_BINDING: &str = "__mathed_result";
@@ -58,18 +56,12 @@ pub enum TranslateError {
 }
 
 impl std::fmt::Display for TranslateError {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Eval(msg) => {
                 write!(f, "translator eval error: {msg}")
             }
-            Self::MissingResult => write!(
-                f,
-                "translator defined no `translate(body)` function"
-            ),
+            Self::MissingResult => write!(f, "translator defined no `translate(body)` function"),
             Self::NotString => {
                 write!(f, "translator returned a non-string value")
             }
@@ -109,11 +101,7 @@ impl Translator {
 
     /// Run `translator_src` against `body`, returning the JSON string
     /// the translator's `translate(body)` function produced.
-    pub fn run(
-        &mut self,
-        translator_src: &str,
-        body: &str,
-    ) -> Result<String, TranslateError> {
+    pub fn run(&mut self, translator_src: &str, body: &str) -> Result<String, TranslateError> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         translator_src.hash(&mut h);
@@ -143,10 +131,7 @@ impl Translator {
     }
 
     /// Run the built-in default translator against `body`.
-    pub fn run_builtin(
-        &mut self,
-        body: &str,
-    ) -> Result<String, TranslateError> {
+    pub fn run_builtin(&mut self, body: &str) -> Result<String, TranslateError> {
         self.run(BUILTIN_TRANSLATOR, body)
     }
 }
@@ -206,24 +191,18 @@ mod tests {
             json.encode((term,))
         }"#;
         let mut t = Translator::new();
-        let out =
-            t.run(src, "a^\\dagger a").expect("json translator");
+        let out = t.run(src, "a^\\dagger a").expect("json translator");
         // `json.encode` pretty-prints by default, so compare
         // whitespace-free.
-        let compact: String =
-            out.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(
-            compact.contains("\"kind\":\"create\""),
-            "got: {out}"
-        );
+        let compact: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("\"kind\":\"create\""), "got: {out}");
         assert!(compact.contains("\"mode\":0"), "got: {out}");
     }
 
     #[test]
     fn builtin_translator_runs_and_returns_json_array() {
         let mut t = Translator::new();
-        let out =
-            t.run_builtin("anything").expect("builtin translator");
+        let out = t.run_builtin("anything").expect("builtin translator");
         // The builtin returns a JSON array (empty by default).
         assert!(out.trim_start().starts_with('['), "got: {out}");
     }
@@ -237,10 +216,9 @@ mod tests {
         // fails this test, not a downstream UK-1003.
         use unfer_protocol::{Level, OpKind, OpSpec, TermSpec};
         let mut t = Translator::new();
-        let out =
-            t.run_builtin("ignored").expect("builtin translator");
-        let terms: Vec<TermSpec> = serde_json::from_str(&out)
-            .expect("builtin output is TermSpec[]");
+        let out = t.run_builtin("ignored").expect("builtin translator");
+        let terms: Vec<TermSpec> =
+            serde_json::from_str(&out).expect("builtin output is TermSpec[]");
         assert_eq!(terms.len(), 1);
         let term = &terms[0];
         assert_eq!(term.coeff_re, 1.0);
@@ -256,8 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_event_translator_round_trips_through_event_predicate()
-    {
+    fn builtin_event_translator_round_trips_through_event_predicate() {
         // Same contract for builtin_event_translator.typ: its `kind:
         // vacuum` tag must map onto
         // `unfer_protocol::EventPredicate::Vacuum` via the
@@ -268,16 +245,13 @@ mod tests {
         let out = t
             .run(BUILTIN_EVENT_TRANSLATOR, "ignored")
             .expect("builtin event");
-        let pred: EventPredicate = serde_json::from_str(&out)
-            .expect("builtin output is an EventPredicate");
+        let pred: EventPredicate =
+            serde_json::from_str(&out).expect("builtin output is an EventPredicate");
         assert_eq!(pred, EventPredicate::Vacuum);
         // Re-serialize through the schema and confirm the tag
         // survives.
         let re = serde_json::to_string(&pred).unwrap();
-        assert_eq!(
-            serde_json::from_str::<EventPredicate>(&re).unwrap(),
-            pred
-        );
+        assert_eq!(serde_json::from_str::<EventPredicate>(&re).unwrap(), pred);
     }
 
     #[test]
@@ -285,10 +259,7 @@ mod tests {
         let mut t = Translator::new();
         // `#let` with no body is a Typst syntax error.
         let err = t.run("#let translate(body) =", "x").unwrap_err();
-        assert!(
-            matches!(err, TranslateError::Eval(_)),
-            "got: {err:?}"
-        );
+        assert!(matches!(err, TranslateError::Eval(_)), "got: {err:?}");
     }
 
     #[test]
@@ -298,26 +269,20 @@ mod tests {
         // fails to resolve, so evaluation errors (unknown
         // variable).
         let err = t.run("#let other = 1", "x").unwrap_err();
-        assert!(
-            matches!(err, TranslateError::Eval(_)),
-            "got: {err:?}"
-        );
+        assert!(matches!(err, TranslateError::Eval(_)), "got: {err:?}");
     }
 
     #[test]
     fn translate_non_string() {
         let mut t = Translator::new();
-        let err =
-            t.run("#let translate(body) = { 42 }", "x").unwrap_err();
+        let err = t.run("#let translate(body) = { 42 }", "x").unwrap_err();
         assert_eq!(err, TranslateError::NotString);
     }
 
     #[test]
     fn translate_empty_string() {
         let mut t = Translator::new();
-        let err = t
-            .run("#let translate(body) = { \"\" }", "x")
-            .unwrap_err();
+        let err = t.run("#let translate(body) = { \"\" }", "x").unwrap_err();
         assert_eq!(err, TranslateError::Empty);
     }
 

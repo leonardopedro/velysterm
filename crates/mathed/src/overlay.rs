@@ -48,24 +48,12 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
     // Search matches.
     let search_color = rgba(0.95, 0.80, 0.20, 0.35);
     for &r in input.search_matches {
-        scene.fill(
-            peniko::Fill::NonZero,
-            ident,
-            search_color,
-            None,
-            &r,
-        );
+        scene.fill(peniko::Fill::NonZero, ident, search_color, None, &r);
     }
 
     // Search current: fill + stroke.
     if let Some(r) = input.search_current {
-        scene.fill(
-            peniko::Fill::NonZero,
-            ident,
-            search_color,
-            None,
-            &r,
-        );
+        scene.fill(peniko::Fill::NonZero, ident, search_color, None, &r);
         let stroke_color = rgba(0.95, 0.80, 0.20, 1.0);
         let stroke = vello::kurbo::Stroke::new(1.5);
         scene.stroke(&stroke, ident, stroke_color, None, &r);
@@ -78,13 +66,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         let mut x = r.x0;
         while x + 3.0 <= r.x1 {
             let seg = kurbo::Rect::new(x, y - 2.0, x + 3.0, y);
-            scene.fill(
-                peniko::Fill::NonZero,
-                ident,
-                unresolved_color,
-                None,
-                &seg,
-            );
+            scene.fill(peniko::Fill::NonZero, ident, unresolved_color, None, &seg);
             x += 5.0; // 3px segment + 2px gap
         }
     }
@@ -93,26 +75,14 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
     let def_color = rgba(0.40, 0.80, 0.50, 0.8);
     for &r in input.def_sites {
         let line = kurbo::Rect::new(r.x0, r.y1 - 1.0, r.x1, r.y1);
-        scene.fill(
-            peniko::Fill::NonZero,
-            ident,
-            def_color,
-            None,
-            &line,
-        );
+        scene.fill(peniko::Fill::NonZero, ident, def_color, None, &line);
     }
 
     // Prob success: solid green underline.
     let prob_ok_color = rgba(0.30, 0.85, 0.40, 0.9);
     for &r in input.prob_ok {
         let line = kurbo::Rect::new(r.x0, r.y1 - 2.0, r.x1, r.y1);
-        scene.fill(
-            peniko::Fill::NonZero,
-            ident,
-            prob_ok_color,
-            None,
-            &line,
-        );
+        scene.fill(peniko::Fill::NonZero, ident, prob_ok_color, None, &line);
     }
 
     // Prob errors: red dashed underline.
@@ -122,13 +92,7 @@ pub fn build_overlay_scene(input: &OverlayInput) -> vello::Scene {
         let mut x = r.x0;
         while x + 3.0 <= r.x1 {
             let seg = kurbo::Rect::new(x, y - 2.0, x + 3.0, y);
-            scene.fill(
-                peniko::Fill::NonZero,
-                ident,
-                prob_err_color,
-                None,
-                &seg,
-            );
+            scene.fill(peniko::Fill::NonZero, ident, prob_err_color, None, &seg);
             x += 5.0;
         }
     }

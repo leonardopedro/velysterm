@@ -35,8 +35,7 @@ pub fn convert_fixed_stroke(stroke: &viz::FixedStroke) -> Stroke {
         ..Default::default()
     };
     if let Some(dash) = &stroke.dash {
-        s.dash_pattern =
-            dash.array.iter().map(|d| d.to_pt()).collect();
+        s.dash_pattern = dash.array.iter().map(|d| d.to_pt()).collect();
         s.dash_offset = dash.phase.to_pt();
     }
     s
@@ -45,14 +44,11 @@ pub fn convert_fixed_stroke(stroke: &viz::FixedStroke) -> Stroke {
 pub fn convert_geometry(geometry: &viz::Geometry) -> BezPath {
     match geometry {
         viz::Geometry::Line(p) => {
-            kurbo::Line::new((0.0, 0.0), (p.x.to_pt(), p.y.to_pt()))
-                .to_path(0.1)
+            kurbo::Line::new((0.0, 0.0), (p.x.to_pt(), p.y.to_pt())).to_path(0.1)
         }
-        viz::Geometry::Rect(size) => kurbo::Rect::from_origin_size(
-            (0.0, 0.0),
-            (size.x.to_pt(), size.y.to_pt()),
-        )
-        .to_path(0.1),
+        viz::Geometry::Rect(size) => {
+            kurbo::Rect::from_origin_size((0.0, 0.0), (size.x.to_pt(), size.y.to_pt())).to_path(0.1)
+        }
         viz::Geometry::Curve(curve) => convert_curve(curve),
     }
 }
@@ -61,12 +57,8 @@ pub fn convert_curve(curve: &viz::Curve) -> BezPath {
     let mut path = BezPath::new();
     for item in &curve.0 {
         match item {
-            viz::CurveItem::Move(p) => {
-                path.move_to((p.x.to_pt(), p.y.to_pt()))
-            }
-            viz::CurveItem::Line(p) => {
-                path.line_to((p.x.to_pt(), p.y.to_pt()))
-            }
+            viz::CurveItem::Move(p) => path.move_to((p.x.to_pt(), p.y.to_pt())),
+            viz::CurveItem::Line(p) => path.line_to((p.x.to_pt(), p.y.to_pt())),
             viz::CurveItem::Cubic(p1, p2, p3) => path.curve_to(
                 (p1.x.to_pt(), p1.y.to_pt()),
                 (p2.x.to_pt(), p2.y.to_pt()),

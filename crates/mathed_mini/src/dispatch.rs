@@ -15,16 +15,10 @@
 //! unnamed (`""`) block-local default, else the embedded
 //! [`BUILTIN_TRANSLATOR`].
 
-use crate::translate::{
-    BUILTIN_EVENT_TRANSLATOR, BUILTIN_TRANSLATOR, TranslateError,
-    Translator,
-};
+use crate::translate::{BUILTIN_EVENT_TRANSLATOR, BUILTIN_TRANSLATOR, TranslateError, Translator};
 use mathed_core::{KernelStatement, PropKind, TranslatorDef};
 use std::collections::HashMap;
-use unfer_protocol::{
-    EventPredicate, HamiltonianSpec, ModelSpec, PriorSpec,
-    SolverSpec, TermSpec,
-};
+use unfer_protocol::{EventPredicate, HamiltonianSpec, ModelSpec, PriorSpec, SolverSpec, TermSpec};
 
 /// Why a statement could not be turned into a kernel payload.
 #[derive(Debug, Clone)]
@@ -42,10 +36,7 @@ pub enum DispatchError {
 }
 
 impl std::fmt::Display for DispatchError {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Translate(e) => write!(f, "{e}"),
             Self::Json(e) => {
@@ -100,16 +91,12 @@ pub fn statement_to_model_spec(
     if stmt.kind != PropKind::Model {
         return Err(DispatchError::WrongKind(stmt.kind));
     }
-    let src = resolve_translator_src(
-        translators,
-        stmt.translator.as_deref(),
-        BUILTIN_TRANSLATOR,
-    );
+    let src = resolve_translator_src(translators, stmt.translator.as_deref(), BUILTIN_TRANSLATOR);
     let json = engine
         .run(src, &stmt.body_text)
         .map_err(DispatchError::Translate)?;
-    let terms: Vec<TermSpec> = serde_json::from_str(&json)
-        .map_err(|e| DispatchError::Json(e.to_string()))?;
+    let terms: Vec<TermSpec> =
+        serde_json::from_str(&json).map_err(|e| DispatchError::Json(e.to_string()))?;
     Ok(ModelSpec {
         hamiltonian: HamiltonianSpec::terms(terms),
         prior: prior.unwrap_or(PriorSpec::Vacuum),
@@ -135,9 +122,7 @@ pub fn parse_prior(body: &str) -> Result<PriorSpec, DispatchError> {
         let mut modes = Vec::new();
         for item in split_nonempty(inner) {
             let (m, n) = item.split_once(':').ok_or_else(|| {
-                DispatchError::Parse(format!(
-                    "boson mode expects `mode:count`, got {item:?}"
-                ))
+                DispatchError::Parse(format!("boson mode expects `mode:count`, got {item:?}"))
             })?;
             modes.push((parse_u32(m)?, parse_u32(n)?));
         }
@@ -167,26 +152,19 @@ pub fn parse_prior(body: &str) -> Result<PriorSpec, DispatchError> {
 pub fn parse_solver(body: &str) -> Result<SolverSpec, DispatchError> {
     let t = body.trim();
     if t.starts_with('{') {
-        return serde_json::from_str(t).map_err(|e| {
-            DispatchError::Parse(format!(
-                "invalid JSON SolverSpec: {e}"
-            ))
-        });
+        return serde_json::from_str(t)
+            .map_err(|e| DispatchError::Parse(format!("invalid JSON SolverSpec: {e}")));
     }
     let mut spec = SolverSpec::default();
     for pair in split_nonempty(t) {
         let (k, v) = pair.split_once(':').ok_or_else(|| {
-            DispatchError::Parse(format!(
-                "solver expects `key: value`, got {pair:?}"
-            ))
+            DispatchError::Parse(format!("solver expects `key: value`, got {pair:?}"))
         })?;
         let (k, v) = (k.trim(), v.trim());
         match k {
             "krylov_dim" => spec.krylov_dim = parse_usize(v)?,
             "prune_eps" => spec.prune_eps = parse_f64(v)?,
-            "max_components" => {
-                spec.max_components = Some(parse_usize(v)?)
-            }
+            "max_components" => spec.max_components = Some(parse_usize(v)?),
             "restarts" => spec.restarts = parse_usize(v)?,
             other => {
                 return Err(DispatchError::Parse(format!(
@@ -213,25 +191,21 @@ fn split_nonempty(s: &str) -> impl Iterator<Item = &str> {
 }
 
 fn parse_u32(s: &str) -> Result<u32, DispatchError> {
-    s.trim().parse().map_err(|_| {
-        DispatchError::Parse(format!(
-            "expected an integer, got {s:?}"
-        ))
-    })
+    s.trim()
+        .parse()
+        .map_err(|_| DispatchError::Parse(format!("expected an integer, got {s:?}")))
 }
 
 fn parse_usize(s: &str) -> Result<usize, DispatchError> {
-    s.trim().parse().map_err(|_| {
-        DispatchError::Parse(format!(
-            "expected an integer, got {s:?}"
-        ))
-    })
+    s.trim()
+        .parse()
+        .map_err(|_| DispatchError::Parse(format!("expected an integer, got {s:?}")))
 }
 
 fn parse_f64(s: &str) -> Result<f64, DispatchError> {
-    s.trim().parse().map_err(|_| {
-        DispatchError::Parse(format!("expected a number, got {s:?}"))
-    })
+    s.trim()
+        .parse()
+        .map_err(|_| DispatchError::Parse(format!("expected a number, got {s:?}")))
 }
 
 /// Translate an `\event`/`\prob` statement into an `EventPredicate`
@@ -267,22 +241,14 @@ pub fn statement_to_event_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mathed_core::{
-        SemanticIndex, TransformOptions, resolve_segments, scan,
-        to_render_text,
-    };
+    use mathed_core::{SemanticIndex, TransformOptions, resolve_segments, scan, to_render_text};
 
     /// Build a semantic index over `doc` using the public marker
     /// pipeline.
     fn index_for(doc: &str) -> SemanticIndex {
         let scan = scan(doc);
         let segments = resolve_segments(&scan);
-        let render = to_render_text(
-            doc,
-            &scan,
-            &segments,
-            &TransformOptions::default(),
-        );
+        let render = to_render_text(doc, &scan, &segments, &TransformOptions::default());
         let mut idx = SemanticIndex::default();
         idx.build_index(doc, &segments, &[&render]);
         idx
@@ -298,14 +264,8 @@ mod tests {
             .find(|s| s.kind == PropKind::Model)
             .expect("model statement");
         let mut engine = Translator::new();
-        let spec = statement_to_model_spec(
-            &mut engine,
-            &idx.translators,
-            stmt,
-            None,
-            None,
-        )
-        .expect("dispatch");
+        let spec = statement_to_model_spec(&mut engine, &idx.translators, stmt, None, None)
+            .expect("dispatch");
         match spec.hamiltonian {
             HamiltonianSpec::Terms { terms } => {
                 assert_eq!(terms.len(), 1);
@@ -323,14 +283,8 @@ mod tests {
         let stmt = &idx.kernel_statements[0];
         assert!(stmt.translator.is_none());
         let mut engine = Translator::new();
-        let spec = statement_to_model_spec(
-            &mut engine,
-            &idx.translators,
-            stmt,
-            None,
-            None,
-        )
-        .expect("builtin dispatch");
+        let spec = statement_to_model_spec(&mut engine, &idx.translators, stmt, None, None)
+            .expect("builtin dispatch");
         match spec.hamiltonian {
             // builtin_translator.typ emits a single mode-0 number
             // operator.
@@ -354,12 +308,8 @@ mod tests {
             .find(|s| s.kind == PropKind::Event)
             .expect("event statement");
         let mut engine = Translator::new();
-        let json = statement_to_event_json(
-            &mut engine,
-            &idx.translators,
-            stmt,
-        )
-        .expect("event dispatch");
+        let json =
+            statement_to_event_json(&mut engine, &idx.translators, stmt).expect("event dispatch");
         assert!(json.contains("vacuum"), "got: {json}");
     }
 
@@ -377,12 +327,7 @@ mod tests {
             .find(|s| s.kind == PropKind::Event)
             .expect("event statement");
         let mut engine = Translator::new();
-        let err = statement_to_event_json(
-            &mut engine,
-            &idx.translators,
-            stmt,
-        )
-        .unwrap_err();
+        let err = statement_to_event_json(&mut engine, &idx.translators, stmt).unwrap_err();
         assert!(
             matches!(err, DispatchError::Json(_)),
             "expected Json validation error, got {err:?}"
@@ -410,12 +355,8 @@ mod tests {
             .find(|s| s.kind == PropKind::Prob)
             .expect("prob statement");
         let mut engine = Translator::new();
-        let json = statement_to_event_json(
-            &mut engine,
-            &idx.translators,
-            stmt,
-        )
-        .expect("combinator predicate should validate");
+        let json = statement_to_event_json(&mut engine, &idx.translators, stmt)
+            .expect("combinator predicate should validate");
         assert!(json.contains("and"), "got: {json}");
         assert!(json.contains("boson_mode_total"), "got: {json}");
     }
@@ -426,25 +367,14 @@ mod tests {
         let idx = index_for(doc);
         let stmt = &idx.kernel_statements[0];
         let mut engine = Translator::new();
-        let err = statement_to_event_json(
-            &mut engine,
-            &idx.translators,
-            stmt,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            DispatchError::WrongKind(PropKind::Model)
-        ));
+        let err = statement_to_event_json(&mut engine, &idx.translators, stmt).unwrap_err();
+        assert!(matches!(err, DispatchError::WrongKind(PropKind::Model)));
     }
 
     #[test]
     fn parse_prior_grammar_forms() {
         assert_eq!(parse_prior("vacuum").unwrap(), PriorSpec::Vacuum);
-        assert_eq!(
-            parse_prior("  VACUUM ").unwrap(),
-            PriorSpec::Vacuum
-        );
+        assert_eq!(parse_prior("  VACUUM ").unwrap(), PriorSpec::Vacuum);
         assert_eq!(
             parse_prior("bosons(0:2, 1:1)").unwrap(),
             PriorSpec::Bosons {
@@ -460,8 +390,7 @@ mod tests {
     #[test]
     fn parse_prior_json_fallback() {
         // Direct JSON (internally tagged `kind`) for full control.
-        let p = parse_prior(r#"{"kind":"bosons","modes":[[2,5]]}"#)
-            .unwrap();
+        let p = parse_prior(r#"{"kind":"bosons","modes":[[2,5]]}"#).unwrap();
         assert_eq!(
             p,
             PriorSpec::Bosons {
@@ -485,10 +414,7 @@ mod tests {
         assert_eq!(s.restarts, 3);
         // Untouched fields keep their defaults.
         assert_eq!(s.prune_eps, SolverSpec::default().prune_eps);
-        assert_eq!(
-            s.max_components,
-            SolverSpec::default().max_components
-        );
+        assert_eq!(s.max_components, SolverSpec::default().max_components);
     }
 
     #[test]

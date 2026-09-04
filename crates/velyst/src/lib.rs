@@ -16,12 +16,9 @@ pub mod prelude {
     pub use crate::asset::{VelystModules, VelystSource};
     pub use crate::ext::{ScopeError, ScopeExt, UnitExt};
     pub use crate::func::{
-        TypstFunc, TypstFuncAppExt, TypstValue, VelystContent,
-        VelystFunc, VelystSourceReady,
+        TypstFunc, TypstFuncAppExt, TypstValue, VelystContent, VelystFunc, VelystSourceReady,
     };
-    pub use crate::renderer::{
-        UiScene, VelystFrame, VelystKanva, WorldScene,
-    };
+    pub use crate::renderer::{UiScene, VelystFrame, VelystKanva, WorldScene};
     pub use crate::typst_func;
     pub use crate::world::VelystWorld;
     pub use typst::foundations::Content;
@@ -53,11 +50,7 @@ impl Plugin for VelystPlugin {
                 .chain(),
         );
 
-        app.add_plugins((
-            TypstAssetPlugin,
-            VelystWorldPlugin,
-            VelystRendererPlugin,
-        ));
+        app.add_plugins((TypstAssetPlugin, VelystWorldPlugin, VelystRendererPlugin));
     }
 }
 

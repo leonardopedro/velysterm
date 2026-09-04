@@ -9,16 +9,9 @@ use typst_imaging::convert::convert_fixed_stroke;
 use typst_imaging::paint::text_paint;
 use typst_library::text::TextItem;
 
-pub fn render_text(
-    text: &TextItem,
-    sink: &mut impl KanvaSink,
-    state: RenderState,
-) {
+pub fn render_text(text: &TextItem, sink: &mut impl KanvaSink, state: RenderState) {
     let bytes = text.font.data();
-    let font_data = FontData::new(
-        Blob::new(Arc::new(bytes.clone())),
-        text.font.index(),
-    );
+    let font_data = FontData::new(Blob::new(Arc::new(bytes.clone())), text.font.index());
     let font_size = text.size.to_pt() as f32;
 
     let glyphs = {
@@ -26,8 +19,7 @@ pub fn render_text(
         text.glyphs
             .iter()
             .map(|g| {
-                let glyph_x =
-                    (x + g.x_offset.at(text.size).to_pt()) as f32;
+                let glyph_x = (x + g.x_offset.at(text.size).to_pt()) as f32;
                 x += g.x_advance.at(text.size).to_pt();
                 Glyph {
                     id: g.id as u32,
@@ -42,8 +34,7 @@ pub fn render_text(
         return;
     }
 
-    let (fill_brush, fill_brush_transform) =
-        text_paint(&text.fill, &state);
+    let (fill_brush, fill_brush_transform) = text_paint(&text.fill, &state);
 
     let fill = Some(KanvaFill {
         rule: Fill::NonZero,
@@ -53,8 +44,7 @@ pub fn render_text(
     });
 
     let stroke = text.stroke.as_ref().map(|s| {
-        let (stroke_brush, stroke_brush_transform) =
-            text_paint(&s.paint, &state);
+        let (stroke_brush, stroke_brush_transform) = text_paint(&s.paint, &state);
         KanvaStroke {
             stroke: convert_fixed_stroke(s),
             brush: stroke_brush,

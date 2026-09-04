@@ -5,9 +5,7 @@ use imaging::RgbaImage;
 use imaging_vello_cpu::VelloCpuRenderer;
 use mathed_core::glyphs::{GlyphIndex, build_glyph_index};
 use mathed_core::markers::{resolve_segments, scan};
-use mathed_core::transform::{
-    RenderOutput, TransformOptions, to_render_text,
-};
+use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 use typst::layout::{Abs, Axes, Frame, Region, Size};
 
 use crate::world::MiniWorld;
@@ -47,10 +45,7 @@ pub fn doc_to_render(doc_text: &str) -> RenderOutput {
 /// Like [`doc_to_render`] but with explicit [`TransformOptions`] —
 /// e.g. a caret position so the translator panel (P3 #10) it falls
 /// inside expands.
-pub fn doc_to_render_with(
-    doc_text: &str,
-    opts: &TransformOptions,
-) -> RenderOutput {
+pub fn doc_to_render_with(doc_text: &str, opts: &TransformOptions) -> RenderOutput {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
     to_render_text(doc_text, &scan, &segments, opts)
@@ -68,19 +63,14 @@ pub fn doc_to_render_with(
 /// original source instead. The boundary is inclusive, matching the
 /// transform's expansion rule. Kind-agnostic (generalizes the old
 /// translator-only `active_translator_span`).
-pub fn active_reveal_span(
-    doc_text: &str,
-    pos: usize,
-) -> Option<std::ops::Range<usize>> {
+pub fn active_reveal_span(doc_text: &str, pos: usize) -> Option<std::ops::Range<usize>> {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
     scan.stmts.iter().enumerate().find_map(|(idx, stmt)| {
         let start = segments
             .iter()
             .find(|seg| seg.stmt == idx)
-            .and_then(|seg| {
-                scan.markers.iter().find(|m| m.id == seg.start_id)
-            })
+            .and_then(|seg| scan.markers.iter().find(|m| m.id == seg.start_id))
             .map_or(stmt.range.start, |m| m.range.start);
         let full = start..stmt.range.end;
         (full.start <= pos && pos <= full.end).then_some(full)
@@ -105,10 +95,7 @@ pub struct DocLayout {
 
 /// Lay out the world's current document into a Typst [`Frame`] at
 /// `width_pt`.
-fn layout_world(
-    world: &MiniWorld,
-    width_pt: f64,
-) -> Result<Frame, RenderError> {
+fn layout_world(world: &MiniWorld, width_pt: f64) -> Result<Frame, RenderError> {
     let content = world.eval_main().ok_or(RenderError::Eval)?;
     let region = Region::new(
         Size::new(Abs::pt(width_pt), Abs::pt(MAX_HEIGHT_PT)),
@@ -135,10 +122,7 @@ fn rasterize(frame: &Frame) -> Result<RgbaImage, RenderError> {
 
 /// Lay out and rasterize the world's current document to an RGBA8
 /// image.
-pub fn render_world(
-    world: &MiniWorld,
-    width_pt: f64,
-) -> Result<RgbaImage, RenderError> {
+pub fn render_world(world: &MiniWorld, width_pt: f64) -> Result<RgbaImage, RenderError> {
     let frame = layout_world(world, width_pt)?;
     rasterize(&frame)
 }
@@ -147,10 +131,7 @@ pub fn render_world(
 /// rasterized page plus the glyph index for caret positioning. This
 /// is the entry point a frontend rebuilds on edit/resize and then
 /// reuses for cursor motion.
-pub fn layout_doc(
-    doc_text: &str,
-    width_pt: f64,
-) -> Result<DocLayout, RenderError> {
+pub fn layout_doc(doc_text: &str, width_pt: f64) -> Result<DocLayout, RenderError> {
     layout_doc_with(doc_text, width_pt, &TransformOptions::default())
 }
 
@@ -261,10 +242,7 @@ fn layout_doc_inner(
 }
 
 /// Render Typst markup directly (builds a fresh [`MiniWorld`]).
-pub fn render_markup(
-    markup: &str,
-    width_pt: f64,
-) -> Result<RgbaImage, RenderError> {
+pub fn render_markup(markup: &str, width_pt: f64) -> Result<RgbaImage, RenderError> {
     render_world(&MiniWorld::new(markup), width_pt)
 }
 
@@ -308,10 +286,7 @@ pub fn layout_block(
 
 /// Lay out the results-panel footer markup as its own `DocLayout` (no
 /// glyph-index caret mapping needed — the footer is display-only).
-pub fn layout_footer(
-    footer_markup: &str,
-    width_pt: f64,
-) -> Result<DocLayout, RenderError> {
+pub fn layout_footer(footer_markup: &str, width_pt: f64) -> Result<DocLayout, RenderError> {
     let markup = format!("{THEME_PRELUDE}{footer_markup}");
     let world = MiniWorld::new(markup);
     let frame = layout_world(&world, width_pt)?;
@@ -347,15 +322,9 @@ pub fn clamp_reveal_to_block(
 /// as underlined text, themed the same as the document (white on the
 /// black page). `text` is escaped so IME input can never be
 /// interpreted as Typst markup.
-pub fn render_preedit(
-    text: &str,
-    width_pt: f64,
-) -> Result<RgbaImage, RenderError> {
+pub fn render_preedit(text: &str, width_pt: f64) -> Result<RgbaImage, RenderError> {
     let escaped = escape_for_typst_text(text);
-    render_markup(
-        &format!("{THEME_PRELUDE}#underline[{escaped}]"),
-        width_pt,
-    )
+    render_markup(&format!("{THEME_PRELUDE}#underline[{escaped}]"), width_pt)
 }
 
 /// Escape the handful of characters Typst markup treats specially so
@@ -372,10 +341,7 @@ fn escape_for_typst_text(s: &str) -> String {
 }
 
 /// Convenience: a mathed document's text → RGBA8 image.
-pub fn render_doc(
-    doc_text: &str,
-    width_pt: f64,
-) -> Result<RgbaImage, RenderError> {
+pub fn render_doc(doc_text: &str, width_pt: f64) -> Result<RgbaImage, RenderError> {
     render_markup(&doc_to_markup(doc_text), width_pt)
 }
 
@@ -389,8 +355,7 @@ mod tests {
 
     #[test]
     fn renders_math_to_nonempty_image() {
-        let img = render_markup("$x^2 + y^2$", 300.0)
-            .expect("render should succeed");
+        let img = render_markup("$x^2 + y^2$", 300.0).expect("render should succeed");
         assert!(img.width > 0 && img.height > 0, "image has size");
         // At least some pixels must be drawn (non-transparent glyph
         // coverage).
@@ -414,8 +379,7 @@ mod tests {
 
     #[test]
     fn render_preedit_produces_nonempty_image_for_cjk_text() {
-        let img = render_preedit("你好", 300.0)
-            .expect("preedit render should succeed");
+        let img = render_preedit("你好", 300.0).expect("preedit render should succeed");
         assert!(img.width > 0 && img.height > 0);
         assert!(
             img.data.chunks_exact(4).any(|px| px[3] != 0),
@@ -434,8 +398,7 @@ mod tests {
 
     #[test]
     fn doc_pipeline_renders() {
-        let img = render_doc("Mass-energy: $E = m c^2$", 400.0)
-            .expect("doc render should succeed");
+        let img = render_doc("Mass-energy: $E = m c^2$", 400.0).expect("doc render should succeed");
         assert!(img.width > 0 && img.height > 0);
     }
 
@@ -455,22 +418,19 @@ mod tests {
         // real regression would silently shrink back to the
         // no-descender-reserved height.
         let with_fix = MiniWorld::new(format!("{THEME_PRELUDE}g"));
-        let without_fix =
-            MiniWorld::new("#set text(size: 17pt)\ng".to_string());
+        let without_fix = MiniWorld::new("#set text(size: 17pt)\ng".to_string());
         let region = Region::new(
             Size::new(Abs::pt(300.0), Abs::pt(MAX_HEIGHT_PT)),
             Axes::splat(false),
         );
         let content_with = with_fix.eval_main().expect("eval");
-        let frame_with =
-            with_fix.layout(&content_with, region).expect("layout");
+        let frame_with = with_fix.layout(&content_with, region).expect("layout");
         let content_without = without_fix.eval_main().expect("eval");
         let frame_without = without_fix
             .layout(&content_without, region)
             .expect("layout");
         assert!(
-            frame_with.size().y.to_pt()
-                > frame_without.size().y.to_pt(),
+            frame_with.size().y.to_pt() > frame_without.size().y.to_pt(),
             "THEME_PRELUDE must reserve more vertical room than the \
              baseline-only default, or the last line's descenders \
              will clip again"
@@ -532,8 +492,7 @@ mod tests {
         // of its neighbor.
         let to = layout_doc("To", 400.0).expect("layout");
         let ta = layout_doc("Ta", 400.0).expect("layout");
-        let t_advance =
-            |layout: &DocLayout| layout.glyphs.entries[0].advance;
+        let t_advance = |layout: &DocLayout| layout.glyphs.entries[0].advance;
         assert_eq!(
             t_advance(&to),
             t_advance(&ta),
@@ -558,8 +517,7 @@ mod tests {
         // characters.
         let doc = "iWmT.,1 gj";
         let layout = layout_doc(doc, 400.0).expect("layout");
-        let advances: Vec<f32> =
-            layout.glyphs.entries.iter().map(|e| e.advance).collect();
+        let advances: Vec<f32> = layout.glyphs.entries.iter().map(|e| e.advance).collect();
         let first = advances[0];
         for (byte, &advance) in advances.iter().enumerate() {
             assert!(
@@ -641,9 +599,8 @@ mod tests {
             reveal: std::iter::once(touch..touch).collect(),
             ..Default::default()
         };
-        layout_doc_with(text, 300.0, &opts).expect(
-            "layout must succeed with the caret inside $x_2$",
-        );
+        layout_doc_with(text, 300.0, &opts)
+            .expect("layout must succeed with the caret inside $x_2$");
     }
 
     #[test]
@@ -671,8 +628,7 @@ mod tests {
     fn active_reveal_span_tracks_caret_over_translator() {
         let doc = "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\") x";
         // A caret inside the body code is in the panel.
-        let span = active_reveal_span(doc, 12)
-            .expect("caret inside body is in a panel");
+        let span = active_reveal_span(doc, 12).expect("caret inside body is in a panel");
         assert!(span.start <= 12 && 12 <= span.end);
         // The boundary is inclusive: a caret right at the end of the
         // defining statement still counts as "over" it.
@@ -698,16 +654,14 @@ mod tests {
         // reveal span must fall back to the statement's own range.
         let doc = "\\cite(authorA89, authorB94)";
         let inside = doc.find("authorA89").unwrap();
-        let span = active_reveal_span(doc, inside).expect(
-            "bib-key cite statement should still be a reveal span",
-        );
+        let span = active_reveal_span(doc, inside)
+            .expect("bib-key cite statement should still be a reveal span");
         assert_eq!(span, 0..doc.len());
     }
 
     #[test]
     fn layout_doc_builds_glyph_index_with_caret() {
-        let layout = layout_doc("hello world", 400.0)
-            .expect("layout should succeed");
+        let layout = layout_doc("hello world", 400.0).expect("layout should succeed");
         assert!(layout.width > 0 && layout.height > 0);
         assert!(
             !layout.glyphs.entries.is_empty(),
@@ -750,28 +704,20 @@ mod tests {
             .expect("prob span")
             .start;
         let mut annotations = HashMap::new();
-        annotations.insert(
-            key,
-            " #text(rgb(\"#138000\"))[\\= 1.0000]".into(),
-        );
+        annotations.insert(key, " #text(rgb(\"#138000\"))[\\= 1.0000]".into());
         let opts = TransformOptions {
             annotations,
             ..Default::default()
         };
-        let layout = layout_doc_with(doc, 400.0, &opts)
-            .expect("annotated doc lays out");
+        let layout = layout_doc_with(doc, 400.0, &opts).expect("annotated doc lays out");
         assert!(layout.width > 0 && layout.height > 0);
     }
 
     #[test]
     fn band_for_byte_returns_topmost_for_single_line() {
-        let layout = layout_doc("one line", 400.0)
-            .expect("layout should succeed");
+        let layout = layout_doc("one line", 400.0).expect("layout should succeed");
         // Single-line document: every byte maps to band 0.
-        let band = layout
-            .glyphs
-            .band_for_byte(0)
-            .expect("band should resolve");
+        let band = layout.glyphs.band_for_byte(0).expect("band should resolve");
         assert_eq!(band, 0, "single-line doc has only band 0");
     }
 
@@ -782,16 +728,12 @@ mod tests {
         // narrow width.
         let text = "the quick brown fox jumps over the lazy dog \
                     and then keeps running through the wide green field";
-        let layout =
-            layout_doc(text, 200.0).expect("layout should succeed");
+        let layout = layout_doc(text, 200.0).expect("layout should succeed");
         let bands = layout.glyphs.bands.len();
         assert!(bands >= 2, "expected at least 2 bands, got {bands}");
         // Byte 0 is on the top band; a byte well into the text should
         // be on a later band once the content wraps.
-        let top_band = layout
-            .glyphs
-            .band_for_byte(0)
-            .expect("band for first line");
+        let top_band = layout.glyphs.band_for_byte(0).expect("band for first line");
         let later_band = layout
             .glyphs
             .band_for_byte(60)
@@ -809,8 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn caret_at_a_soft_wrap_point_has_nonzero_width_and_is_hit_testable()
-     {
+    fn caret_at_a_soft_wrap_point_has_nonzero_width_and_is_hit_testable() {
         // Typst collapses the trailing space that causes a soft wrap
         // to zero advance (correct — no visible width at the end of a
         // line). Without a fallback, that gives the caret zero
@@ -847,13 +788,8 @@ mod tests {
             let mid_y = (band.top + band.bottom) * 0.5;
             let hit = layout
                 .glyphs
-                .byte_for_point(mathed_core::glyphs::V2::new(
-                    geom.x + 0.1,
-                    mid_y,
-                ))
-                .expect(
-                    "hit-test just inside the space should resolve",
-                );
+                .byte_for_point(mathed_core::glyphs::V2::new(geom.x + 0.1, mid_y))
+                .expect("hit-test just inside the space should resolve");
             assert_eq!(
                 hit.0, last.doc_byte,
                 "clicking just inside the wrap-point space should hit \
@@ -872,10 +808,8 @@ mod tests {
         // relays out at `size.width` every time the width changes).
         let text = "the quick brown fox jumps over the lazy dog \
                     and then keeps running through the wide green field";
-        let narrow =
-            layout_doc(text, 150.0).expect("layout should succeed");
-        let wide =
-            layout_doc(text, 1000.0).expect("layout should succeed");
+        let narrow = layout_doc(text, 150.0).expect("layout should succeed");
+        let wide = layout_doc(text, 1000.0).expect("layout should succeed");
         assert!(
             narrow.glyphs.bands.len() > wide.glyphs.bands.len(),
             "narrower width should wrap onto more lines: {} vs {}",
@@ -896,15 +830,12 @@ mod tests {
         use mathed_core::transform::TransformOptions;
         let code_line = "let ops = (a, b, c, d, e, f, g, h, i, j, k, \
                           l, m, n, o, p, q, r, s, t)";
-        let text = format!(
-            "#3 {code_line} #4 \\translator(#3,#4, name: \"ho\")"
-        );
+        let text = format!("#3 {code_line} #4 \\translator(#3,#4, name: \"ho\")");
         let opts = TransformOptions {
             expand: std::iter::once(0..text.len()).collect(),
             ..Default::default()
         };
-        let layout =
-            layout_doc_with(&text, 150.0, &opts).expect("layout");
+        let layout = layout_doc_with(&text, 150.0, &opts).expect("layout");
         assert!(
             (layout.width as f64) <= 150.0,
             "code line should wrap within the given width, got image \
@@ -924,8 +855,7 @@ mod tests {
         // A single Enter press must move to a genuinely new visual
         // line (not collapse to a space, as bare Typst markup
         // would).
-        let layout = layout_doc("one\ntwo", 400.0)
-            .expect("layout should succeed");
+        let layout = layout_doc("one\ntwo", 400.0).expect("layout should succeed");
         assert_eq!(layout.glyphs.bands.len(), 2);
         let first = layout.glyphs.band_for_byte(0).unwrap();
         let second = layout.glyphs.band_for_byte(5).unwrap(); // 't' of "two"
@@ -941,11 +871,7 @@ mod tests {
         let collapsed = layout_doc(doc, 400.0).expect("layout");
         for b in 4..7 {
             assert!(
-                collapsed
-                    .glyphs
-                    .entries
-                    .iter()
-                    .all(|e| e.doc_byte != b),
+                collapsed.glyphs.entries.iter().all(|e| e.doc_byte != b),
                 "byte {b} should have collapsed away, no entry expected"
             );
         }
@@ -955,15 +881,10 @@ mod tests {
             reveal: std::iter::once(5..5).collect(),
             ..Default::default()
         };
-        let expanded =
-            layout_doc_with(doc, 400.0, &opts).expect("layout");
+        let expanded = layout_doc_with(doc, 400.0, &opts).expect("layout");
         for b in 3..7 {
             assert!(
-                expanded
-                    .glyphs
-                    .entries
-                    .iter()
-                    .any(|e| e.doc_byte == b),
+                expanded.glyphs.entries.iter().any(|e| e.doc_byte == b),
                 "byte {b} should be a real glyph while the run is touched"
             );
         }
@@ -974,8 +895,7 @@ mod tests {
         // A blank line (from pressing Enter twice) must still get a
         // band — otherwise up/down-arrow navigation and
         // clicks skip over it.
-        let layout = layout_doc("a\n\nb", 400.0)
-            .expect("layout should succeed");
+        let layout = layout_doc("a\n\nb", 400.0).expect("layout should succeed");
         assert_eq!(
             layout.glyphs.bands.len(),
             3,
@@ -985,10 +905,7 @@ mod tests {
             .glyphs
             .band_for_byte(2)
             .expect("blank line's doc byte should resolve to a band");
-        assert_eq!(
-            blank_band, 1,
-            "blank line should be the middle band"
-        );
+        assert_eq!(blank_band, 1, "blank line should be the middle band");
         // Clicking in the middle of the blank band's vertical space
         // must resolve back to its doc byte (2).
         let band = &layout.glyphs.bands[1];
@@ -1011,14 +928,14 @@ mod tests {
         // mismapping the escaped `\` that opens the revealed
         // `\translator(...)` statement text.
         use mathed_core::transform::TransformOptions;
-        let text = "#3 #let translate(b) = {\n  \"[]\"\n} #4 \\translator(#3,#4, name: \"ho\")\nafter";
+        let text =
+            "#3 #let translate(b) = {\n  \"[]\"\n} #4 \\translator(#3,#4, name: \"ho\")\nafter";
         let last_brace = text.rfind('}').unwrap();
         let opts = TransformOptions {
             expand: std::iter::once(0..text.len()).collect(),
             ..Default::default()
         };
-        let layout =
-            layout_doc_with(text, 400.0, &opts).expect("layout");
+        let layout = layout_doc_with(text, 400.0, &opts).expect("layout");
         let brace_band = layout
             .glyphs
             .band_for_byte(last_brace)
@@ -1029,21 +946,18 @@ mod tests {
         // line above (e.g. "#let translate(b) = {").
         let (byte, after) = layout
             .glyphs
-            .byte_for_point(mathed_core::glyphs::V2::new(
-                200.0, mid_y,
-            ))
+            .byte_for_point(mathed_core::glyphs::V2::new(200.0, mid_y))
             .expect("hit-test on the brace's line should resolve");
         // Mirrors `app::resolve_hit`'s "advance past the hit glyph,
         // but never past a newline" rule.
-        let resolved =
-            if after && text.as_bytes().get(byte) != Some(&b'\n') {
-                text[byte..]
-                    .char_indices()
-                    .nth(1)
-                    .map_or(text.len(), |(i, _)| byte + i)
-            } else {
-                byte
-            };
+        let resolved = if after && text.as_bytes().get(byte) != Some(&b'\n') {
+            text[byte..]
+                .char_indices()
+                .nth(1)
+                .map_or(text.len(), |(i, _)| byte + i)
+        } else {
+            byte
+        };
         let resolved_band = layout.glyphs.band_for_byte(resolved);
         assert_eq!(
             resolved_band,
@@ -1065,29 +979,22 @@ mod tests {
         // including punctuation (`(`, `)`, `{`, `}`) and keywords
         // (`let`), must have its own reachable caret position.
         use mathed_core::transform::TransformOptions;
-        let code =
-            "#let translate(body) = {\n  let x = (1, 2)\n  x\n}";
-        let text =
-            format!("#3 {code} #4 \\translator(#3,#4, name: \"ho\")");
+        let code = "#let translate(body) = {\n  let x = (1, 2)\n  x\n}";
+        let text = format!("#3 {code} #4 \\translator(#3,#4, name: \"ho\")");
         let code_start = text.find("#let").unwrap();
         let code_end = code_start + code.len();
         let opts = TransformOptions {
             expand: std::iter::once(0..text.len()).collect(),
             ..Default::default()
         };
-        let layout =
-            layout_doc_with(&text, 400.0, &opts).expect("layout");
+        let layout = layout_doc_with(&text, 400.0, &opts).expect("layout");
         let mut unreachable = Vec::new();
         for (i, c) in text[code_start..code_end].char_indices() {
             let doc_byte = code_start + i;
             if c.is_whitespace() {
                 continue;
             }
-            let has_exact_entry = layout
-                .glyphs
-                .entries
-                .iter()
-                .any(|e| e.doc_byte == doc_byte);
+            let has_exact_entry = layout.glyphs.entries.iter().any(|e| e.doc_byte == doc_byte);
             if !has_exact_entry {
                 unreachable.push((doc_byte, c));
             }
@@ -1099,14 +1006,9 @@ mod tests {
         // Directly confirm the specific characters the bug report
         // named: the parameter list, and the outermost braces.
         for needle in ["(body)", "{", "}"] {
-            let at = text[code_start..code_end].find(needle).unwrap()
-                + code_start;
+            let at = text[code_start..code_end].find(needle).unwrap() + code_start;
             assert!(
-                layout
-                    .glyphs
-                    .entries
-                    .iter()
-                    .any(|e| e.doc_byte == at),
+                layout.glyphs.entries.iter().any(|e| e.doc_byte == at),
                 "{needle:?} at byte {at} should be reachable"
             );
         }
@@ -1114,22 +1016,16 @@ mod tests {
 
     #[test]
     fn byte_for_point_hits_within_band() {
-        let layout = layout_doc("hello world", 400.0)
-            .expect("layout should succeed");
+        let layout = layout_doc("hello world", 400.0).expect("layout should succeed");
         let caret = layout
             .glyphs
             .caret_for_byte(6)
             .expect("caret geometry for byte 6");
-        let band = &layout.glyphs.bands[layout
-            .glyphs
-            .band_for_byte(6)
-            .expect("band for byte 6")];
+        let band = &layout.glyphs.bands[layout.glyphs.band_for_byte(6).expect("band for byte 6")];
         let mid_y = (band.top + band.bottom) * 0.5;
         let (b, _after) = layout
             .glyphs
-            .byte_for_point(mathed_core::glyphs::V2::new(
-                caret.x, mid_y,
-            ))
+            .byte_for_point(mathed_core::glyphs::V2::new(caret.x, mid_y))
             .expect("hit-test should resolve");
         // The hit-test at the caret x should land on or near byte 6.
         assert!(
@@ -1147,25 +1043,20 @@ mod tests {
         // drag-to-select path: a single-band selection produces one
         // rect, a multi-line selection produces one rect per
         // band.
-        let layout = layout_doc("hello world", 400.0)
-            .expect("layout should succeed");
+        let layout = layout_doc("hello world", 400.0).expect("layout should succeed");
         let rects = layout.glyphs.rects_for_range(0..5);
         assert!(
             !rects.is_empty(),
             "selection across bytes 0..5 must produce at least one rect"
         );
         let r = &rects[0];
-        assert!(
-            r.x0 < r.x1,
-            "selection rect must have positive width"
-        );
+        assert!(r.x0 < r.x1, "selection rect must have positive width");
         // The rect's y-band must match the glyph index's first band —
         // the selected bytes are all on line 0 in a
         // single-line document.
         let band = &layout.glyphs.bands[0];
         assert!(
-            (r.y0 - band.top).abs() < 0.01
-                && (r.y1 - band.bottom).abs() < 0.01,
+            (r.y0 - band.top).abs() < 0.01 && (r.y1 - band.bottom).abs() < 0.01,
             "single-line selection rect must align with band 0, \
              got y0={}, y1={}, band top={}, bottom={}",
             r.y0,
@@ -1193,8 +1084,7 @@ mod tests {
             &TransformOptions::default(),
         )
         .expect("layout_block should succeed");
-        let doc_layout = layout_doc(text, 400.0)
-            .expect("layout_doc should succeed");
+        let doc_layout = layout_doc(text, 400.0).expect("layout_doc should succeed");
         // Same width, same height, same glyph entry count.
         assert_eq!(
             block_layout.width, doc_layout.width,
@@ -1224,10 +1114,7 @@ mod tests {
         let partial = clamp_reveal_to_block(&[15..25], &block_range);
         assert_eq!(partial, vec![15..20]);
         // Multiple ranges → only overlapping ones kept.
-        let multi = clamp_reveal_to_block(
-            &[0..5, 12..15, 15..25, 25..30],
-            &block_range,
-        );
+        let multi = clamp_reveal_to_block(&[0..5, 12..15, 15..25, 25..30], &block_range);
         assert_eq!(multi, vec![12..15, 15..20]);
     }
 
@@ -1236,8 +1123,7 @@ mod tests {
         // A range past the document end produces no rects (the
         // rendering code can call this with a stale selection
         // without panicking).
-        let layout =
-            layout_doc("hi", 400.0).expect("layout should succeed");
+        let layout = layout_doc("hi", 400.0).expect("layout should succeed");
         let rects = layout.glyphs.rects_for_range(100..200);
         assert!(
             rects.is_empty(),

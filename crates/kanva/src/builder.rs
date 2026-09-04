@@ -6,8 +6,7 @@ use crate::sink::{GlyphRun, KanvaSink};
 
 use crate::Kanva;
 use crate::node::{
-    Command, Group, GroupRange, KanvaFill, KanvaPath, KanvaStroke,
-    NodeIndex, PaintOrder,
+    Command, Group, GroupRange, KanvaFill, KanvaPath, KanvaStroke, NodeIndex, PaintOrder,
 };
 
 /// Builds a [`Kanva`] by consuming a [`KanvaSink`] draw stream.
@@ -69,8 +68,7 @@ impl KanvaBuilder {
 
     fn pop_group_entry(&mut self) {
         if let Some(idx) = self.group_stack.pop() {
-            self.kanva.group_cmds[idx].end =
-                self.kanva.commands.len();
+            self.kanva.group_cmds[idx].end = self.kanva.commands.len();
         }
         self.kanva.commands.push(Command::PopGroup);
     }
@@ -135,14 +133,11 @@ impl KanvaSink for KanvaBuilder {
         glyphs: &mut dyn Iterator<Item = Glyph>,
     ) {
         let font_data = run.font.data.data();
-        let Ok(face) =
-            ttf_parser::Face::parse(font_data, run.font.index)
-        else {
+        let Ok(face) = ttf_parser::Face::parse(font_data, run.font.index) else {
             return;
         };
 
-        let Some(scale_tf) = glyph_scale_tf(&face, run.font_size)
-        else {
+        let Some(scale_tf) = glyph_scale_tf(&face, run.font_size) else {
             return;
         };
 
@@ -161,8 +156,7 @@ impl KanvaSink for KanvaBuilder {
         self.push_group_entry(Group::default());
 
         for glyph in glyphs {
-            let Some((path, glyph_tf)) =
-                outline_glyph(&face, glyph, run.transform, scale_tf)
+            let Some((path, glyph_tf)) = outline_glyph(&face, glyph, run.transform, scale_tf)
             else {
                 continue;
             };
@@ -183,10 +177,7 @@ impl KanvaSink for KanvaBuilder {
 
 /// Returns the Y-flipped scale transform for a glyph run, or `None`
 /// if `units_per_em` is zero.
-fn glyph_scale_tf(
-    face: &ttf_parser::Face<'_>,
-    font_size: f32,
-) -> Option<Affine> {
+fn glyph_scale_tf(face: &ttf_parser::Face<'_>, font_size: f32) -> Option<Affine> {
     let units_per_em = face.units_per_em();
     if units_per_em == 0 {
         return None;
@@ -205,9 +196,7 @@ fn outline_glyph(
     let glyph_id = ttf_parser::GlyphId(glyph.id as u16);
     let mut pen = GlyphPen(BezPath::new());
     face.outline_glyph(glyph_id, &mut pen)?;
-    let glyph_tf = base_transform
-        * Affine::translate((glyph.x as f64, glyph.y as f64))
-        * scale_tf;
+    let glyph_tf = base_transform * Affine::translate((glyph.x as f64, glyph.y as f64)) * scale_tf;
     Some((pen.0, glyph_tf))
 }
 
@@ -226,15 +215,7 @@ impl OutlineBuilder for GlyphPen {
         self.0.quad_to((x1 as f64, y1 as f64), (x as f64, y as f64));
     }
 
-    fn curve_to(
-        &mut self,
-        x1: f32,
-        y1: f32,
-        x2: f32,
-        y2: f32,
-        x: f32,
-        y: f32,
-    ) {
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
         self.0.curve_to(
             (x1 as f64, y1 as f64),
             (x2 as f64, y2 as f64),
@@ -269,11 +250,7 @@ mod tests {
         );
     }
 
-    fn draw_stroke(
-        b: &mut KanvaBuilder,
-        stroke: &Stroke,
-        brush: &Brush,
-    ) {
+    fn draw_stroke(b: &mut KanvaBuilder, stroke: &Stroke, brush: &Brush) {
         KanvaSink::draw_path(
             b,
             BezPath::new(),
@@ -334,22 +311,10 @@ mod tests {
         draw_fill(&mut b, &brush);
         KanvaSink::pop_group(&mut b);
         let k = b.build();
-        assert_eq!(
-            k.group_cmds[0].start, 0,
-            "first PushGroup at index 0"
-        );
-        assert_eq!(
-            k.group_cmds[0].end, 2,
-            "first PopGroup at index 2"
-        );
-        assert_eq!(
-            k.group_cmds[1].start, 3,
-            "second PushGroup at index 3"
-        );
-        assert_eq!(
-            k.group_cmds[1].end, 5,
-            "second PopGroup at index 5"
-        );
+        assert_eq!(k.group_cmds[0].start, 0, "first PushGroup at index 0");
+        assert_eq!(k.group_cmds[0].end, 2, "first PopGroup at index 2");
+        assert_eq!(k.group_cmds[1].start, 3, "second PushGroup at index 3");
+        assert_eq!(k.group_cmds[1].end, 5, "second PopGroup at index 5");
         assert!(matches!(k.commands[2], Command::PopGroup));
         assert!(matches!(k.commands[5], Command::PopGroup));
     }
@@ -366,22 +331,10 @@ mod tests {
         KanvaSink::pop_group(&mut b);
         KanvaSink::pop_group(&mut b);
         let k = b.build();
-        assert_eq!(
-            k.group_cmds[0].start, 0,
-            "outer PushGroup at index 0"
-        );
-        assert_eq!(
-            k.group_cmds[1].start, 1,
-            "inner PushGroup at index 1"
-        );
-        assert_eq!(
-            k.group_cmds[1].end, 3,
-            "inner PopGroup at index 3"
-        );
-        assert_eq!(
-            k.group_cmds[0].end, 4,
-            "outer PopGroup at index 4"
-        );
+        assert_eq!(k.group_cmds[0].start, 0, "outer PushGroup at index 0");
+        assert_eq!(k.group_cmds[1].start, 1, "inner PushGroup at index 1");
+        assert_eq!(k.group_cmds[1].end, 3, "inner PopGroup at index 3");
+        assert_eq!(k.group_cmds[0].end, 4, "outer PopGroup at index 4");
         assert!(matches!(k.commands[3], Command::PopGroup));
         assert!(matches!(k.commands[4], Command::PopGroup));
     }

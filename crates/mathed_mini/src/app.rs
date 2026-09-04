@@ -22,12 +22,8 @@ use mathed_core::blocks::{BlockId, BlockIndex};
 use mathed_core::glyphs::{CaretGeom, RectF};
 use mathed_core::markers::{resolve_segments, scan};
 use winit::application::ApplicationHandler;
-use winit::event::{
-    ElementState, Ime, KeyEvent, MouseButton, WindowEvent,
-};
-use winit::event_loop::{
-    ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy,
-};
+use winit::event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -43,13 +39,10 @@ const FAR_RIGHT: f32 = 1.0e7;
 use crate::a11y::build_tree_update;
 use crate::kernel_bridge::{KernelBridge, PipelineCache};
 use crate::references_panel::{
-    ReferencesPanelData, open_references_panel,
-    panel_height as references_panel_height,
+    ReferencesPanelData, open_references_panel, panel_height as references_panel_height,
     update_references_panel as update_references_panel_data,
 };
-use crate::render::{
-    DEFAULT_WIDTH_PT, DocLayout, active_reveal_span,
-};
+use crate::render::{DEFAULT_WIDTH_PT, DocLayout, active_reveal_span};
 use mathed_core::transform::TransformOptions;
 
 /// How long to keep polling the kernel worker after an edit. Tiny
@@ -72,8 +65,7 @@ impl From<accesskit_winit::Event> for UserEvent {
 
 /// Run the editor window loop, seeded with `initial` document text.
 pub fn run(initial: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop =
-        EventLoop::<UserEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(initial, proxy);
     event_loop.run_app(&mut app)?;
@@ -247,18 +239,13 @@ impl App {
     /// (or 800 as a default if the window isn't created yet).
     fn update_references_panel(&mut self) {
         if let Some(panel) = self.references_panel.as_mut() {
-            update_references_panel_data(
-                panel,
-                self.doc.text(),
-                self.caret,
-            );
+            update_references_panel_data(panel, self.doc.text(), self.caret);
             let win_h = self
                 .window
                 .as_ref()
                 .map(|w| w.inner_size().height as usize)
                 .unwrap_or(800);
-            self.references_panel_height =
-                references_panel_height(panel, win_h);
+            self.references_panel_height = references_panel_height(panel, win_h);
         }
     }
 
@@ -298,10 +285,7 @@ impl App {
             self.references_panel = None;
             self.references_panel_height = 0;
         } else {
-            self.references_panel = Some(open_references_panel(
-                self.doc.text(),
-                self.caret,
-            ));
+            self.references_panel = Some(open_references_panel(self.doc.text(), self.caret));
             // Force a redraw with the panel open; the height will
             // be recomputed on the first frame.
             self.invalidate_doc();
@@ -322,11 +306,8 @@ impl App {
         // a cache hit, not a second scan.
         let text = self.doc.text();
         let cached = self.pipeline.for_text(text);
-        let nodes = mathed_core::accessibility::build_access_nodes(
-            text,
-            cached.segments(),
-            cached.idx(),
-        );
+        let nodes =
+            mathed_core::accessibility::build_access_nodes(text, cached.segments(), cached.idx());
         let update = build_tree_update(&nodes);
         adapter.update_if_active(|| update);
     }
@@ -379,10 +360,7 @@ impl App {
             // that block's layout for screen positioning.
             let scan = mathed_core::markers::scan(doc_text);
             let refs = mathed_core::markers::scan_references(&scan);
-            let entry = match refs
-                .iter()
-                .find(|e| e.numbers.contains(&target))
-            {
+            let entry = match refs.iter().find(|e| e.numbers.contains(&target)) {
                 Some(e) => e,
                 None => continue,
             };
@@ -396,35 +374,25 @@ impl App {
                     .iter()
                     .find(|(id, _)| {
                         block_index.blocks.iter().any(|b| {
-                            b.id == *id
-                                && b.range.start <= cite_byte
-                                && cite_byte <= b.range.end
+                            b.id == *id && b.range.start <= cite_byte && cite_byte <= b.range.end
                         })
                     })
                     .or_else(|| block_offsets.first())
                     .map(|(id, top)| (*id, *top));
-                match bid.and_then(|(id, top)| {
-                    block_layouts.get(&id).map(|l| (l, top))
-                }) {
+                match bid.and_then(|(id, top)| block_layouts.get(&id).map(|l| (l, top))) {
                     Some(pair) => pair,
                     None => continue,
                 }
             };
-            let Some(label_pos) = crate::cite_popup::cite_label_pos(
-                doc_text,
-                block_layout,
-                target,
-            ) else {
+            let Some(label_pos) = crate::cite_popup::cite_label_pos(doc_text, block_layout, target)
+            else {
                 continue;
             };
             // The body is resolved in the *scope* text so recursive
             // expansion uses the right numbering.
-            let body =
-                crate::cite_popup::resolve_popup_body(&scope, target);
+            let body = crate::cite_popup::resolve_popup_body(&scope, target);
             let body_img = body.as_ref().and_then(|b| {
-                let opts =
-                    mathed_core::transform::TransformOptions::default(
-                    );
+                let opts = mathed_core::transform::TransformOptions::default();
                 crate::cite_popup::render_popup_body(b, &opts)
             });
             let (body_ref, body_h) = match &body_img {
@@ -458,8 +426,7 @@ impl App {
         let text = self.doc.text();
         let cached = self.pipeline.for_text(text);
         self.bridge.refresh_with_index(cached.idx());
-        self.kernel_deadline =
-            Some(Instant::now() + KERNEL_POLL_WINDOW);
+        self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
     }
 
     fn request_redraw(&self) {
@@ -515,12 +482,8 @@ impl App {
                 .rev()
                 .find(|(_, top)| *top <= y as f32)
                 .map(|(id, _)| *id)
-                .or_else(|| {
-                    self.block_index.blocks.first().map(|b| b.id)
-                })
-                .or_else(|| {
-                    self.block_index.blocks.last().map(|b| b.id)
-                });
+                .or_else(|| self.block_index.blocks.first().map(|b| b.id))
+                .or_else(|| self.block_index.blocks.last().map(|b| b.id));
             let Some(bid) = bid else {
                 return;
             };
@@ -529,9 +492,7 @@ impl App {
             };
             layout
                 .glyphs
-                .byte_for_point(mathed_core::glyphs::V2::new(
-                    x as f32, y as f32,
-                ))
+                .byte_for_point(mathed_core::glyphs::V2::new(x as f32, y as f32))
                 .map(|hit| resolve_hit(hit, self.doc.text()))
         };
         let Some(byte) = byte else {
@@ -643,8 +604,7 @@ impl App {
         match event {
             Ime::Enabled => {}
             Ime::Preedit(text, _cursor) => {
-                self.ime_preedit =
-                    if text.is_empty() { None } else { Some(text) };
+                self.ime_preedit = if text.is_empty() { None } else { Some(text) };
                 self.request_redraw();
             }
             Ime::Commit(text) => {
@@ -666,11 +626,8 @@ impl App {
     fn insert_hash(&mut self) {
         // Delete first so numbers freed by the deletion are reusable.
         self.delete_selection();
-        let token = mathed_core::markers::auto_marker_token(
-            self.doc.text(),
-            self.caret,
-        )
-        .unwrap_or_else(|| "#".to_owned());
+        let token = mathed_core::markers::auto_marker_token(self.doc.text(), self.caret)
+            .unwrap_or_else(|| "#".to_owned());
         self.doc.insert(self.caret, &token);
         self.caret += token.len();
         self.sel_anchor = None;
@@ -704,9 +661,7 @@ impl App {
     /// interchangeable.
     fn pop_cite_popup(&mut self, n: Option<u32>) {
         let removed = if let Some(target) = n {
-            if let Some(pos) =
-                self.popup_stack.iter().rposition(|&x| x == target)
-            {
+            if let Some(pos) = self.popup_stack.iter().rposition(|&x| x == target) {
                 self.popup_stack.remove(pos);
                 true
             } else {
@@ -764,8 +719,7 @@ impl App {
             self.sel_anchor = None;
         }
         if self.caret > 0 {
-            self.caret =
-                prev_char_boundary(self.doc.text(), self.caret);
+            self.caret = prev_char_boundary(self.doc.text(), self.caret);
         }
         self.caret_changed();
     }
@@ -797,21 +751,20 @@ impl App {
         } else {
             self.sel_anchor = None;
         }
-        if let Some((_, layout)) =
-            self.block_for_byte_with_layout(self.caret)
+        if let Some((_, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
         {
             let band = &layout.glyphs.bands[bi];
             let mid_y = (band.top + band.bottom) * 0.5;
-            if let Some(hit) = layout.glyphs.byte_for_point(
-                mathed_core::glyphs::V2::new(FAR_LEFT, mid_y),
-            ) {
+            if let Some(hit) = layout
+                .glyphs
+                .byte_for_point(mathed_core::glyphs::V2::new(FAR_LEFT, mid_y))
+            {
                 self.caret = resolve_hit(hit, self.doc.text());
             }
         } else {
             let text = self.doc.text();
-            self.caret =
-                text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
+            self.caret = text[..self.caret].rfind('\n').map_or(0, |i| i + 1);
         }
         self.caret_changed();
     }
@@ -824,15 +777,15 @@ impl App {
         } else {
             self.sel_anchor = None;
         }
-        if let Some((_, layout)) =
-            self.block_for_byte_with_layout(self.caret)
+        if let Some((_, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
         {
             let band = &layout.glyphs.bands[bi];
             let mid_y = (band.top + band.bottom) * 0.5;
-            if let Some(hit) = layout.glyphs.byte_for_point(
-                mathed_core::glyphs::V2::new(FAR_RIGHT, mid_y),
-            ) {
+            if let Some(hit) = layout
+                .glyphs
+                .byte_for_point(mathed_core::glyphs::V2::new(FAR_RIGHT, mid_y))
+            {
                 self.caret = resolve_hit(hit, self.doc.text());
             }
             self.caret_changed();
@@ -859,14 +812,12 @@ impl App {
             self.sel_anchor = None;
         }
         let mut goal_x = self.pref_x;
-        if let Some((block_id, layout)) =
-            self.block_for_byte_with_layout(self.caret)
+        if let Some((block_id, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
         {
             if bi > 0 {
                 let target_band = &layout.glyphs.bands[bi - 1];
-                let mid_y =
-                    (target_band.top + target_band.bottom) * 0.5;
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
                 let x = goal_x.unwrap_or_else(|| {
                     layout
                         .glyphs
@@ -874,27 +825,26 @@ impl App {
                         .map_or(0.0, |g| g.x)
                 });
                 goal_x = Some(x);
-                if let Some(hit) = layout.glyphs.byte_for_point(
-                    mathed_core::glyphs::V2::new(x, mid_y),
-                ) {
+                if let Some(hit) = layout
+                    .glyphs
+                    .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
+                {
                     self.caret = resolve_hit(hit, self.doc.text());
                 }
             } else if let Some(prev) = self.block_before(block_id)
-                && let Some(prev_layout) =
-                    self.block_layouts.get(&prev)
-                && let Some(last_bi) =
-                    prev_layout.glyphs.bands.len().checked_sub(1)
+                && let Some(prev_layout) = self.block_layouts.get(&prev)
+                && let Some(last_bi) = prev_layout.glyphs.bands.len().checked_sub(1)
             {
                 // Cross-block: move to the last band of the previous
                 // block.
                 let target_band = &prev_layout.glyphs.bands[last_bi];
-                let mid_y =
-                    (target_band.top + target_band.bottom) * 0.5;
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
                 let x = goal_x.unwrap_or(0.0);
                 goal_x = Some(x);
-                if let Some(hit) = prev_layout.glyphs.byte_for_point(
-                    mathed_core::glyphs::V2::new(x, mid_y),
-                ) {
+                if let Some(hit) = prev_layout
+                    .glyphs
+                    .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
+                {
                     self.caret = resolve_hit(hit, self.doc.text());
                 }
             }
@@ -912,14 +862,12 @@ impl App {
             self.sel_anchor = None;
         }
         let mut goal_x = self.pref_x;
-        if let Some((block_id, layout)) =
-            self.block_for_byte_with_layout(self.caret)
+        if let Some((block_id, layout)) = self.block_for_byte_with_layout(self.caret)
             && let Some(bi) = layout.glyphs.band_for_byte(self.caret)
         {
             if bi + 1 < layout.glyphs.bands.len() {
                 let target_band = &layout.glyphs.bands[bi + 1];
-                let mid_y =
-                    (target_band.top + target_band.bottom) * 0.5;
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
                 let x = goal_x.unwrap_or_else(|| {
                     layout
                         .glyphs
@@ -927,26 +875,26 @@ impl App {
                         .map_or(0.0, |g| g.x)
                 });
                 goal_x = Some(x);
-                if let Some(hit) = layout.glyphs.byte_for_point(
-                    mathed_core::glyphs::V2::new(x, mid_y),
-                ) {
+                if let Some(hit) = layout
+                    .glyphs
+                    .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
+                {
                     self.caret = resolve_hit(hit, self.doc.text());
                 }
             } else if let Some(next) = self.block_after(block_id)
-                && let Some(next_layout) =
-                    self.block_layouts.get(&next)
+                && let Some(next_layout) = self.block_layouts.get(&next)
                 && !next_layout.glyphs.bands.is_empty()
             {
                 // Cross-block: move to the first band of the next
                 // block.
                 let target_band = &next_layout.glyphs.bands[0];
-                let mid_y =
-                    (target_band.top + target_band.bottom) * 0.5;
+                let mid_y = (target_band.top + target_band.bottom) * 0.5;
                 let x = goal_x.unwrap_or(0.0);
                 goal_x = Some(x);
-                if let Some(hit) = next_layout.glyphs.byte_for_point(
-                    mathed_core::glyphs::V2::new(x, mid_y),
-                ) {
+                if let Some(hit) = next_layout
+                    .glyphs
+                    .byte_for_point(mathed_core::glyphs::V2::new(x, mid_y))
+                {
                     self.caret = resolve_hit(hit, self.doc.text());
                 }
             }
@@ -959,49 +907,35 @@ impl App {
     /// offset (from the last `redraw()`'s `block_offsets`).
     /// `None` if the byte falls outside every known block (e.g.
     /// an empty document) or the offset table is stale.
-    fn block_for_byte(
-        &self,
-        doc_byte: usize,
-    ) -> Option<(BlockId, f32)> {
-        let block = self.block_index.blocks.iter().find(|b| {
-            b.range.start <= doc_byte && doc_byte <= b.range.end
-        })?;
-        let y = self
-            .block_offsets
+    fn block_for_byte(&self, doc_byte: usize) -> Option<(BlockId, f32)> {
+        let block = self
+            .block_index
+            .blocks
             .iter()
-            .find(|(id, _)| *id == block.id)?
-            .1;
+            .find(|b| b.range.start <= doc_byte && doc_byte <= b.range.end)?;
+        let y = self.block_offsets.iter().find(|(id, _)| *id == block.id)?.1;
         Some((block.id, y))
     }
 
     /// Like `block_for_byte` but also returns the block's cached
     /// layout.
-    fn block_for_byte_with_layout(
-        &self,
-        doc_byte: usize,
-    ) -> Option<(BlockId, &DocLayout)> {
-        let block = self.block_index.blocks.iter().find(|b| {
-            b.range.start <= doc_byte && doc_byte <= b.range.end
-        })?;
+    fn block_for_byte_with_layout(&self, doc_byte: usize) -> Option<(BlockId, &DocLayout)> {
+        let block = self
+            .block_index
+            .blocks
+            .iter()
+            .find(|b| b.range.start <= doc_byte && doc_byte <= b.range.end)?;
         let layout = self.block_layouts.get(&block.id)?;
         Some((block.id, layout))
     }
 
     fn block_before(&self, id: BlockId) -> Option<BlockId> {
-        let idx = self
-            .block_index
-            .blocks
-            .iter()
-            .position(|b| b.id == id)?;
+        let idx = self.block_index.blocks.iter().position(|b| b.id == id)?;
         idx.checked_sub(1).map(|i| self.block_index.blocks[i].id)
     }
 
     fn block_after(&self, id: BlockId) -> Option<BlockId> {
-        let idx = self
-            .block_index
-            .blocks
-            .iter()
-            .position(|b| b.id == id)?;
+        let idx = self.block_index.blocks.iter().position(|b| b.id == id)?;
         self.block_index.blocks.get(idx + 1).map(|b| b.id)
     }
 
@@ -1012,10 +946,7 @@ impl App {
             return;
         };
         let size = window.inner_size();
-        let (Some(w), Some(h)) = (
-            NonZeroU32::new(size.width),
-            NonZeroU32::new(size.height),
-        ) else {
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
             return;
         };
 
@@ -1032,9 +963,7 @@ impl App {
             self.block_index
                 .blocks
                 .iter()
-                .find(|b| {
-                    b.range.start <= r.start && r.end <= b.range.end
-                })
+                .find(|b| b.range.start <= r.start && r.end <= b.range.end)
                 .map(|b| b.id)
         });
         if self.reveal_block != reveal_block_now {
@@ -1050,19 +979,14 @@ impl App {
         let scan = scan(&text);
         let segments = resolve_segments(&scan);
         let annotations = self.bridge.result_annotations();
-        let translator_errors =
-            self.bridge.translator_errors().clone();
-        let reveal_ranges: Vec<std::ops::Range<usize>> =
-            reveal_span.clone().into_iter().collect();
+        let translator_errors = self.bridge.translator_errors().clone();
+        let reveal_ranges: Vec<std::ops::Range<usize>> = reveal_span.clone().into_iter().collect();
 
         for block in self.block_index.blocks.clone() {
             if self.block_layouts.contains_key(&block.id) {
                 continue;
             }
-            let block_reveal = crate::render::clamp_reveal_to_block(
-                &reveal_ranges,
-                &block.range,
-            );
+            let block_reveal = crate::render::clamp_reveal_to_block(&reveal_ranges, &block.range);
             let opts = TransformOptions {
                 reveal: block_reveal,
                 annotations: annotations.clone(),
@@ -1081,16 +1005,10 @@ impl App {
             }
         }
 
-        let footer_markup =
-            self.bridge.result_panel_markup().unwrap_or_default();
-        if self.footer_layout.is_none()
-            || footer_markup != self.footer_markup_cache
-        {
-            self.footer_layout = crate::render::layout_footer(
-                &footer_markup,
-                size.width as f64,
-            )
-            .ok();
+        let footer_markup = self.bridge.result_panel_markup().unwrap_or_default();
+        if self.footer_layout.is_none() || footer_markup != self.footer_markup_cache {
+            self.footer_layout =
+                crate::render::layout_footer(&footer_markup, size.width as f64).ok();
             self.footer_markup_cache = footer_markup;
         }
 
@@ -1099,22 +1017,12 @@ impl App {
         let sel = self.selection();
 
         // Compute caret info before the mutable `surface` borrow.
-        let caret_info: Option<(f32, f32, f32, f32)> = if self
-            .caret_visible
-        {
-            self.block_for_byte(self.caret).and_then(
-                |(block_id, y)| {
-                    let layout = self.block_layouts.get(&block_id)?;
-                    let geom =
-                        layout.glyphs.caret_for_byte(self.caret)?;
-                    Some((
-                        geom.x,
-                        geom.top + y,
-                        geom.height,
-                        geom.width,
-                    ))
-                },
-            )
+        let caret_info: Option<(f32, f32, f32, f32)> = if self.caret_visible {
+            self.block_for_byte(self.caret).and_then(|(block_id, y)| {
+                let layout = self.block_layouts.get(&block_id)?;
+                let geom = layout.glyphs.caret_for_byte(self.caret)?;
+                Some((geom.x, geom.top + y, geom.height, geom.width))
+            })
         } else {
             None
         };
@@ -1125,8 +1033,7 @@ impl App {
         if surface.resize(w, h).is_err() {
             return;
         }
-        let (win_w, win_h) =
-            (size.width as usize, size.height as usize);
+        let (win_w, win_h) = (size.width as usize, size.height as usize);
 
         // References panel — compute doc area height.
         let panel_h: usize = if self.references_panel.is_some() {
@@ -1154,8 +1061,7 @@ impl App {
         let mut y_cursor: f32 = 0.0;
 
         for block in &self.block_index.blocks {
-            let Some(layout) = self.block_layouts.get(&block.id)
-            else {
+            let Some(layout) = self.block_layouts.get(&block.id) else {
                 y_cursor += BLOCK_GAP_PX;
                 continue;
             };
@@ -1164,26 +1070,14 @@ impl App {
             if top >= doc_h {
                 break;
             }
-            blit_over_bg_at(
-                &mut buffer,
-                win_w,
-                doc_h,
-                top,
-                &layout.image,
-            );
+            blit_over_bg_at(&mut buffer, win_w, doc_h, top, &layout.image);
 
             if let Some(sel) = &sel {
                 let cs = sel.start.max(block.range.start);
                 let ce = sel.end.min(block.range.end);
                 if cs < ce {
                     let rects = layout.glyphs.rects_for_range(cs..ce);
-                    draw_selection_at(
-                        &mut buffer,
-                        win_w,
-                        doc_h,
-                        top,
-                        &rects,
-                    );
+                    draw_selection_at(&mut buffer, win_w, doc_h, top, &rects);
                 }
             }
 
@@ -1202,19 +1096,11 @@ impl App {
             };
             draw_caret(&mut buffer, win_w, doc_h, geom);
             window.set_ime_cursor_area(
-                winit::dpi::PhysicalPosition::new(
-                    x as i32, top as i32,
-                ),
-                winit::dpi::PhysicalSize::new(
-                    1_u32,
-                    height.max(1.0) as u32,
-                ),
+                winit::dpi::PhysicalPosition::new(x as i32, top as i32),
+                winit::dpi::PhysicalSize::new(1_u32, height.max(1.0) as u32),
             );
             if let Some(preedit) = &self.ime_preedit
-                && let Ok(img) = crate::render::render_preedit(
-                    preedit,
-                    DEFAULT_WIDTH_PT,
-                )
+                && let Ok(img) = crate::render::render_preedit(preedit, DEFAULT_WIDTH_PT)
             {
                 blit_over_bg_clipped(
                     &mut buffer,
@@ -1245,13 +1131,7 @@ impl App {
         if let Some(footer) = &self.footer_layout {
             let top = y_cursor.round() as usize;
             if top < doc_h {
-                blit_over_bg_at(
-                    &mut buffer,
-                    win_w,
-                    doc_h,
-                    top,
-                    &footer.image,
-                );
+                blit_over_bg_at(&mut buffer, win_w, doc_h, top, &footer.image);
             }
         }
 
@@ -1296,17 +1176,14 @@ fn next_char_boundary(text: &str, at: usize) -> usize {
 /// uses: a marker right at the edge of a point/selection still
 /// counts.
 #[cfg(test)]
-fn touched_marker_starts(
-    doc_text: &str,
-    reveal: &[std::ops::Range<usize>],
-) -> Vec<usize> {
+fn touched_marker_starts(doc_text: &str, reveal: &[std::ops::Range<usize>]) -> Vec<usize> {
     let s = scan(doc_text);
     s.markers
         .iter()
         .filter(|m| {
-            reveal.iter().any(|r| {
-                r.start <= m.range.end && m.range.start <= r.end
-            })
+            reveal
+                .iter()
+                .any(|r| r.start <= m.range.end && m.range.start <= r.end)
         })
         .map(|m| m.range.start)
         .collect()
@@ -1317,22 +1194,16 @@ fn touched_marker_starts(
 /// `touched_marker_starts`, for the space-run reveal
 /// (`mathed_core::transform::space_run_ranges`).
 #[cfg(test)]
-fn touched_space_run_starts(
-    doc_text: &str,
-    reveal: &[std::ops::Range<usize>],
-) -> Vec<usize> {
-    mathed_core::transform::space_run_ranges(
-        doc_text,
-        &(0..doc_text.len()),
-    )
-    .into_iter()
-    .filter(|run| {
-        reveal
-            .iter()
-            .any(|r| r.start <= run.end && run.start <= r.end)
-    })
-    .map(|run| run.start)
-    .collect()
+fn touched_space_run_starts(doc_text: &str, reveal: &[std::ops::Range<usize>]) -> Vec<usize> {
+    mathed_core::transform::space_run_ranges(doc_text, &(0..doc_text.len()))
+        .into_iter()
+        .filter(|run| {
+            reveal
+                .iter()
+                .any(|r| r.start <= run.end && run.start <= r.end)
+        })
+        .map(|run| run.start)
+        .collect()
 }
 
 /// Doc byte offsets (each span's start) of every `$...$` math span
@@ -1340,10 +1211,7 @@ fn touched_space_run_starts(
 /// `touched_marker_starts`/`touched_space_run_starts`, for the
 /// math-span reveal (`mathed_core::transform::math_span_ranges`).
 #[cfg(test)]
-fn touched_math_span_starts(
-    doc_text: &str,
-    reveal: &[std::ops::Range<usize>],
-) -> Vec<usize> {
+fn touched_math_span_starts(doc_text: &str, reveal: &[std::ops::Range<usize>]) -> Vec<usize> {
     mathed_core::transform::math_span_ranges(doc_text)
         .into_iter()
         .filter(|span| {
@@ -1379,12 +1247,7 @@ fn resolve_hit(hit: (usize, bool), doc_text: &str) -> usize {
 /// turns the background solid white — the same color as the
 /// characters — and shows any glyph under the caret in black, exactly
 /// like a terminal block cursor.
-fn draw_caret(
-    buffer: &mut [u32],
-    win_w: usize,
-    win_h: usize,
-    geom: CaretGeom,
-) {
+fn draw_caret(buffer: &mut [u32], win_w: usize, win_h: usize, geom: CaretGeom) {
     let x = geom.x.round().max(0.0) as usize;
     let top = geom.top.round().max(0.0) as usize;
     let bottom = (geom.top + geom.height).round().max(0.0) as usize;
@@ -1429,8 +1292,7 @@ fn draw_popup_box(
     let body_h = body.map(|img| img.height as usize).unwrap_or(0);
     let body_w = body.map(|img| img.width as usize).unwrap_or(width);
     let total_h = body_h + FRAME_THICKNESS * 2;
-    let total_w =
-        (width.max(body_w) + FRAME_THICKNESS * 2).min(win_w);
+    let total_w = (width.max(body_w) + FRAME_THICKNESS * 2).min(win_w);
     let x0 = x.min(win_w.saturating_sub(total_w));
     let y0 = top.min(win_h.saturating_sub(total_h));
 
@@ -1472,10 +1334,8 @@ fn draw_popup_box(
     if let Some(img) = body {
         let ix0 = x0 + FRAME_THICKNESS;
         let iy0 = y0 + FRAME_THICKNESS;
-        let copy_w =
-            (img.width as usize).min(win_w.saturating_sub(ix0));
-        let copy_h =
-            (img.height as usize).min(win_h.saturating_sub(iy0));
+        let copy_w = (img.width as usize).min(win_w.saturating_sub(ix0));
+        let copy_h = (img.height as usize).min(win_h.saturating_sub(iy0));
         for y in 0..copy_h {
             let src_row = y * img.width as usize * 4;
             let dst_row = (iy0 + y) * win_w;
@@ -1491,8 +1351,7 @@ fn draw_popup_box(
                     continue;
                 }
                 if a == 255 {
-                    buffer[dst_row + ix0 + xi] =
-                        (r << 16) | (g << 8) | b;
+                    buffer[dst_row + ix0 + xi] = (r << 16) | (g << 8) | b;
                 } else {
                     let inv = 255 - a;
                     let px = buffer[dst_row + ix0 + xi];
@@ -1502,8 +1361,7 @@ fn draw_popup_box(
                     let cr = (r * a + pr * inv) / 255;
                     let cg = (g * a + pg * inv) / 255;
                     let cb = (b * a + pb * inv) / 255;
-                    buffer[dst_row + ix0 + xi] =
-                        (cr << 16) | (cg << 8) | cb;
+                    buffer[dst_row + ix0 + xi] = (cr << 16) | (cg << 8) | cb;
                 }
             }
         }
@@ -1514,10 +1372,7 @@ fn draw_popup_box(
 /// empty (anchor absent, or equal to the caret). Pure helper so the
 /// selection maths is unit-testable independent of the
 /// winit/softbuffer `App` state.
-fn selection_range(
-    anchor: Option<usize>,
-    caret: usize,
-) -> Option<Range<usize>> {
+fn selection_range(anchor: Option<usize>, caret: usize) -> Option<Range<usize>> {
     let a = anchor?;
     if a == caret {
         return None;
@@ -1536,16 +1391,11 @@ fn selection_range(
 /// stack, the scope is the body of the topmost open popup (so nested
 /// cites are numbered relative to the *current* box, not the document
 /// — the recursive-expansion behavior the user asked for).
-fn cite_popup_scope_text(
-    doc_text: &str,
-    popup_stack: &[u32],
-) -> String {
+fn cite_popup_scope_text(doc_text: &str, popup_stack: &[u32]) -> String {
     if popup_stack.is_empty() {
         return doc_text.to_string();
     }
-    let refs = mathed_core::markers::scan_references(
-        &mathed_core::markers::scan(doc_text),
-    );
+    let refs = mathed_core::markers::scan_references(&mathed_core::markers::scan(doc_text));
     // Walk from the topmost (deepest) entry to find its body, then
     // scan the body's own references. For a v1 flat stack, the
     // recursive expansion only goes one level deep: each new cite
@@ -1557,8 +1407,7 @@ fn cite_popup_scope_text(
             continue;
         }
         if let mathed_core::markers::ReferenceKind::DocumentRef {
-            body: Some(body),
-            ..
+            body: Some(body), ..
         } = &entry.kind
         {
             return doc_text[body.clone()].to_string();
@@ -1570,18 +1419,12 @@ fn cite_popup_scope_text(
 /// `true` if a cite with auto-assigned number `target` exists in the
 /// current popup scope (the base doc, or the topmost open box's
 /// body). `app` is borrowed for the doc text + popup stack only.
-fn cite_number_exists_in_current_scope(
-    app: &App,
-    target: u32,
-) -> bool {
+fn cite_number_exists_in_current_scope(app: &App, target: u32) -> bool {
     let target = target as u64;
-    let scope =
-        cite_popup_scope_text(app.doc.text(), &app.popup_stack);
-    mathed_core::markers::scan_references(
-        &mathed_core::markers::scan(&scope),
-    )
-    .iter()
-    .any(|e| e.numbers.contains(&target))
+    let scope = cite_popup_scope_text(app.doc.text(), &app.popup_stack);
+    mathed_core::markers::scan_references(&mathed_core::markers::scan(&scope))
+        .iter()
+        .any(|e| e.numbers.contains(&target))
 }
 
 /// Like [`blit_over_bg_at`] but composited at an arbitrary `(x0, y0)`
@@ -1617,8 +1460,7 @@ fn blit_over_bg_clipped(
                 continue;
             }
             let px = buffer[dst_row + x0 + x];
-            let (pr, pg, pb) =
-                ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+            let (pr, pg, pb) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
             let inv = 255 - a;
             let cr = (r * a + pr * inv) / 255;
             let cg = (g * a + pg * inv) / 255;
@@ -1664,13 +1506,7 @@ fn blit_over_bg_at(
 
 /// Composite the selection highlight at a `y0` offset for block-based
 /// rendering.
-fn draw_selection_at(
-    buffer: &mut [u32],
-    win_w: usize,
-    max_h: usize,
-    y0: usize,
-    rects: &[RectF],
-) {
+fn draw_selection_at(buffer: &mut [u32], win_w: usize, max_h: usize, y0: usize, rects: &[RectF]) {
     const SEL_RGB: (u32, u32, u32) = (0x33, 0x66, 0xFF);
     const SEL_A: u32 = 0x66;
     let inv = 255 - SEL_A;
@@ -1678,8 +1514,7 @@ fn draw_selection_at(
         let x0 = r.x0.round().max(0.0) as usize;
         let y0 = (r.y0.round().max(0.0) as usize).saturating_add(y0);
         let x1 = (r.x1.round() as usize).min(win_w);
-        let y1 =
-            (r.y1.round() as usize).saturating_add(y0).min(max_h);
+        let y1 = (r.y1.round() as usize).saturating_add(y0).min(max_h);
         if x0 >= x1 || y0 >= y1 {
             continue;
         }
@@ -1735,12 +1570,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         // Create the AccessKit adapter before the window is shown.
-        self.adapter =
-            Some(accesskit_winit::Adapter::with_event_loop_proxy(
-                event_loop,
-                &window,
-                self.proxy.clone(),
-            ));
+        self.adapter = Some(accesskit_winit::Adapter::with_event_loop_proxy(
+            event_loop,
+            &window,
+            self.proxy.clone(),
+        ));
 
         self.window = Some(window.clone());
         window.set_visible(true);
@@ -1783,21 +1617,14 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Busy-poll during kernel work; otherwise wake for the next
         // blink.
-        event_loop.set_control_flow(
-            if self.kernel_deadline.is_some() {
-                ControlFlow::Poll
-            } else {
-                ControlFlow::WaitUntil(self.next_blink)
-            },
-        );
+        event_loop.set_control_flow(if self.kernel_deadline.is_some() {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::WaitUntil(self.next_blink)
+        });
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Let AccessKit inspect the event before we handle it (P4
         // #22).
         if let Some(adapter) = &mut self.adapter
@@ -1852,9 +1679,7 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 // Ctrl-key shortcuts: copy / paste / cut / select-all
                 // (P5 #25).
-                if self.mods.control_key()
-                    && self.handle_ctrl_shortcut(&logical_key)
-                {
+                if self.mods.control_key() && self.handle_ctrl_shortcut(&logical_key) {
                     return;
                 }
                 let shift = self.mods.shift_key();
@@ -1891,21 +1716,11 @@ impl ApplicationHandler<UserEvent> for App {
                         self.request_redraw();
                         self.push_a11y_update();
                     }
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        self.move_left(shift)
-                    }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        self.move_right(shift)
-                    }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        self.move_up(shift)
-                    }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        self.move_down(shift)
-                    }
-                    Key::Named(NamedKey::Home) => {
-                        self.move_home(shift)
-                    }
+                    Key::Named(NamedKey::ArrowLeft) => self.move_left(shift),
+                    Key::Named(NamedKey::ArrowRight) => self.move_right(shift),
+                    Key::Named(NamedKey::ArrowUp) => self.move_up(shift),
+                    Key::Named(NamedKey::ArrowDown) => self.move_down(shift),
+                    Key::Named(NamedKey::Home) => self.move_home(shift),
                     Key::Named(NamedKey::End) => self.move_end(shift),
                     _ => {
                         if let Some(t) = &text
@@ -1929,10 +1744,7 @@ impl ApplicationHandler<UserEvent> for App {
                             // topmost open box's body).
                             if self.mods.control_key()
                                 && t.len() == 1
-                                && let Some(d) = t
-                                    .chars()
-                                    .next()
-                                    .and_then(|c| c.to_digit(10))
+                                && let Some(d) = t.chars().next().and_then(|c| c.to_digit(10))
                                 && (1..=9).contains(&d)
                             {
                                 // Ctrl+N: if the same number is
@@ -1965,11 +1777,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     /// Handle AccessKit events dispatched through the event loop
     /// proxy.
-    fn user_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        event: UserEvent,
-    ) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event.0.window_event {
             accesskit_winit::WindowEvent::InitialTreeRequested => {
                 // The platform adapter wants the initial tree — push it now.
@@ -1982,9 +1790,7 @@ impl ApplicationHandler<UserEvent> for App {
                 use accesskit::Action;
                 match req.action {
                     Action::Focus | Action::Click => {
-                        if let Some(offset) =
-                            crate::a11y::byte_offset_for_node(req.target)
-                        {
+                        if let Some(offset) = crate::a11y::byte_offset_for_node(req.target) {
                             // Clamp to the document; clear any selection.
                             let max = self.doc.text().len();
                             let offset = offset.min(max);
@@ -2010,13 +1816,10 @@ mod tests {
     // into a `Vec<usize>`, changing the semantics.
     #![allow(clippy::single_range_in_vec_init)]
     use super::{
-        FAR_LEFT, FAR_RIGHT, cite_popup_scope_text, draw_caret,
-        resolve_hit, selection_range, touched_marker_starts,
-        touched_math_span_starts, touched_space_run_starts,
+        FAR_LEFT, FAR_RIGHT, cite_popup_scope_text, draw_caret, resolve_hit, selection_range,
+        touched_marker_starts, touched_math_span_starts, touched_space_run_starts,
     };
-    use crate::render::{
-        DocLayout, active_reveal_span, layout_doc, layout_doc_with,
-    };
+    use crate::render::{DocLayout, active_reveal_span, layout_doc, layout_doc_with};
     use mathed_core::glyphs::{CaretGeom, V2};
     use mathed_core::transform::TransformOptions;
 
@@ -2025,10 +1828,7 @@ mod tests {
         let doc = "#1 f(x) #2 tail";
         // A selection spanning both markers (byte 0 through the
         // tail).
-        assert_eq!(
-            touched_marker_starts(doc, &[0..doc.len()]),
-            vec![0, 8]
-        );
+        assert_eq!(touched_marker_starts(doc, &[0..doc.len()]), vec![0, 8]);
         // A point exactly on the second marker's own start still
         // touches it (foot-style inclusive edge).
         assert_eq!(touched_marker_starts(doc, &[8..8]), vec![8]);
@@ -2097,8 +1897,7 @@ mod tests {
     fn sim_redraw(doc: &str, width: f64, st: &mut SimState) {
         let sel_reveal = vec![st.caret..st.caret];
         let touched_markers = touched_marker_starts(doc, &sel_reveal);
-        let touched_spaces =
-            touched_space_run_starts(doc, &sel_reveal);
+        let touched_spaces = touched_space_run_starts(doc, &sel_reveal);
         let touched_math = touched_math_span_starts(doc, &sel_reveal);
         let panel = active_reveal_span(doc, st.caret);
         if st.layout.is_none()
@@ -2134,15 +1933,10 @@ mod tests {
         }
         let target = &layout.glyphs.bands[bi + 1];
         let mid_y = (target.top + target.bottom) * 0.5;
-        let x = st.pref_x.unwrap_or_else(|| {
-            layout
-                .glyphs
-                .caret_for_byte(st.caret)
-                .map_or(0.0, |g| g.x)
-        });
-        if let Some(hit) =
-            layout.glyphs.byte_for_point(V2::new(x, mid_y))
-        {
+        let x = st
+            .pref_x
+            .unwrap_or_else(|| layout.glyphs.caret_for_byte(st.caret).map_or(0.0, |g| g.x));
+        if let Some(hit) = layout.glyphs.byte_for_point(V2::new(x, mid_y)) {
             st.caret = resolve_hit(hit, doc);
         }
         st.pref_x = Some(x);
@@ -2150,8 +1944,7 @@ mod tests {
     }
 
     #[test]
-    fn down_arrow_enters_traverses_and_exits_a_collapsed_translator()
-    {
+    fn down_arrow_enters_traverses_and_exits_a_collapsed_translator() {
         // End-to-end reproduction of the repeatedly-reported bug:
         // pressing Down near a translator used to skip clean over it
         // without ever expanding, because the collapsed title's
@@ -2223,8 +2016,7 @@ mod tests {
             reveal: vec![0..doc.len()],
             ..Default::default()
         };
-        let revealed =
-            layout_doc_with(doc, 400.0, &opts).expect("layout");
+        let revealed = layout_doc_with(doc, 400.0, &opts).expect("layout");
         assert!(
             revealed.glyphs.entries.iter().any(|e| e.doc_byte == 0),
             "marker should be a real, selectable glyph once revealed"
@@ -2244,8 +2036,7 @@ mod tests {
             show_hidden: true,
             ..Default::default()
         };
-        let layout =
-            layout_doc_with(doc, 400.0, &opts).expect("layout");
+        let layout = layout_doc_with(doc, 400.0, &opts).expect("layout");
         for marker_byte in [0usize, 8, 16, 24] {
             assert!(
                 layout
@@ -2283,10 +2074,8 @@ mod tests {
     fn home_and_end_use_the_current_band_not_the_raw_line() {
         // Two hard lines ("one" / "two"); Home/End on line 2 must
         // stay within "two", never reaching back into "one".
-        let layout = layout_doc("one\ntwo", 400.0)
-            .expect("layout should succeed");
-        let band =
-            layout.glyphs.band_for_byte(5).expect("band for 'w'"); // byte 5 = 'w' of "two"
+        let layout = layout_doc("one\ntwo", 400.0).expect("layout should succeed");
+        let band = layout.glyphs.band_for_byte(5).expect("band for 'w'"); // byte 5 = 'w' of "two"
         assert_eq!(band, 1, "'two' should be the second band");
         let bounds = &layout.glyphs.bands[band];
         let mid_y = (bounds.top + bounds.bottom) * 0.5;
@@ -2309,10 +2098,8 @@ mod tests {
         // End on the blank line between "a" and "b" must resolve to
         // the blank line's own doc byte (2), not advance into
         // "b".
-        let layout = layout_doc("a\n\nb", 400.0)
-            .expect("layout should succeed");
-        let band =
-            layout.glyphs.band_for_byte(2).expect("blank band");
+        let layout = layout_doc("a\n\nb", 400.0).expect("layout should succeed");
+        let band = layout.glyphs.band_for_byte(2).expect("blank band");
         assert_eq!(band, 1);
         let bounds = &layout.glyphs.bands[band];
         let mid_y = (bounds.top + bounds.bottom) * 0.5;
@@ -2403,8 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_one_block_does_not_touch_another_blocks_cached_layout()
-    {
+    fn editing_one_block_does_not_touch_another_blocks_cached_layout() {
         // Two independent blocks (blank-line separated).
         let text = "alpha beta\n\ngamma delta";
         let mut index = mathed_core::blocks::BlockIndex::default();

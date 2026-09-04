@@ -39,10 +39,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 }
 
-fn main_func(
-    mut q_func: Query<&mut VelystFunc<MainFunc>>,
-    time: Res<Time>,
-) -> Result {
+fn main_func(mut q_func: Query<&mut VelystFunc<MainFunc>>, time: Res<Time>) -> Result {
     let mut func = q_func.single_mut()?;
     func.data.animate = time.elapsed_secs_f64();
 

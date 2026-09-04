@@ -174,10 +174,8 @@ impl SemanticIndex {
                             .all(|c| c.is_alphanumeric() || c == '_'))
                 {
                     let render_range = node.range();
-                    let doc_start =
-                        render.map.render_to_doc(render_range.start);
-                    let doc_end =
-                        render.map.render_to_doc(render_range.end);
+                    let doc_start = render.map.render_to_doc(render_range.start);
+                    let doc_end = render.map.render_to_doc(render_range.end);
                     if doc_start < doc_end {
                         occurrences.push(Occurrence {
                             range: doc_start..doc_end,
@@ -201,9 +199,7 @@ impl SemanticIndex {
             // 1. If occurrence is inside its own def's span, it
             //    resolves to that def.
             for (i, def) in defs.iter().enumerate() {
-                if def.span.contains(&occ.range.start)
-                    && def.span.contains(&occ.range.end)
-                {
+                if def.span.contains(&occ.range.start) && def.span.contains(&occ.range.end) {
                     resolved = Some(i);
                     break;
                 }
@@ -221,8 +217,7 @@ impl SemanticIndex {
         // --- Collect kernel statements (Model/Prior/Event/Prob) and
         //     translators (P3 #10). ---
         let mut kernel_statements = Vec::new();
-        let mut translators: HashMap<String, TranslatorDef> =
-            HashMap::new();
+        let mut translators: HashMap<String, TranslatorDef> = HashMap::new();
         for seg in segments {
             if !seg.kind.is_kernel() && !seg.kind.is_federation() {
                 continue;
@@ -232,17 +227,14 @@ impl SemanticIndex {
                 None => continue,
             };
             let body_text = doc_text[span.clone()].trim().to_string();
-            let block =
-                find_block_for_doc_pos(per_block_renders, span.start);
+            let block = find_block_for_doc_pos(per_block_renders, span.start);
 
             if seg.kind == PropKind::Translator {
                 // `\translator(#3,#4, name: "harmonic")` — collect
                 // into the translators map. Unnamed →
                 // key "" (block-local
                 // default). Last-wins on collision.
-                let name =
-                    extract_named_string(&seg.extra_args, "name")
-                        .unwrap_or_default();
+                let name = extract_named_string(&seg.extra_args, "name").unwrap_or_default();
                 translators.insert(
                     name.clone(),
                     TranslatorDef {
@@ -268,13 +260,9 @@ impl SemanticIndex {
                 }
                 Some(t.to_string())
             });
-            let translator =
-                extract_named_string(&seg.extra_args, "translator");
+            let translator = extract_named_string(&seg.extra_args, "translator");
             let model_name = match seg.kind {
-                PropKind::Prob
-                | PropKind::Event
-                | PropKind::Prior
-                | PropKind::Solver => {
+                PropKind::Prob | PropKind::Event | PropKind::Prior | PropKind::Solver => {
                     extract_named_string(&seg.extra_args, "model")
                 }
                 _ => None,
@@ -309,8 +297,7 @@ impl SemanticIndex {
                 None => continue,
             };
             let body_text = doc_text[span.clone()].trim().to_string();
-            let block =
-                find_block_for_doc_pos(per_block_renders, span.start);
+            let block = find_block_for_doc_pos(per_block_renders, span.start);
 
             let keys: Vec<String> = seg
                 .extra_args
@@ -323,10 +310,7 @@ impl SemanticIndex {
                     if t.contains(':') {
                         return None;
                     }
-                    let t = if t.len() >= 2
-                        && t.starts_with('"')
-                        && t.ends_with('"')
-                    {
+                    let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
                         &t[1..t.len() - 1]
                     } else {
                         t
@@ -334,14 +318,10 @@ impl SemanticIndex {
                     Some(t.to_string())
                 })
                 .collect();
-            let format =
-                extract_named_string(&seg.extra_args, "format");
-            let style =
-                extract_named_string(&seg.extra_args, "style");
+            let format = extract_named_string(&seg.extra_args, "format");
+            let style = extract_named_string(&seg.extra_args, "style");
             let bib_name = match seg.kind {
-                PropKind::Cite => {
-                    extract_named_string(&seg.extra_args, "bib")
-                }
+                PropKind::Cite => extract_named_string(&seg.extra_args, "bib"),
                 _ => None,
             };
             let name = match seg.kind {
@@ -379,9 +359,7 @@ impl SemanticIndex {
     /// frontend (`mathed_mini`) uses to hand `BiblioStatement`s
     /// to `mathed_biblio::resolve_citations`. `block` is always 0
     /// (the citation bridge does not use it).
-    pub fn scan_biblio_statements(
-        doc_text: &str,
-    ) -> Vec<BiblioStatement> {
+    pub fn scan_biblio_statements(doc_text: &str) -> Vec<BiblioStatement> {
         let scan = crate::markers::scan(doc_text);
         let segments = crate::markers::resolve_segments(&scan);
         let mut out = Vec::new();
@@ -405,10 +383,7 @@ impl SemanticIndex {
                     if t.contains(':') {
                         return None;
                     }
-                    let t = if t.len() >= 2
-                        && t.starts_with('"')
-                        && t.ends_with('"')
-                    {
+                    let t = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
                         &t[1..t.len() - 1]
                     } else {
                         t
@@ -416,14 +391,10 @@ impl SemanticIndex {
                     Some(t.to_string())
                 })
                 .collect();
-            let format =
-                extract_named_string(&seg.extra_args, "format");
-            let style =
-                extract_named_string(&seg.extra_args, "style");
+            let format = extract_named_string(&seg.extra_args, "format");
+            let style = extract_named_string(&seg.extra_args, "style");
             let bib_name = match seg.kind {
-                PropKind::Cite => {
-                    extract_named_string(&seg.extra_args, "bib")
-                }
+                PropKind::Cite => extract_named_string(&seg.extra_args, "bib"),
                 _ => None,
             };
             let name = match seg.kind {
@@ -449,11 +420,7 @@ impl SemanticIndex {
         out
     }
 
-    pub fn plan_rename(
-        index: &Self,
-        def_idx: usize,
-        new_name: &str,
-    ) -> Vec<crate::doc::ReplaceOp> {
+    pub fn plan_rename(index: &Self, def_idx: usize, new_name: &str) -> Vec<crate::doc::ReplaceOp> {
         let defs = &index.defs;
         let def = &defs[def_idx];
         let mut ops = Vec::new();
@@ -501,9 +468,7 @@ fn find_block_for_doc_pos(
 ) -> usize {
     for (i, render) in per_block_renders.iter().enumerate() {
         for cs in &render.map.spans {
-            if cs.doc_start <= doc_pos
-                && doc_pos < cs.doc_start + cs.len
-            {
+            if cs.doc_start <= doc_pos && doc_pos < cs.doc_start + cs.len {
                 return i;
             }
         }
@@ -546,12 +511,7 @@ mod tests {
     fn build_index_for(doc_text: &str) -> SemanticIndex {
         let scan = scan(doc_text);
         let segments = resolve_segments(&scan);
-        let render = to_render_text(
-            doc_text,
-            &scan,
-            &segments,
-            &TransformOptions::default(),
-        );
+        let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
         let mut idx = SemanticIndex::default();
         idx.build_index(doc_text, &segments, &[&render]);
         idx
@@ -583,10 +543,7 @@ mod tests {
         let occ_in_def: Vec<_> = idx
             .occurrences
             .iter()
-            .filter(|o| {
-                o.resolved == Some(0)
-                    && def_span.contains(&o.range.start)
-            })
+            .filter(|o| o.resolved == Some(0) && def_span.contains(&o.range.start))
             .collect();
         assert!(
             !occ_in_def.is_empty(),
@@ -640,10 +597,7 @@ mod tests {
         assert_eq!(m.kind, PropKind::Model);
         assert!(m.name.is_none());
         assert_eq!(m.body_text, "harmonic_chain(g: 0.5)");
-        assert_eq!(
-            doc[m.span.clone()].trim(),
-            "harmonic_chain(g: 0.5)"
-        );
+        assert_eq!(doc[m.span.clone()].trim(), "harmonic_chain(g: 0.5)");
 
         // Event statement
         let e = &idx.kernel_statements[1];
@@ -676,10 +630,7 @@ mod tests {
                    \\translator(#3,#4, name: \"harmonic\")";
         let idx = build_index_for(doc);
         assert_eq!(idx.translators.len(), 1, "one named translator");
-        let t = idx
-            .translators
-            .get("harmonic")
-            .expect("named translator");
+        let t = idx.translators.get("harmonic").expect("named translator");
         assert_eq!(t.name, "harmonic");
         assert!(t.body_text.contains("#let translate"));
     }
@@ -726,8 +677,7 @@ mod tests {
         // `\prob(#1,#2,heads, translator: "ho")` — the bare literal
         // `heads` is the name; the named arg `translator:` is
         // separate.
-        let doc =
-            "#1 n(0) == 1 #2 \\prob(#1,#2,heads, translator: \"ho\")";
+        let doc = "#1 n(0) == 1 #2 \\prob(#1,#2,heads, translator: \"ho\")";
         let idx = build_index_for(doc);
         assert_eq!(idx.kernel_statements.len(), 1);
         let p = &idx.kernel_statements[0];
@@ -759,10 +709,7 @@ mod tests {
         let idx = build_index_for(doc);
         let m = &idx.kernel_statements[0];
         assert_eq!(m.kind, PropKind::Model);
-        assert!(
-            m.model_name.is_none(),
-            "model_name only on prob/event"
-        );
+        assert!(m.model_name.is_none(), "model_name only on prob/event");
     }
 
     #[test]
@@ -817,7 +764,8 @@ mod tests {
 
     #[test]
     fn cite_statement_collects_keys_in_order() {
-        let doc = "#1 x #2 \\cite(#1,#2, \"crazy-rich\", \"other-book\", bib: \"refs\", style: \"apa\")";
+        let doc =
+            "#1 x #2 \\cite(#1,#2, \"crazy-rich\", \"other-book\", bib: \"refs\", style: \"apa\")";
         let idx = build_index_for(doc);
         assert_eq!(idx.biblio_statements.len(), 1);
         let c = &idx.biblio_statements[0];

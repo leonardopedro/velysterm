@@ -12,24 +12,14 @@ use mathed_core::transform::{TransformOptions, to_render_text};
 pub fn export_typst(doc_text: &str) -> String {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
-    let render = to_render_text(
-        doc_text,
-        &scan,
-        &segments,
-        &TransformOptions::default(),
-    );
+    let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
     format!("// Exported from mathed_mini\n{}", render.text)
 }
 
 pub fn export_json(doc_text: &str) -> String {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
-    let render = to_render_text(
-        doc_text,
-        &scan,
-        &segments,
-        &TransformOptions::default(),
-    );
+    let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
     let mut idx = SemanticIndex::default();
     idx.build_index(doc_text, &segments, &[&render]);
     serde_json::json!({
@@ -72,9 +62,7 @@ pub fn export_markdown(doc_text: &str) -> String {
     }
 
     out.lines()
-        .filter(|l| {
-            !l.trim().starts_with('#') || l.trim().starts_with("# ")
-        })
+        .filter(|l| !l.trim().starts_with('#') || l.trim().starts_with("# "))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -88,9 +76,7 @@ pub fn export_html(doc_text: &str) -> String {
     for seg in &segments {
         if let Some(span) = &seg.span {
             if span.start > last_end {
-                body.push_str(&escape_html(
-                    &doc_text[last_end..span.start],
-                ));
+                body.push_str(&escape_html(&doc_text[last_end..span.start]));
             }
             let raw = doc_text[span.clone()].trim();
             if seg.kind.is_kernel() {
@@ -164,8 +150,7 @@ mod tests {
     fn json_export_parses() {
         let doc = "#1 a #2 \\model(#1,#2)\n\n#3 vac #4 \\prob(#3,#4)";
         let out = export_json(doc);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&out).expect("valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert!(parsed.get("kernel_statements").is_some());
         let stmts = parsed["kernel_statements"].as_array().unwrap();
         assert!(
@@ -195,13 +180,9 @@ mod tests {
 
     #[test]
     fn tex_export_wraps_document() {
-        let doc =
-            "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $";
+        let doc = "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $";
         let out = export_tex(doc);
-        assert!(
-            out.contains("\\documentclass{article}"),
-            "preamble: {out}"
-        );
+        assert!(out.contains("\\documentclass{article}"), "preamble: {out}");
         assert!(out.contains("\\begin{document}"), "begin: {out}");
         assert!(out.contains("\\end{document}"), "end: {out}");
         assert!(out.contains("$"), "math mode: {out}");

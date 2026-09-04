@@ -28,19 +28,13 @@ use std::time::{Duration, Instant};
 use kernel_client::worker::BlockResponse;
 use kernel_client::{KernelClient, KernelRequest};
 use mathed_core::PropKind;
-use mathed_core::markers::{
-    MarkerScan, Segment, resolve_segments, scan,
-};
-use mathed_core::semantics::{
-    KernelStatement, SemanticIndex, TranslatorDef,
-};
-use mathed_core::transform::{
-    RenderOutput, TransformOptions, to_render_text,
-};
+use mathed_core::markers::{MarkerScan, Segment, resolve_segments, scan};
+use mathed_core::semantics::{KernelStatement, SemanticIndex, TranslatorDef};
+use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::dispatch::{
-    DispatchError, parse_prior, parse_solver, resolve_translator_src,
-    statement_to_event_json, statement_to_model_spec,
+    DispatchError, parse_prior, parse_solver, resolve_translator_src, statement_to_event_json,
+    statement_to_model_spec,
 };
 use crate::translate::{TranslateError, Translator};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
@@ -135,15 +129,13 @@ impl KernelBridge {
                 let markup = match r {
                     // Escape `=` so Typst does not read it as a
                     // heading.
-                    KernelResult::Value(p) => format!(
-                        " #text(rgb(\"#138000\"))[\\= {p:.4}]"
-                    ),
+                    KernelResult::Value(p) => format!(" #text(rgb(\"#138000\"))[\\= {p:.4}]"),
                     KernelResult::StringValue(s) => {
                         format!(" #text(rgb(\"#138000\"))[{s}]")
                     }
-                    KernelResult::Error { code_name, .. } => format!(
-                        " #text(rgb(\"#c00000\"))[ {code_name}]"
-                    ),
+                    KernelResult::Error { code_name, .. } => {
+                        format!(" #text(rgb(\"#c00000\"))[ {code_name}]")
+                    }
                 };
                 (k, markup)
             })
@@ -284,9 +276,7 @@ impl KernelBridge {
         let expired: Vec<usize> = self
             .pending
             .iter()
-            .filter(|(_, t)| {
-                now.duration_since(**t) > Self::LOST_RESPONSE_DEADLINE
-            })
+            .filter(|(_, t)| now.duration_since(**t) > Self::LOST_RESPONSE_DEADLINE)
             .map(|(k, _)| *k)
             .collect();
         for key in expired {
@@ -320,10 +310,7 @@ impl KernelBridge {
     /// tree, so a keystroke scans the document a single time
     /// instead of once per consumer (openclaw doctrine: latency
     /// is work, not round-trips).
-    pub fn refresh_with_index(
-        &mut self,
-        idx: &SemanticIndex,
-    ) -> bool {
+    pub fn refresh_with_index(&mut self, idx: &SemanticIndex) -> bool {
         let mut changed = false;
 
         // Clear stale translator errors from the previous scan (P5
@@ -336,11 +323,7 @@ impl KernelBridge {
         // `\prob`/`\model` must not keep displaying its old
         // annotation) and by `poll` to drop late responses
         // for statements that no longer exist.
-        self.live = idx
-            .kernel_statements
-            .iter()
-            .map(|s| s.span.start)
-            .collect();
+        self.live = idx.kernel_statements.iter().map(|s| s.span.start).collect();
 
         // Models in document order.
         let mut models: Vec<&KernelStatement> = idx
@@ -356,52 +339,37 @@ impl KernelBridge {
         // wins. A parse error is surfaced at the
         // prior/solver's own offset, leaving the model on its
         // previous spec.
-        let mut priors: HashMap<usize, (PriorSpec, String)> =
-            HashMap::new();
-        let mut solvers: HashMap<usize, (SolverSpec, String)> =
-            HashMap::new();
-        for stmt in idx.kernel_statements.iter().filter(|s| {
-            matches!(s.kind, PropKind::Prior | PropKind::Solver)
-        }) {
-            let Some(model) =
-                resolve_model(&models, stmt, &mut self.results)
-            else {
+        let mut priors: HashMap<usize, (PriorSpec, String)> = HashMap::new();
+        let mut solvers: HashMap<usize, (SolverSpec, String)> = HashMap::new();
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| matches!(s.kind, PropKind::Prior | PropKind::Solver))
+        {
+            let Some(model) = resolve_model(&models, stmt, &mut self.results) else {
                 continue;
             };
             match stmt.kind {
-                PropKind::Prior => match parse_prior(&stmt.body_text)
-                {
+                PropKind::Prior => match parse_prior(&stmt.body_text) {
                     Ok(p) => {
-                        priors.insert(
-                            model.span.start,
-                            (p, stmt.body_text.clone()),
-                        );
+                        priors.insert(model.span.start, (p, stmt.body_text.clone()));
                     }
                     Err(e) => {
-                        self.results.insert(
-                            stmt.span.start,
-                            dispatch_error_result(&e),
-                        );
+                        self.results
+                            .insert(stmt.span.start, dispatch_error_result(&e));
                         changed = true;
                     }
                 },
-                PropKind::Solver => {
-                    match parse_solver(&stmt.body_text) {
-                        Ok(s) => {
-                            solvers.insert(
-                                model.span.start,
-                                (s, stmt.body_text.clone()),
-                            );
-                        }
-                        Err(e) => {
-                            self.results.insert(
-                                stmt.span.start,
-                                dispatch_error_result(&e),
-                            );
-                            changed = true;
-                        }
+                PropKind::Solver => match parse_solver(&stmt.body_text) {
+                    Ok(s) => {
+                        solvers.insert(model.span.start, (s, stmt.body_text.clone()));
                     }
-                }
+                    Err(e) => {
+                        self.results
+                            .insert(stmt.span.start, dispatch_error_result(&e));
+                        changed = true;
+                    }
+                },
                 _ => unreachable!("filtered to Prior|Solver"),
             }
         }
@@ -429,30 +397,14 @@ impl KernelBridge {
                 .get(&m.span.start)
                 .map(|(_, s)| s.as_str())
                 .unwrap_or("");
-            let h = hash_many(&[
-                &m.body_text,
-                trans_src,
-                prior_src,
-                solver_src,
-            ]);
+            let h = hash_many(&[&m.body_text, trans_src, prior_src, solver_src]);
             if self.model_hashes.get(&m.span.start) == Some(&h) {
                 continue;
             }
-            let prior =
-                priors.get(&m.span.start).map(|(p, _)| p.clone());
-            let solver =
-                solvers.get(&m.span.start).map(|(s, _)| s.clone());
-            let trans_off = translator_offset(
-                &idx.translators,
-                m.translator.as_deref(),
-            );
-            match statement_to_model_spec(
-                &mut self.engine,
-                &idx.translators,
-                m,
-                prior,
-                solver,
-            ) {
+            let prior = priors.get(&m.span.start).map(|(p, _)| p.clone());
+            let solver = solvers.get(&m.span.start).map(|(s, _)| s.clone());
+            let trans_off = translator_offset(&idx.translators, m.translator.as_deref());
+            match statement_to_model_spec(&mut self.engine, &idx.translators, m, prior, solver) {
                 Ok(spec) => {
                     if let Some(off) = trans_off {
                         self.translator_errors.remove(&off);
@@ -466,31 +418,18 @@ impl KernelBridge {
                     );
                     self.model_hashes.insert(m.span.start, h);
                 }
-                Err(ref e)
-                    if matches!(
-                        e,
-                        DispatchError::Translate(_)
-                            | DispatchError::Json(_)
-                    ) =>
-                {
+                Err(ref e) if matches!(e, DispatchError::Translate(_) | DispatchError::Json(_)) => {
                     if let Some(off) = trans_off {
-                        self.translator_errors
-                            .insert(off, e.to_string());
+                        self.translator_errors.insert(off, e.to_string());
                     }
-                    self.results.insert(
-                        m.span.start,
-                        dispatch_error_result(e),
-                    );
+                    self.results.insert(m.span.start, dispatch_error_result(e));
                     changed = true;
                 }
                 Err(e) => {
                     if let Some(off) = trans_off {
                         self.translator_errors.remove(&off);
                     }
-                    self.results.insert(
-                        m.span.start,
-                        dispatch_error_result(&e),
-                    );
+                    self.results.insert(m.span.start, dispatch_error_result(&e));
                     changed = true;
                 }
             }
@@ -499,14 +438,13 @@ impl KernelBridge {
         // Dispatch each prob/event against its bound model (named
         // `model: "..."` arg) or, lacking that, its nearest preceding
         // `\model` (document order).
-        for stmt in idx.kernel_statements.iter().filter(|s| {
-            matches!(s.kind, PropKind::Prob | PropKind::Event)
-        }) {
-            self.prob_names
-                .insert(stmt.span.start, stmt.name.clone());
-            let Some(model) =
-                resolve_model(&models, stmt, &mut self.results)
-            else {
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| matches!(s.kind, PropKind::Prob | PropKind::Event))
+        {
+            self.prob_names.insert(stmt.span.start, stmt.name.clone());
+            let Some(model) = resolve_model(&models, stmt, &mut self.results) else {
                 // The prob's model binding is gone. `resolve_model`
                 // replaces the entry with a
                 // `model-not-found` error when a *named*
@@ -520,10 +458,7 @@ impl KernelBridge {
                 // recomputes.
                 if matches!(
                     self.results.get(&stmt.span.start),
-                    Some(
-                        KernelResult::Value(_)
-                            | KernelResult::StringValue(_)
-                    )
+                    Some(KernelResult::Value(_) | KernelResult::StringValue(_))
                 ) {
                     self.results.remove(&stmt.span.start);
                     changed = true;
@@ -553,15 +488,8 @@ impl KernelBridge {
             if self.prob_hashes.get(&stmt.span.start) == Some(&key) {
                 continue;
             }
-            let event_trans_off = translator_offset(
-                &idx.translators,
-                stmt.translator.as_deref(),
-            );
-            match statement_to_event_json(
-                &mut self.engine,
-                &idx.translators,
-                stmt,
-            ) {
+            let event_trans_off = translator_offset(&idx.translators, stmt.translator.as_deref());
+            match statement_to_event_json(&mut self.engine, &idx.translators, stmt) {
                 Ok(event_json) => {
                     if let Some(off) = event_trans_off {
                         self.translator_errors.remove(&off);
@@ -586,31 +514,20 @@ impl KernelBridge {
                     );
                     self.prob_hashes.insert(stmt.span.start, key);
                 }
-                Err(ref e)
-                    if matches!(
-                        e,
-                        DispatchError::Translate(_)
-                            | DispatchError::Json(_)
-                    ) =>
-                {
+                Err(ref e) if matches!(e, DispatchError::Translate(_) | DispatchError::Json(_)) => {
                     if let Some(off) = event_trans_off {
-                        self.translator_errors
-                            .insert(off, e.to_string());
+                        self.translator_errors.insert(off, e.to_string());
                     }
-                    self.results.insert(
-                        stmt.span.start,
-                        dispatch_error_result(e),
-                    );
+                    self.results
+                        .insert(stmt.span.start, dispatch_error_result(e));
                     changed = true;
                 }
                 Err(e) => {
                     if let Some(off) = event_trans_off {
                         self.translator_errors.remove(&off);
                     }
-                    self.results.insert(
-                        stmt.span.start,
-                        dispatch_error_result(&e),
-                    );
+                    self.results
+                        .insert(stmt.span.start, dispatch_error_result(&e));
                     changed = true;
                 }
             }
@@ -674,9 +591,7 @@ impl KernelBridge {
             let key_live = match &resp {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
-                | BlockResponse::Error(id, _) => {
-                    self.live.contains(&(*id as usize))
-                }
+                | BlockResponse::Error(id, _) => self.live.contains(&(*id as usize)),
                 // Model (re)definition carries no displayed result.
                 BlockResponse::Success(_) => true,
             };
@@ -685,18 +600,15 @@ impl KernelBridge {
             }
             match resp {
                 BlockResponse::Value(id, v) => {
-                    self.results
-                        .insert(id as usize, KernelResult::Value(v));
+                    self.results.insert(id as usize, KernelResult::Value(v));
                     changed = true;
                 }
                 // A model session was (re)defined: no displayed
                 // result.
                 BlockResponse::Success(_) => {}
                 BlockResponse::StringValue(id, s) => {
-                    self.results.insert(
-                        id as usize,
-                        KernelResult::StringValue(s),
-                    );
+                    self.results
+                        .insert(id as usize, KernelResult::StringValue(s));
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
@@ -720,17 +632,10 @@ impl KernelBridge {
 /// block): scan → segments → render → semantic index. The kernel
 /// refresh and the accessibility tree consume the SAME result, so an
 /// edit runs this once, never once per consumer.
-pub fn scan_pipeline(
-    doc_text: &str,
-) -> (MarkerScan, Vec<Segment>, RenderOutput, SemanticIndex) {
+pub fn scan_pipeline(doc_text: &str) -> (MarkerScan, Vec<Segment>, RenderOutput, SemanticIndex) {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
-    let render = to_render_text(
-        doc_text,
-        &scan,
-        &segments,
-        &TransformOptions::default(),
-    );
+    let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
     let mut idx = SemanticIndex::default();
     idx.build_index(doc_text, &segments, &[&render]);
     (scan, segments, render, idx)
@@ -798,10 +703,10 @@ fn resolve_model<'a>(
     results: &mut HashMap<usize, KernelResult>,
 ) -> Option<&'a KernelStatement> {
     if let Some(name) = &stmt.model_name {
-        if let Some(m) = models.iter().find(|m| {
-            m.kind == PropKind::Model
-                && m.name.as_deref() == Some(name.as_str())
-        }) {
+        if let Some(m) = models
+            .iter()
+            .find(|m| m.kind == PropKind::Model && m.name.as_deref() == Some(name.as_str()))
+        {
             return Some(m);
         }
         let valid: Vec<&str> = models
@@ -810,24 +715,16 @@ fn resolve_model<'a>(
             .filter_map(|m| m.name.as_deref())
             .collect();
         let suggestion = if valid.is_empty() {
-            "no named \\model is in scope; add one or drop the model: arg"
-                .to_string()
+            "no named \\model is in scope; add one or drop the model: arg".to_string()
         } else {
-            format!(
-                "use one of the models in scope: {}",
-                valid.join(", ")
-            )
+            format!("use one of the models in scope: {}", valid.join(", "))
         };
         results.insert(
             stmt.span.start,
             KernelResult::Error {
                 code_name: "model-not-found".into(),
                 message: format!("no \\model named {name:?}"),
-                hints: vec![RepairHint::new(
-                    HintKind::ReplaceValue,
-                    "model",
-                    suggestion,
-                )],
+                hints: vec![RepairHint::new(HintKind::ReplaceValue, "model", suggestion)],
             },
         );
         return None;
@@ -892,14 +789,10 @@ fn parse_congruence(body: &str) -> Option<(i64, i64, i64)> {
                 sign = 1;
                 if seen_mod && m.is_none() {
                     m = Some(n);
-                } else if chars.peek() == Some(&'x')
-                    || chars.peek() == Some(&'X')
-                {
+                } else if chars.peek() == Some(&'x') || chars.peek() == Some(&'X') {
                     a = Some(n);
                     chars.next();
-                } else if chars.peek() == Some(&'y')
-                    || chars.peek() == Some(&'Y')
-                {
+                } else if chars.peek() == Some(&'y') || chars.peek() == Some(&'Y') {
                     b = Some(n);
                     chars.next();
                 } else if n != 0 {
@@ -947,8 +840,7 @@ fn layout_verdict(body: &str) -> KernelResult {
             hints: vec![RepairHint::new(
                 HintKind::ReplaceValue,
                 "layout",
-                "write the bank-conflict congruence as `ax + by ≡ 0 (mod m)`"
-                    .to_string(),
+                "write the bank-conflict congruence as `ax + by ≡ 0 (mod m)`".to_string(),
             )],
         };
     };
@@ -964,9 +856,7 @@ fn layout_verdict(body: &str) -> KernelResult {
             hints: vec![RepairHint::new(
                 HintKind::ReplaceValue,
                 "layout",
-                format!(
-                    "choose coefficients with gcd(a, b, {m}) = 1, e.g. `x + y ≡ 0 (mod {m})`"
-                ),
+                format!("choose coefficients with gcd(a, b, {m}) = 1, e.g. `x + y ≡ 0 (mod {m})`"),
             )],
         }
     } else {
@@ -991,19 +881,12 @@ fn gcd(mut a: i64, mut b: i64) -> i64 {
 /// frontend never produces, is the sole exception).
 fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
     let hint = |target: &str, suggestion: String| {
-        vec![RepairHint::new(
-            HintKind::ReplaceValue,
-            target,
-            suggestion,
-        )]
+        vec![RepairHint::new(HintKind::ReplaceValue, target, suggestion)]
     };
     match e {
         DispatchError::Translate(TranslateError::Eval(msg)) => hint(
             "translator",
-            format!(
-                "fix the Typst error in the translator: {}",
-                first_line(msg)
-            ),
+            format!("fix the Typst error in the translator: {}", first_line(msg)),
         ),
         DispatchError::Translate(TranslateError::NotString) => hint(
             "translator",
@@ -1013,13 +896,11 @@ fn dispatch_error_hints(e: &DispatchError) -> Vec<RepairHint> {
         ),
         DispatchError::Translate(TranslateError::MissingResult) => hint(
             "translator",
-            "define a `translate(body)` function that returns a JSON string"
-                .to_string(),
+            "define a `translate(body)` function that returns a JSON string".to_string(),
         ),
         DispatchError::Translate(TranslateError::Empty) => hint(
             "translator",
-            "return a non-empty JSON string from `translate(body)`"
-                .to_string(),
+            "return a non-empty JSON string from `translate(body)`".to_string(),
         ),
         DispatchError::Json(msg) => hint(
             "translator",
@@ -1074,11 +955,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Poll the bridge until `key` has a result or `timeout` elapses.
-    fn wait_for(
-        bridge: &mut KernelBridge,
-        key: usize,
-        timeout: Duration,
-    ) -> Option<KernelResult> {
+    fn wait_for(bridge: &mut KernelBridge, key: usize, timeout: Duration) -> Option<KernelResult> {
         let start = Instant::now();
         loop {
             bridge.poll();
@@ -1114,8 +991,7 @@ mod tests {
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc);
         let key = prob_offset(doc);
-        let result =
-            wait_for(&mut bridge, key, Duration::from_secs(15));
+        let result = wait_for(&mut bridge, key, Duration::from_secs(15));
         match result {
             Some(KernelResult::Value(p)) => {
                 assert!(
@@ -1201,10 +1077,7 @@ mod tests {
 
         assert_eq!(via_index.model_hashes, via_text.model_hashes);
         assert_eq!(via_index.live, via_text.live);
-        assert_eq!(
-            via_index.translator_errors,
-            via_text.translator_errors
-        );
+        assert_eq!(via_index.translator_errors, via_text.translator_errors);
         assert_eq!(via_index.results, via_text.results);
     }
 
@@ -1233,9 +1106,7 @@ mod tests {
         assert_eq!(cache.text, doc);
         cache.for_text(doc);
         assert_eq!(cache.text, doc);
-        cache.for_text(
-            "#1 b #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)",
-        );
+        cache.for_text("#1 b #2 \\model(#1,#2)\n#3 vac #4 \\prob(#3,#4)");
         assert_ne!(cache.text, doc);
         cache.for_text(doc);
         assert_eq!(cache.text, doc);
@@ -1243,19 +1114,10 @@ mod tests {
 
     #[test]
     fn parse_congruence_variants() {
-        assert_eq!(
-            parse_congruence("2x + 4y ≡ 0 (mod 32)"),
-            Some((2, 4, 32))
-        );
-        assert_eq!(
-            parse_congruence("2x+4y=0 mod 32"),
-            Some((2, 4, 32))
-        );
+        assert_eq!(parse_congruence("2x + 4y ≡ 0 (mod 32)"), Some((2, 4, 32)));
+        assert_eq!(parse_congruence("2x+4y=0 mod 32"), Some((2, 4, 32)));
         // Implicit unit coefficients and a unicode minus.
-        assert_eq!(
-            parse_congruence("x − 2y ≡ 0 (mod 16)"),
-            Some((1, -2, 16))
-        );
+        assert_eq!(parse_congruence("x − 2y ≡ 0 (mod 16)"), Some((1, -2, 16)));
         // A nonzero RHS is not a bank-conflict claim.
         assert_eq!(parse_congruence("2x + 4y ≡ 6 (mod 32)"), None);
         // Missing modulus / missing variables are unparseable.
@@ -1287,23 +1149,17 @@ mod tests {
                 hints,
             }) => {
                 assert_eq!(code_name, "UK-4907");
-                assert!(
-                    message.contains("no safe swizzle"),
-                    "message: {message}"
-                );
+                assert!(message.contains("no safe swizzle"), "message: {message}");
                 assert_eq!(hints.len(), 1);
                 assert_eq!(hints[0].kind, HintKind::ReplaceValue);
-                assert!(
-                    hints[0].suggestion.contains("gcd(a, b, 32) = 1")
-                );
+                assert!(hints[0].suggestion.contains("gcd(a, b, 32) = 1"));
             }
             other => panic!("expected UK-4907 error, got {other:?}"),
         }
         // The overlay annotation renders the code inline, like any
         // kernel error (red code name right after the claim).
         let ann = bridge.result_annotations();
-        let markup =
-            ann.get(&key).expect("annotation for the layout");
+        let markup = ann.get(&key).expect("annotation for the layout");
         assert!(markup.contains("UK-4907"), "annotation: {markup}");
     }
 
@@ -1377,9 +1233,7 @@ mod tests {
             Some(KernelResult::Error { code_name, .. }) => {
                 assert_eq!(code_name, "translator-json");
             }
-            other => panic!(
-                "expected translator-json error, got {other:?}"
-            ),
+            other => panic!("expected translator-json error, got {other:?}"),
         }
     }
 
@@ -1495,8 +1349,7 @@ mod tests {
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc);
         let key = prob_offset(doc);
-        let result =
-            wait_for(&mut bridge, key, Duration::from_secs(15));
+        let result = wait_for(&mut bridge, key, Duration::from_secs(15));
         match result {
             Some(KernelResult::Value(p)) => {
                 assert!(
@@ -1528,9 +1381,7 @@ mod tests {
             Some(KernelResult::Error { code_name, .. }) => {
                 assert_eq!(code_name, "prior-solver-parse");
             }
-            other => panic!(
-                "expected prior-solver-parse error, got {other:?}"
-            ),
+            other => panic!("expected prior-solver-parse error, got {other:?}"),
         }
     }
 
@@ -1561,9 +1412,7 @@ mod tests {
                     h.suggestion
                 );
             }
-            other => panic!(
-                "expected model-not-found error, got {other:?}"
-            ),
+            other => panic!("expected model-not-found error, got {other:?}"),
         }
     }
 
@@ -1584,42 +1433,21 @@ mod tests {
         assert!(h[0].suggestion.contains("unknown variable"));
 
         assert!(
-            !dispatch_error_hints(&DispatchError::Translate(
-                TranslateError::NotString
-            ))
-            .is_empty()
+            !dispatch_error_hints(&DispatchError::Translate(TranslateError::NotString)).is_empty()
         );
         assert!(
-            !dispatch_error_hints(&DispatchError::Translate(
-                TranslateError::MissingResult
-            ))
-            .is_empty()
+            !dispatch_error_hints(&DispatchError::Translate(TranslateError::MissingResult))
+                .is_empty()
+        );
+        assert!(!dispatch_error_hints(&DispatchError::Translate(TranslateError::Empty)).is_empty());
+        assert!(
+            !dispatch_error_hints(&DispatchError::Json("missing field `kind`".into())).is_empty()
         );
         assert!(
-            !dispatch_error_hints(&DispatchError::Translate(
-                TranslateError::Empty
-            ))
-            .is_empty()
-        );
-        assert!(
-            !dispatch_error_hints(&DispatchError::Json(
-                "missing field `kind`".into()
-            ))
-            .is_empty()
-        );
-        assert!(
-            !dispatch_error_hints(&DispatchError::Parse(
-                "expected an integer".into()
-            ))
-            .is_empty()
+            !dispatch_error_hints(&DispatchError::Parse("expected an integer".into())).is_empty()
         );
         // Internal misuse carries no hint.
-        assert!(
-            dispatch_error_hints(&DispatchError::WrongKind(
-                PropKind::Model
-            ))
-            .is_empty()
-        );
+        assert!(dispatch_error_hints(&DispatchError::WrongKind(PropKind::Model)).is_empty());
     }
 
     #[test]
@@ -1636,14 +1464,10 @@ mod tests {
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc);
         let key = prob_offset(doc);
-        let result =
-            wait_for(&mut bridge, key, Duration::from_secs(15));
+        let result = wait_for(&mut bridge, key, Duration::from_secs(15));
         match result {
             Some(KernelResult::Value(p)) => {
-                assert!(
-                    (p - 1.0).abs() < 1e-9,
-                    "P(vacuum) should be 1.0, got {p}"
-                );
+                assert!((p - 1.0).abs() < 1e-9, "P(vacuum) should be 1.0, got {p}");
             }
             other => panic!("expected a Value result, got {other:?}"),
         }
@@ -1767,17 +1591,13 @@ mod tests {
         let ho_model = idx1
             .kernel_statements
             .iter()
-            .find(|s| {
-                s.kind == PropKind::Model
-                    && s.translator.as_deref() == Some("ho")
-            })
+            .find(|s| s.kind == PropKind::Model && s.translator.as_deref() == Some("ho"))
             .expect("model with ho translator");
         assert!(
             bridge.model_hashes.contains_key(&ho_model.span.start),
             "model hash recorded after first refresh"
         );
-        let hash1 =
-            *bridge.model_hashes.get(&ho_model.span.start).unwrap();
+        let hash1 = *bridge.model_hashes.get(&ho_model.span.start).unwrap();
 
         // Second pass: same model body, but translator changed to
         // emit a non-empty term. The model hash MUST change
@@ -1790,13 +1610,9 @@ mod tests {
         let ho_model2 = idx2
             .kernel_statements
             .iter()
-            .find(|s| {
-                s.kind == PropKind::Model
-                    && s.translator.as_deref() == Some("ho")
-            })
+            .find(|s| s.kind == PropKind::Model && s.translator.as_deref() == Some("ho"))
             .expect("model with ho translator");
-        let hash2 =
-            *bridge.model_hashes.get(&ho_model2.span.start).unwrap();
+        let hash2 = *bridge.model_hashes.get(&ho_model2.span.start).unwrap();
         assert_ne!(
             hash1, hash2,
             "translator change must produce a different hash → redispatch"
@@ -1858,18 +1674,11 @@ mod tests {
         use crate::render::layout_doc_with;
         use mathed_core::transform::TransformOptions;
 
-        fn count_colored_pixels(
-            img: &imaging::RgbaImage,
-        ) -> (u32, u32) {
+        fn count_colored_pixels(img: &imaging::RgbaImage) -> (u32, u32) {
             let mut green = 0u32;
             let mut red = 0u32;
             for px in img.data.chunks_exact(4) {
-                let (r, g, b, a) = (
-                    px[0] as u32,
-                    px[1] as u32,
-                    px[2] as u32,
-                    px[3] as u32,
-                );
+                let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
                 if a == 0 {
                     continue;
                 }
@@ -1893,10 +1702,7 @@ mod tests {
         let key_ok = prob_offset(doc_ok);
         wait_for(&mut bridge, key_ok, Duration::from_secs(15));
         let annotations = bridge.result_annotations();
-        assert!(
-            annotations.contains_key(&key_ok),
-            "annotation for the prob"
-        );
+        assert!(annotations.contains_key(&key_ok), "annotation for the prob");
         let layout = layout_doc_with(
             doc_ok,
             600.0,
@@ -1954,9 +1760,7 @@ mod tests {
     fn models_overview_lists_two_models() {
         let doc = "#1 a #2 \\model(#1,#2, m1)\n\n#3 b #4 \\model(#3,#4, m2)";
         let bridge = KernelBridge::new();
-        let overview = bridge
-            .models_overview(doc)
-            .expect("overview for 2 models");
+        let overview = bridge.models_overview(doc).expect("overview for 2 models");
         assert!(overview.contains("m1"), "overview: {overview}");
         assert!(overview.contains("m2"), "overview: {overview}");
     }
@@ -2004,10 +1808,7 @@ mod tests {
         let r1 = wait_for(&mut bridge, key1, Duration::from_secs(15));
         let r2 = wait_for(&mut bridge, key2, Duration::from_secs(15));
         match (r1, r2) {
-            (
-                Some(KernelResult::Value(p1)),
-                Some(KernelResult::Value(p2)),
-            ) => {
+            (Some(KernelResult::Value(p1)), Some(KernelResult::Value(p2))) => {
                 assert!(
                     (p1 - 1.0).abs() < 1e-9,
                     "P(vacuum|m1) should be 1.0, got {p1}"

@@ -21,37 +21,26 @@ pub fn shape_paint(
     shape: &viz::Shape,
     state: &RenderState,
 ) -> (Brush, Option<Affine>) {
-    let shape_size =
-        shape.bbox(true).size().max(Size::splat(Abs::pt(1.0)));
+    let shape_size = shape.bbox(true).size().max(Size::splat(Abs::pt(1.0)));
     // Guard against degenerate (zero-sized) containers, which would
     // otherwise produce NaN aspect ratios and gradient centers.
-    let container_size =
-        state.container_size.max(Size::splat(Abs::pt(1.0)));
+    let container_size = state.container_size.max(Size::splat(Abs::pt(1.0)));
 
     let brush_transform = match paint {
         viz::Paint::Gradient(gradient) => {
             let relative = gradient.unwrap_relative(false);
-            let is_conic =
-                matches!(gradient, viz::Gradient::Conic(_));
+            let is_conic = matches!(gradient, viz::Gradient::Conic(_));
 
             let (w, h) = match relative {
-                viz::RelativeTo::Self_ => {
-                    (shape_size.x.to_pt(), shape_size.y.to_pt())
-                }
-                viz::RelativeTo::Parent => (
-                    container_size.x.to_pt(),
-                    container_size.y.to_pt(),
-                ),
+                viz::RelativeTo::Self_ => (shape_size.x.to_pt(), shape_size.y.to_pt()),
+                viz::RelativeTo::Parent => (container_size.x.to_pt(), container_size.y.to_pt()),
             };
             let base = match relative {
                 viz::RelativeTo::Self_ => Affine::IDENTITY,
                 // brush_transform = T⁻¹ · C · scale(w,h)
                 // so vello samples: scale(1/w,1/h) · C⁻¹ · (px,py)
                 // = container-local coords, normalized by (w,h).
-                viz::RelativeTo::Parent => {
-                    state.transform.inverse()
-                        * state.container_transform
-                }
+                viz::RelativeTo::Parent => state.transform.inverse() * state.container_transform,
             };
 
             // Conic uses uniform scale(w, w) so angles stay circular
@@ -72,13 +61,9 @@ pub fn shape_paint(
             if let viz::Gradient::Conic(conic) = gradient {
                 let ratio = w / h;
                 let rad = conic.angle.to_rad() + PI;
-                let center = kurbo::Vec2::new(
-                    conic.center.x.get(),
-                    conic.center.y.get() / ratio,
-                );
-                let rotation = Affine::translate(center)
-                    * Affine::rotate(rad)
-                    * Affine::translate(-center);
+                let center = kurbo::Vec2::new(conic.center.x.get(), conic.center.y.get() / ratio);
+                let rotation =
+                    Affine::translate(center) * Affine::rotate(rad) * Affine::translate(-center);
                 if let Some(a) = affine.as_mut() {
                     *a *= rotation;
                 }
@@ -86,23 +71,16 @@ pub fn shape_paint(
 
             affine
         }
-        viz::Paint::Tiling(tiling) => {
-            match tiling.unwrap_relative(false) {
-                viz::RelativeTo::Self_ => None,
-                viz::RelativeTo::Parent => {
-                    Some(state.container_transform.inverse())
-                }
-            }
-        }
+        viz::Paint::Tiling(tiling) => match tiling.unwrap_relative(false) {
+            viz::RelativeTo::Self_ => None,
+            viz::RelativeTo::Parent => Some(state.container_transform.inverse()),
+        },
         viz::Paint::Solid(_) => None,
     };
 
     let brush_size = match paint {
         viz::Paint::Gradient(gradient)
-            if matches!(
-                gradient.unwrap_relative(false),
-                viz::RelativeTo::Self_
-            ) =>
+            if matches!(gradient.unwrap_relative(false), viz::RelativeTo::Self_) =>
         {
             shape_size
         }
@@ -114,42 +92,31 @@ pub fn shape_paint(
 
 /// Convert a typst [`viz::Paint`] to a [`Brush`] and brush transform
 /// for a text glyph run.
-pub fn text_paint(
-    paint: &viz::Paint,
-    state: &RenderState,
-) -> (Brush, Option<Affine>) {
+pub fn text_paint(paint: &viz::Paint, state: &RenderState) -> (Brush, Option<Affine>) {
     // Guard against degenerate (zero-sized) containers, which would
     // otherwise produce NaN aspect ratios and gradient centers.
-    let container_size =
-        state.container_size.max(Size::splat(Abs::pt(1.0)));
+    let container_size = state.container_size.max(Size::splat(Abs::pt(1.0)));
 
     let brush_transform = match paint {
         viz::Paint::Gradient(gradient) => {
             let w = container_size.x.to_pt();
             let h = container_size.y.to_pt();
             // Same formula as RelativeTo::Parent in shape_paint.
-            let base =
-                state.transform.inverse() * state.container_transform;
+            let base = state.transform.inverse() * state.container_transform;
 
             // Conic uses uniform scale(w, w); others use scale(w, h).
-            let mut affine = Some(
-                if matches!(gradient, viz::Gradient::Conic(_)) {
-                    base * Affine::scale(w)
-                } else {
-                    base * Affine::scale_non_uniform(w, h)
-                },
-            );
+            let mut affine = Some(if matches!(gradient, viz::Gradient::Conic(_)) {
+                base * Affine::scale(w)
+            } else {
+                base * Affine::scale_non_uniform(w, h)
+            });
 
             if let viz::Gradient::Conic(conic) = gradient {
                 let ratio = w / h;
                 let rad = conic.angle.to_rad() + PI;
-                let center = kurbo::Vec2::new(
-                    conic.center.x.get(),
-                    conic.center.y.get() / ratio,
-                );
-                let rotation = Affine::translate(center)
-                    * Affine::rotate(rad)
-                    * Affine::translate(-center);
+                let center = kurbo::Vec2::new(conic.center.x.get(), conic.center.y.get() / ratio);
+                let rotation =
+                    Affine::translate(center) * Affine::rotate(rad) * Affine::translate(-center);
                 if let Some(a) = affine.as_mut() {
                     *a *= rotation;
                 }
@@ -178,50 +145,27 @@ pub fn build_brush(paint: &viz::Paint, size: Size) -> Brush {
                 .iter()
                 .map(|(color, ratio)| peniko::ColorStop {
                     offset: ratio.get() as f32,
-                    color: convert_color(&color.to_process_space(
-                        viz::ProcessColorSpace::Srgb,
-                    ))
-                    .into(),
+                    color: convert_color(&color.to_process_space(viz::ProcessColorSpace::Srgb))
+                        .into(),
                 })
                 .collect();
 
             let gradient = match gradient {
                 viz::Gradient::Linear(linear) => {
-                    let angle = viz::Gradient::correct_aspect_ratio(
-                        linear.angle,
-                        ratio,
-                    );
+                    let angle = viz::Gradient::correct_aspect_ratio(linear.angle, ratio);
                     let (sin, cos) = (angle.sin(), angle.cos());
                     let length = sin.abs() + cos.abs();
                     let (start, end) = match angle.quadrant() {
-                        Quadrant::First => {
-                            ((0.0, 0.0), (cos * length, sin * length))
-                        }
-                        Quadrant::Second => (
-                            (1.0, 0.0),
-                            (cos * length + 1.0, sin * length),
-                        ),
-                        Quadrant::Third => (
-                            (1.0, 1.0),
-                            (cos * length + 1.0, sin * length + 1.0),
-                        ),
-                        Quadrant::Fourth => (
-                            (0.0, 1.0),
-                            (cos * length, sin * length + 1.0),
-                        ),
+                        Quadrant::First => ((0.0, 0.0), (cos * length, sin * length)),
+                        Quadrant::Second => ((1.0, 0.0), (cos * length + 1.0, sin * length)),
+                        Quadrant::Third => ((1.0, 1.0), (cos * length + 1.0, sin * length + 1.0)),
+                        Quadrant::Fourth => ((0.0, 1.0), (cos * length, sin * length + 1.0)),
                     };
-                    peniko::Gradient::new_linear(start, end)
-                        .with_stops(stops.as_slice())
+                    peniko::Gradient::new_linear(start, end).with_stops(stops.as_slice())
                 }
                 viz::Gradient::Radial(radial) => {
-                    let start_center = (
-                        radial.focal_center.x.get(),
-                        radial.focal_center.y.get(),
-                    );
-                    let end_center = (
-                        radial.center.x.get(),
-                        radial.center.y.get(),
-                    );
+                    let start_center = (radial.focal_center.x.get(), radial.focal_center.y.get());
+                    let end_center = (radial.center.x.get(), radial.center.y.get());
                     peniko::Gradient::new_two_point_radial(
                         start_center,
                         radial.focal_radius.get() as f32,
@@ -237,12 +181,8 @@ pub fn build_brush(paint: &viz::Paint, size: Size) -> Brush {
                     // space. To land at the correct screen position
                     // after that uniform scale,
                     // divide cy by the aspect ratio.
-                    let center = (
-                        conic.center.x.get(),
-                        conic.center.y.get() / ratio.get(),
-                    );
-                    peniko::Gradient::new_sweep(center, 0.0, TAU)
-                        .with_stops(stops.as_slice())
+                    let center = (conic.center.x.get(), conic.center.y.get() / ratio.get());
+                    peniko::Gradient::new_sweep(center, 0.0, TAU).with_stops(stops.as_slice())
                 }
             };
             Brush::Gradient(gradient)

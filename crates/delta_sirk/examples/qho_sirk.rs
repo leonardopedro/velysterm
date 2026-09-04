@@ -9,9 +9,7 @@
 //! Run: `cargo run -p delta_sirk --example qho_sirk` (needs a GPU
 //! adapter).
 
-use delta_algebra::{
-    DeltaAlgebraEngine, HermiteState, OpType, OperatorTerm,
-};
+use delta_algebra::{DeltaAlgebraEngine, HermiteState, OpType, OperatorTerm};
 use delta_sirk::run_symbolic_delta_sirk;
 
 fn main() {
@@ -20,22 +18,17 @@ fn main() {
     let engine = match engine {
         Some(engine) => engine,
         None => {
-            eprintln!(
-                "no wgpu adapter available — cannot run the GPU pipeline"
-            );
+            eprintln!("no wgpu adapter available — cannot run the GPU pipeline");
             std::process::exit(1);
         }
     };
 
     // 1. Shifted vacuum at x0 = 1.0: <H> = x0² = 1.0 (unitless QHO
     //    units).
-    let (matrix, spectral_error) =
-        rt.block_on(run_symbolic_delta_sirk(1.0, vec![10.0]));
+    let (matrix, spectral_error) = rt.block_on(run_symbolic_delta_sirk(1.0, vec![10.0]));
     let h00_re = matrix[0];
     let h00_im = matrix[1];
-    println!(
-        "H_00 = ({h00_re:.6}, {h00_im:.6})  [expect (1.000000, 0.000000)]"
-    );
+    println!("H_00 = ({h00_re:.6}, {h00_im:.6})  [expect (1.000000, 0.000000)]");
     assert!(
         (h00_re - 1.0).abs() < 1e-3,
         "shifted vacuum energy wrong: {h00_re}"
@@ -58,7 +51,5 @@ fn main() {
         one[0].coeff_re
     );
 
-    println!(
-        "OK: delta_sirk QHO pipeline verified against the GPU engine"
-    );
+    println!("OK: delta_sirk QHO pipeline verified against the GPU engine");
 }

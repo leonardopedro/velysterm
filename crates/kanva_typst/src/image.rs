@@ -3,20 +3,14 @@ use std::sync::Arc;
 use kanva::imaging::Composite;
 use kanva::imaging::kurbo::{Affine, Rect, Shape as _};
 use kanva::imaging::peniko::{
-    Blob, Brush, Fill, ImageAlphaType, ImageBrush, ImageData,
-    ImageFormat,
+    Blob, Brush, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
 };
 use kanva::prelude::*;
 use typst_imaging::RenderState;
 use typst_library::layout::Size;
 use typst_library::visualize::{Image, ImageKind};
 
-pub fn render_image(
-    image: &Image,
-    size: Size,
-    sink: &mut impl KanvaSink,
-    state: RenderState,
-) {
+pub fn render_image(image: &Image, size: Size, sink: &mut impl KanvaSink, state: RenderState) {
     match image.kind() {
         ImageKind::Raster(raster) => {
             let rgba = raster.dynamic().to_rgba8();
@@ -41,8 +35,7 @@ pub fn render_image(
             );
 
             sink.draw_path(
-                Rect::new(0.0, 0.0, width as f64, height as f64)
-                    .to_path(0.1),
+                Rect::new(0.0, 0.0, width as f64, height as f64).to_path(0.1),
                 transform,
                 Some(KanvaFill {
                     rule: Fill::NonZero,
@@ -56,26 +49,18 @@ pub fn render_image(
         }
         ImageKind::Svg(svg) => {
             let options = usvg::Options::default();
-            let Ok(tree) =
-                usvg::Tree::from_data(svg.data().as_ref(), &options)
-            else {
+            let Ok(tree) = usvg::Tree::from_data(svg.data().as_ref(), &options) else {
                 return;
             };
             let svg_size = tree.size();
-            if svg_size.width() < f32::EPSILON
-                || svg_size.height() < f32::EPSILON
-            {
+            if svg_size.width() < f32::EPSILON || svg_size.height() < f32::EPSILON {
                 return;
             }
             let scale = Affine::scale_non_uniform(
                 size.x.to_pt() / svg_size.width() as f64,
                 size.y.to_pt() / svg_size.height() as f64,
             );
-            kanva_svg::render_svg(
-                &tree,
-                sink,
-                state.transform * scale,
-            );
+            kanva_svg::render_svg(&tree, sink, state.transform * scale);
         }
         ImageKind::Pdf(pdf) => {
             let (w, h) = (pdf.width() as f64, pdf.height() as f64);
@@ -89,8 +74,7 @@ pub fn render_image(
                 &Default::default(),
             );
             let options = usvg::Options::default();
-            let Ok(tree) = usvg::Tree::from_str(&svg_str, &options)
-            else {
+            let Ok(tree) = usvg::Tree::from_str(&svg_str, &options) else {
                 return;
             };
             let svg_size = tree.size();
@@ -98,11 +82,7 @@ pub fn render_image(
                 size.x.to_pt() / svg_size.width() as f64,
                 size.y.to_pt() / svg_size.height() as f64,
             );
-            kanva_svg::render_svg(
-                &tree,
-                sink,
-                state.transform * scale,
-            );
+            kanva_svg::render_svg(&tree, sink, state.transform * scale);
         }
     }
 }

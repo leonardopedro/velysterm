@@ -54,13 +54,10 @@ fn compile_velyst_func<F: TypstFunc>(
     modules: Res<VelystModules>,
     mut asset_events: MessageReader<AssetEvent<VelystSource>>,
 ) {
-    let changed_assets: smallvec::SmallVec<
-        [AssetId<VelystSource>; 4],
-    > = asset_events
+    let changed_assets: smallvec::SmallVec<[AssetId<VelystSource>; 4]> = asset_events
         .read()
         .filter_map(|e| match e {
-            AssetEvent::Added { id }
-            | AssetEvent::Modified { id } => Some(*id),
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => Some(*id),
             _ => None,
         })
         .collect();
@@ -89,10 +86,7 @@ fn compile_velyst_func<F: TypstFunc>(
                     .call_with_named(&positional_args, &named_args)
                     .pack();
             }
-            Err(err) => error!(
-                "Unable to get typst function {}: {err}",
-                F::NAME
-            ),
+            Err(err) => error!("Unable to get typst function {}: {err}", F::NAME),
         }
     }
 }
@@ -139,10 +133,7 @@ pub struct VelystSourceReady;
 #[require(VelystFrame)]
 pub struct VelystContent(pub Content);
 
-pub trait TypstValue:
-    IntoValue + Clone + Send + Sync + 'static
-{
-}
+pub trait TypstValue: IntoValue + Clone + Send + Sync + 'static {}
 
 impl<T: IntoValue + Clone + Send + Sync + 'static> TypstValue for T {}
 

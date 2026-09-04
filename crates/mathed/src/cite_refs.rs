@@ -13,8 +13,7 @@
 
 use bevy::prelude::*;
 use mathed_core::markers::{
-    ReferenceEntry, ReferencesEntry, cite_label_text,
-    references_for_cursor, scan, scan_references,
+    ReferenceEntry, ReferencesEntry, cite_label_text, references_for_cursor, scan, scan_references,
 };
 
 use crate::GlyphIndex;
@@ -43,18 +42,14 @@ pub struct CiteRow {
 
 /// Build the rows for an open cite popup stack from the document
 /// text. Returns `None` when the stack is empty or no cite resolves.
-pub fn cite_popup_rows(
-    doc_text: &str,
-    stack: &[u32],
-) -> Option<Vec<CiteRow>> {
+pub fn cite_popup_rows(doc_text: &str, stack: &[u32]) -> Option<Vec<CiteRow>> {
     if stack.is_empty() {
         return None;
     }
     let refs = scan_references(&scan(doc_text));
     let mut rows = Vec::new();
     for &n in stack {
-        let entry =
-            refs.iter().find(|e| e.numbers.contains(&(n as u64)))?;
+        let entry = refs.iter().find(|e| e.numbers.contains(&(n as u64)))?;
         rows.push(cite_row_for(entry, doc_text));
     }
     Some(rows)
@@ -74,9 +69,7 @@ fn cite_row_for(entry: &ReferenceEntry, doc_text: &str) -> CiteRow {
                      one of the markers is missing or out of order)"
             ),
         },
-        mathed_core::markers::ReferenceKind::Bibliography {
-            keys,
-        } => keys.join(", "),
+        mathed_core::markers::ReferenceKind::Bibliography { keys } => keys.join(", "),
     };
     CiteRow { label, detail }
 }
@@ -84,20 +77,15 @@ fn cite_row_for(entry: &ReferenceEntry, doc_text: &str) -> CiteRow {
 /// Build the rows for the references panel from the document text and
 /// the caret byte. Returns `None` when the panel is closed or no
 /// references are at the cursor.
-pub fn references_panel_rows(
-    doc_text: &str,
-    cursor: usize,
-) -> Option<Vec<CiteRow>> {
+pub fn references_panel_rows(doc_text: &str, cursor: usize) -> Option<Vec<CiteRow>> {
     let scan = scan(doc_text);
-    let entries: Vec<ReferencesEntry> =
-        references_for_cursor(doc_text, &scan, cursor);
+    let entries: Vec<ReferencesEntry> = references_for_cursor(doc_text, &scan, cursor);
     if entries.is_empty() {
         return None;
     }
     let mut rows = Vec::new();
     for e in &entries {
-        let body =
-            doc_text[e.segment_range.clone()].trim().to_string();
+        let body = doc_text[e.segment_range.clone()].trim().to_string();
         rows.push(CiteRow {
             label: e.tag.clone(),
             detail: body,
@@ -117,10 +105,7 @@ pub fn sync_cite_refs_ui(
     state: Res<crate::EditorState>,
     blocks: Res<Blocks>,
     block_q: Query<(&ComputedNode, &GlobalTransform, &GlyphIndex)>,
-    root_q: Query<
-        (&ComputedNode, &GlobalTransform),
-        With<crate::PaddedRoot>,
-    >,
+    root_q: Query<(&ComputedNode, &GlobalTransform), With<crate::PaddedRoot>>,
     roots: Query<Entity, With<CiteRefsRoot>>,
     windows: Query<&Window>,
     ime: Res<crate::ImePreedit>,
@@ -172,8 +157,7 @@ pub fn sync_cite_refs_ui(
 
     // References panel (anchored at the screen bottom).
     if panel_open.0
-        && let Some(rows) =
-            references_panel_rows(doc_text, state.cursor)
+        && let Some(rows) = references_panel_rows(doc_text, state.cursor)
     {
         let header = format!("References at cursor ({})", rows.len());
         let panel_w = (win_w * 0.5).min(400.0);
@@ -244,14 +228,8 @@ fn spawn_panel(
                         BackgroundColor(row_bg),
                     ))
                     .with_children(|r| {
-                        r.spawn((
-                            Text::new(&row.label),
-                            TextColor(Color::WHITE),
-                        ));
-                        r.spawn((
-                            Text::new(&row.detail),
-                            TextColor(dim),
-                        ));
+                        r.spawn((Text::new(&row.label), TextColor(Color::WHITE)));
+                        r.spawn((Text::new(&row.detail), TextColor(dim)));
                     });
             }
         });
@@ -259,12 +237,7 @@ fn spawn_panel(
 
 /// Draw the IME preedit (in-progress composition) as a distinct,
 /// underlined-style text node anchored just past the caret.
-fn spawn_preedit(
-    commands: &mut Commands,
-    x: f32,
-    y: f32,
-    text: &str,
-) {
+fn spawn_preedit(commands: &mut Commands, x: f32, y: f32, text: &str) {
     commands
         .spawn((
             CiteRefsRoot,
@@ -279,10 +252,7 @@ fn spawn_preedit(
             ZIndex(11),
         ))
         .with_children(|parent| {
-            parent.spawn((
-                Text::new(text),
-                TextColor(Color::srgb(0.9, 0.9, 0.4)),
-            ));
+            parent.spawn((Text::new(text), TextColor(Color::srgb(0.9, 0.9, 0.4))));
         });
 }
 
@@ -293,8 +263,7 @@ mod tests {
     #[test]
     fn cite_popup_rows_doc_ref() {
         let doc = "#1 a #2 \\cite(#1,#2)";
-        let rows =
-            cite_popup_rows(doc, &[1]).expect("cite [1] exists");
+        let rows = cite_popup_rows(doc, &[1]).expect("cite [1] exists");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "[1]");
         assert_eq!(rows[0].detail, "a");
@@ -304,8 +273,7 @@ mod tests {
     fn cite_popup_rows_bib() {
         // A bib-key cite with two keys gets two numbers: [1, 2].
         let doc = "\\cite(authorA89, authorB94)";
-        let rows =
-            cite_popup_rows(doc, &[1]).expect("cite [1] exists");
+        let rows = cite_popup_rows(doc, &[1]).expect("cite [1] exists");
         assert_eq!(rows[0].label, "[1, 2]");
         assert_eq!(rows[0].detail, "authorA89, authorB94");
     }
@@ -322,8 +290,7 @@ mod tests {
         // A statement segment `\bold(#1,#2)` with body ` hello `;
         // the caret inside the body (byte 7) should find the segment.
         let doc = "#1 hello #2 \\bold(#1,#2) world";
-        let rows = references_panel_rows(doc, 7)
-            .expect("a reference at cursor");
+        let rows = references_panel_rows(doc, 7).expect("a reference at cursor");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "hello");
     }

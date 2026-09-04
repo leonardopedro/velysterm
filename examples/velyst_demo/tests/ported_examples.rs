@@ -38,10 +38,8 @@ fn assert_exists(path: &Path) {
 #[test]
 fn editor_assets_present() {
     let root = repo_root();
-    let typ =
-        root.join("examples/velyst_demo/assets/typst/editor.typ");
-    let font =
-        root.join("examples/velyst_demo/assets/fonts/dejavu.ttf");
+    let typ = root.join("examples/velyst_demo/assets/typst/editor.typ");
+    let font = root.join("examples/velyst_demo/assets/fonts/dejavu.ttf");
     assert_exists(&typ);
     assert_exists(&font);
 
@@ -54,8 +52,7 @@ fn editor_assets_present() {
 
     // The font must be a real TTF (a few KB at minimum; we use a
     // loose lower bound to avoid hard-coding the upstream size).
-    let font_size =
-        fs::metadata(&font).expect("stat dejavu.ttf").len();
+    let font_size = fs::metadata(&font).expect("stat dejavu.ttf").len();
     assert!(
         font_size > 100_000,
         "dejavu.ttf looks too small ({font_size} bytes) — was the file truncated?",
@@ -65,15 +62,12 @@ fn editor_assets_present() {
 #[test]
 fn terminal_assets_present() {
     let root = repo_root();
-    let typ =
-        root.join("examples/velyst_demo/assets/typst/terminal.typ");
+    let typ = root.join("examples/velyst_demo/assets/typst/terminal.typ");
     assert_exists(&typ);
 
-    let typ_text =
-        fs::read_to_string(&typ).expect("read terminal.typ");
+    let typ_text = fs::read_to_string(&typ).expect("read terminal.typ");
     assert!(
-        typ_text.contains("#let terminal_render")
-            || typ_text.contains("#let final_terminal_fix"),
+        typ_text.contains("#let terminal_render") || typ_text.contains("#let final_terminal_fix"),
         "terminal.typ must define the function the terminal.rs example binds to",
     );
 }
@@ -86,12 +80,10 @@ fn rfc1751_demo_uses_mathed_core_helper() {
     // `rfc1751` moved from `velyst` to `mathed_core` so the Bevy-free
     // `mathed_mini` frontend can use it.
     let root = repo_root();
-    let rs =
-        root.join("examples/velyst_demo/examples/rfc1751_demo.rs");
+    let rs = root.join("examples/velyst_demo/examples/rfc1751_demo.rs");
     assert_exists(&rs);
 
-    let rs_text =
-        fs::read_to_string(&rs).expect("read rfc1751_demo.rs");
+    let rs_text = fs::read_to_string(&rs).expect("read rfc1751_demo.rs");
     assert!(
         rs_text.contains("mathed_core::rfc1751::u64_to_rfc1751"),
         "rfc1751_demo.rs must use the mathed_core::rfc1751 helper (auto_marker_names plan, Stage 1)",
@@ -108,8 +100,7 @@ fn ported_examples_use_new_velyst_api() {
     // velyst 0.15 rev 21 merge. This test pins the new API surface.
     let root = repo_root();
     for example in ["editor.rs", "terminal.rs"] {
-        let rs =
-            root.join("examples/velyst_demo/examples").join(example);
+        let rs = root.join("examples/velyst_demo/examples").join(example);
         assert_exists(&rs);
 
         let rs_text = fs::read_to_string(&rs).expect(example);
@@ -136,8 +127,7 @@ fn ported_examples_use_bevy_val_helpers() {
     // Pin the new style.
     let root = repo_root();
     for example in ["editor.rs", "terminal.rs"] {
-        let rs =
-            root.join("examples/velyst_demo/examples").join(example);
+        let rs = root.join("examples/velyst_demo/examples").join(example);
         let rs_text = fs::read_to_string(&rs).expect(example);
         assert!(
             !rs_text.contains("Val::Percent")

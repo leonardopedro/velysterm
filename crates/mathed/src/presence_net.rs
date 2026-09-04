@@ -84,14 +84,9 @@ impl PresenceTransport {
     pub fn listen(addr: &str) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let local = listener.local_addr()?.to_string();
-        let t = Self::from_stream(
-            Arc::new(placeholder_stream()),
-            local,
-            String::new(),
-        );
+        let t = Self::from_stream(Arc::new(placeholder_stream()), local, String::new());
         let outbox_rx = Arc::new(Mutex::new(None));
-        *outbox_rx.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(t.take_outbox_rx());
+        *outbox_rx.lock().unwrap_or_else(|e| e.into_inner()) = Some(t.take_outbox_rx());
         let inbox_tx = t.inbox_tx.clone();
         let connected = Arc::clone(&t.connected);
         let shutdown = Arc::clone(&t.shutdown);
@@ -103,23 +98,15 @@ impl PresenceTransport {
                     .peer_addr()
                     .map(|a| a.to_string())
                     .unwrap_or_default();
-                *peer.lock().unwrap_or_else(|e| e.into_inner()) =
-                    addr;
+                *peer.lock().unwrap_or_else(|e| e.into_inner()) = addr;
                 let stream = Arc::new(stream);
-                *stream_slot
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) =
-                    Some(Arc::clone(&stream));
+                *stream_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&stream));
                 let outbox_rx = outbox_rx
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take()
-                    .expect(
-                        "the writer thread is spawned exactly once",
-                    );
-                spawn_reader_writer(
-                    stream, outbox_rx, inbox_tx, connected, shutdown,
-                );
+                    .expect("the writer thread is spawned exactly once");
+                spawn_reader_writer(stream, outbox_rx, inbox_tx, connected, shutdown);
             }
             Err(_) => {
                 connected.store(false, Ordering::Relaxed);
@@ -128,11 +115,7 @@ impl PresenceTransport {
         Ok(t)
     }
 
-    fn from_stream(
-        stream: Arc<TcpStream>,
-        local_addr: String,
-        peer: String,
-    ) -> Self {
+    fn from_stream(stream: Arc<TcpStream>, local_addr: String, peer: String) -> Self {
         let (inbox_tx, inbox) = mpsc::channel();
         let (outbox, outbox_rx) = mpsc::channel::<(u8, Vec<u8>)>();
         Self {
@@ -193,8 +176,7 @@ impl PresenceTransport {
             .try_recv()
         {
             Ok(f) => Some(f),
-            Err(TryRecvError::Empty)
-            | Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
     }
 
@@ -233,11 +215,9 @@ impl Drop for PresenceTransport {
 /// A connected loopback socket standing in for a not-yet-accepted
 /// listener transport (so `Drop` always has a socket to close).
 fn placeholder_stream() -> TcpStream {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .expect("placeholder bind must succeed");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("placeholder bind must succeed");
     let addr = listener.local_addr().unwrap();
-    let stream =
-        TcpStream::connect(addr).expect("placeholder connect");
+    let stream = TcpStream::connect(addr).expect("placeholder connect");
     let _ = listener.accept();
     stream
 }
@@ -266,12 +246,9 @@ fn spawn_reader_writer(
             if writer_shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            let mut frame =
-                Vec::with_capacity(HEADER_LEN + payload.len());
+            let mut frame = Vec::with_capacity(HEADER_LEN + payload.len());
             frame.push(tag);
-            frame.extend_from_slice(
-                &(payload.len() as u32).to_be_bytes(),
-            );
+            frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
             frame.extend_from_slice(&payload);
             if w.write_all(&frame).is_err() || w.flush().is_err() {
                 break;
@@ -293,9 +270,7 @@ fn spawn_reader_writer(
                 break;
             }
             let tag = header[0];
-            let len = u32::from_be_bytes([
-                header[1], header[2], header[3], header[4],
-            ]) as usize;
+            let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
             let mut payload = vec![0u8; len];
             if r.read_exact(&mut payload).is_err() {
                 connected.store(false, Ordering::Relaxed);
@@ -321,8 +296,7 @@ mod tests {
     }
 
     fn wait_until(mut f: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if f() {
                 return;
@@ -348,10 +322,7 @@ mod tests {
         // accept to land by polling until the peer address is
         // recorded.
         wait_until(|| !server.peer().is_empty());
-        assert!(
-            !server.peer().is_empty(),
-            "server must accept the client"
-        );
+        assert!(!server.peer().is_empty(), "server must accept the client");
 
         client.send_presence(b"hello-peer");
         let mut got: Option<(u8, Vec<u8>)> = None;

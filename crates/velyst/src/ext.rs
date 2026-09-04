@@ -2,9 +2,8 @@ use paste::paste;
 use typst::diag::HintedString;
 use typst::foundations;
 use typst::foundations::{
-    Args, Array, Bytes, Content, Datetime, Dict, Duration, FromValue,
-    Func, Label, Module, Scope, Smart, Str, Styles, Symbol, Type,
-    Version,
+    Args, Array, Bytes, Content, Datetime, Dict, Duration, FromValue, Func, Label, Module, Scope,
+    Smart, Str, Styles, Symbol, Type, Version,
 };
 use typst::layout::{Abs, Angle, Em, Fr, Length, Ratio, Rel, Sizing};
 use typst::syntax::Spanned;
@@ -81,10 +80,7 @@ pub trait ScopeExt {
     /// - Variable type does not match the desired value type.
     fn get_value_unchecked<T: FromValue>(&self, var: &str) -> T;
 
-    fn get_value<T: FromValue>(
-        &self,
-        var: &str,
-    ) -> Result<T, ScopeError>;
+    fn get_value<T: FromValue>(&self, var: &str) -> Result<T, ScopeError>;
 
     fn_get_value!(
         (get_bool, bool),
@@ -121,19 +117,16 @@ impl ScopeExt for Scope {
         self.get(var).unwrap().read().clone().cast::<T>().unwrap()
     }
 
-    fn get_value<T: FromValue>(
-        &self,
-        var: &str,
-    ) -> Result<T, ScopeError> {
-        self.get(var).ok_or(ScopeError::VariableNotFound).and_then(
-            |value| {
+    fn get_value<T: FromValue>(&self, var: &str) -> Result<T, ScopeError> {
+        self.get(var)
+            .ok_or(ScopeError::VariableNotFound)
+            .and_then(|value| {
                 value
                     .read()
                     .clone()
                     .cast::<T>()
                     .map_err(ScopeError::ValueCastFailed)
-            },
-        )
+            })
     }
 }
 
@@ -144,14 +137,9 @@ pub enum ScopeError {
 }
 
 impl std::fmt::Display for ScopeError {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ScopeError::VariableNotFound => {
-                f.pad("Variable not found!")
-            }
+            ScopeError::VariableNotFound => f.pad("Variable not found!"),
             ScopeError::ValueCastFailed(hinted_string) => write!(
                 f,
                 "Cast fail! {}\n{}",
@@ -163,18 +151,12 @@ impl std::fmt::Display for ScopeError {
 }
 
 /// [foundations::ContextElem]
-pub fn context(
-    func: foundations::Func,
-    args: &mut foundations::Args,
-) -> foundations::ContextElem {
+pub fn context(func: foundations::Func, args: &mut foundations::Args) -> foundations::ContextElem {
     foundations::ContextElem::new(func.with(args))
 }
 
 pub trait FuncCall {
-    fn call(
-        self,
-        positional_args: &[foundations::Value],
-    ) -> foundations::ContextElem;
+    fn call(self, positional_args: &[foundations::Value]) -> foundations::ContextElem;
 
     fn call_with_named(
         self,
@@ -184,14 +166,8 @@ pub trait FuncCall {
 }
 
 impl FuncCall for foundations::Func {
-    fn call(
-        self,
-        positional_args: &[foundations::Value],
-    ) -> foundations::ContextElem {
-        let mut args = foundations::Args::new(
-            self.span(),
-            positional_args.iter().cloned(),
-        );
+    fn call(self, positional_args: &[foundations::Value]) -> foundations::ContextElem {
+        let mut args = foundations::Args::new(self.span(), positional_args.iter().cloned());
 
         context(self, &mut args)
     }
@@ -201,10 +177,7 @@ impl FuncCall for foundations::Func {
         positional_args: &[foundations::Value],
         named_args: &[(&str, foundations::Value)],
     ) -> foundations::ContextElem {
-        let mut args = foundations::Args::new(
-            self.span(),
-            positional_args.iter().cloned(),
-        );
+        let mut args = foundations::Args::new(self.span(), positional_args.iter().cloned());
 
         for (name, value) in named_args {
             args.items.push(foundations::Arg {

@@ -105,11 +105,7 @@ impl PathMods {
     }
 
     /// Override the transform of the path at `idx`.
-    pub fn transform(
-        &mut self,
-        idx: usize,
-        transform: Affine,
-    ) -> &mut Self {
+    pub fn transform(&mut self, idx: usize, transform: Affine) -> &mut Self {
         self.transform.insert(idx, transform);
         self
     }
@@ -117,11 +113,7 @@ impl PathMods {
     /// Override the fill of the path at `idx`.
     ///
     /// Pass `None` to clear the fill entirely.
-    pub fn fill(
-        &mut self,
-        idx: usize,
-        fill: Option<KanvaFill>,
-    ) -> &mut Self {
+    pub fn fill(&mut self, idx: usize, fill: Option<KanvaFill>) -> &mut Self {
         self.fill.insert(idx, fill);
         self
     }
@@ -129,11 +121,7 @@ impl PathMods {
     /// Override the stroke of the path at `idx`.
     ///
     /// Pass `None` to clear the stroke entirely.
-    pub fn stroke(
-        &mut self,
-        idx: usize,
-        stroke: Option<KanvaStroke>,
-    ) -> &mut Self {
+    pub fn stroke(&mut self, idx: usize, stroke: Option<KanvaStroke>) -> &mut Self {
         self.stroke.insert(idx, stroke);
         self
     }
@@ -173,11 +161,7 @@ impl GroupMods {
     }
 
     /// Override the transform of the group at `idx`.
-    pub fn transform(
-        &mut self,
-        idx: usize,
-        transform: Affine,
-    ) -> &mut Self {
+    pub fn transform(&mut self, idx: usize, transform: Affine) -> &mut Self {
         self.transform.insert(idx, transform);
         self
     }
@@ -185,21 +169,13 @@ impl GroupMods {
     /// Override the clip of the group at `idx`.
     ///
     /// Pass `None` to clear the clip entirely.
-    pub fn clip(
-        &mut self,
-        idx: usize,
-        clip: Option<KanvaClip>,
-    ) -> &mut Self {
+    pub fn clip(&mut self, idx: usize, clip: Option<KanvaClip>) -> &mut Self {
         self.clip.insert(idx, clip);
         self
     }
 
     /// Override the composite mode of the group at `idx`.
-    pub fn composite(
-        &mut self,
-        idx: usize,
-        composite: Composite,
-    ) -> &mut Self {
+    pub fn composite(&mut self, idx: usize, composite: Composite) -> &mut Self {
         self.composite.insert(idx, composite);
         self
     }

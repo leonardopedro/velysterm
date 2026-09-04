@@ -13,13 +13,9 @@ use chrono::{DateTime, Datelike, Local, Timelike};
 use ecow::eco_format;
 use fonts::TypstFonts;
 use typst::comemo::Track;
-use typst::diag::{
-    FileError, FileResult, PackageError, Severity, SourceDiagnostic,
-};
+use typst::diag::{FileError, FileResult, PackageError, Severity, SourceDiagnostic};
 use typst::engine::{Engine, Route, Sink, Traced};
-use typst::foundations::{
-    Bytes, Content, Datetime, Module, StyleChain,
-};
+use typst::foundations::{Bytes, Content, Datetime, Module, StyleChain};
 use typst::introspection::EmptyIntrospector;
 use typst::layout::{Frame, Region};
 use typst::syntax::package::PackageSpec;
@@ -165,11 +161,7 @@ impl VelystWorld<'_> {
         }
     }
 
-    pub fn layout_frame(
-        &self,
-        content: &Content,
-        region: Region,
-    ) -> Option<Frame> {
+    pub fn layout_frame(&self, content: &Content, region: Region) -> Option<Frame> {
         let world: &dyn typst::World = self;
         let styles = StyleChain::new(&world.library().styles);
 
@@ -197,13 +189,7 @@ impl VelystWorld<'_> {
             let locator = typst::introspection::Locator::root();
 
             // Layout!
-            layout_frame(
-                &mut engine,
-                content,
-                locator,
-                styles,
-                region,
-            )
+            layout_frame(&mut engine, content, locator, styles, region)
         };
 
         // Log delayed errors.
@@ -254,32 +240,22 @@ impl typst::World for VelystWorld<'_> {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.slot(id, |slot| {
-            slot.source(&self.root, &self.package_download)
-        })
+        self.slot(id, |slot| slot.source(&self.root, &self.package_download))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        self.slot(id, |slot| {
-            slot.file(&self.root, &self.package_download)
-        })
+        self.slot(id, |slot| slot.file(&self.root, &self.package_download))
     }
 
     fn font(&self, index: usize) -> Option<Font> {
         self.fonts.fonts[index].get()
     }
 
-    fn today(
-        &self,
-        offset: Option<typst::foundations::Duration>,
-    ) -> Option<Datetime> {
+    fn today(&self, offset: Option<typst::foundations::Duration>) -> Option<Datetime> {
         let naive = match offset {
             None => self.date_time.naive_local(),
             Some(offset) => {
-                self.date_time.naive_utc()
-                    + chrono::Duration::seconds(
-                        offset.seconds() as i64
-                    )
+                self.date_time.naive_utc() + chrono::Duration::seconds(offset.seconds() as i64)
             }
         };
 
@@ -338,11 +314,7 @@ impl FileSlot {
     }
 
     /// Retrieve the file's bytes.
-    fn file(
-        &mut self,
-        project_root: &Path,
-        download: &TypstPackageDownload,
-    ) -> FileResult<Bytes> {
+    fn file(&mut self, project_root: &Path, download: &TypstPackageDownload) -> FileResult<Bytes> {
         self.file.get_or_init(
             || system_path(project_root, self.id, download),
             |data, _| Ok(Bytes::new(data)),
@@ -402,8 +374,7 @@ impl<T: Clone> SlotCell<T> {
 
         // If the file contents didn't change, yield the old processed
         // data.
-        if mem::replace(&mut self.fingerprint, fingerprint)
-            == fingerprint
+        if mem::replace(&mut self.fingerprint, fingerprint) == fingerprint
             && let Some(data) = &self.data
         {
             return data.clone();
@@ -439,10 +410,7 @@ fn system_path(
 
 /// Returns the local cache directory for a package, downloading it
 /// first if it is not already present and downloading is enabled.
-fn prepare_package(
-    spec: &PackageSpec,
-    download: &TypstPackageDownload,
-) -> FileResult<PathBuf> {
+fn prepare_package(spec: &PackageSpec, download: &TypstPackageDownload) -> FileResult<PathBuf> {
     let package_dir = download
         .cache_dir
         .join(spec.namespace.as_str())
@@ -454,14 +422,12 @@ fn prepare_package(
     }
 
     if !download.enabled {
-        return Err(FileError::Package(PackageError::Other(Some(
-            eco_format!(
-                "package downloading is disabled; \
+        return Err(FileError::Package(PackageError::Other(Some(eco_format!(
+            "package downloading is disabled; \
              enable it via `TypstPackageDownload` or pre-cache {spec} \
              in \"{}\"",
-                download.cache_dir.display()
-            ),
-        ))));
+            download.cache_dir.display()
+        )))));
     }
 
     download_package(spec, &package_dir)?;
@@ -470,10 +436,7 @@ fn prepare_package(
 
 /// Downloads a package from `packages.typst.org` and extracts it into
 /// `dest`.
-fn download_package(
-    spec: &PackageSpec,
-    dest: &Path,
-) -> FileResult<PathBuf> {
+fn download_package(spec: &PackageSpec, dest: &Path) -> FileResult<PathBuf> {
     let url = format!(
         "https://packages.typst.org/{}/{}-{}.tar.gz",
         spec.namespace, spec.name, spec.version,
@@ -481,32 +444,24 @@ fn download_package(
 
     info!("Downloading typst package {spec} from {url}");
 
-    let response = ureq::get(&url).call().map_err(|e| {
-        FileError::Package(PackageError::NetworkFailed(Some(
-            eco_format!("{e}"),
-        )))
-    })?;
+    let response = ureq::get(&url)
+        .call()
+        .map_err(|e| FileError::Package(PackageError::NetworkFailed(Some(eco_format!("{e}")))))?;
 
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            FileError::Package(PackageError::Other(Some(
-                eco_format!("{e}"),
-            )))
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|e| FileError::Package(PackageError::Other(Some(eco_format!("{e}")))))?;
     }
 
     let mut body = Vec::new();
-    response.into_reader().read_to_end(&mut body).map_err(|e| {
-        FileError::Package(PackageError::NetworkFailed(Some(
-            eco_format!("{e}"),
-        )))
-    })?;
+    response
+        .into_reader()
+        .read_to_end(&mut body)
+        .map_err(|e| FileError::Package(PackageError::NetworkFailed(Some(eco_format!("{e}")))))?;
 
     let decoder = flate2::read::GzDecoder::new(body.as_slice());
     tar::Archive::new(decoder).unpack(dest).map_err(|e| {
-        FileError::Package(PackageError::MalformedArchive(Some(
-            eco_format!("{e}"),
-        )))
+        FileError::Package(PackageError::MalformedArchive(Some(eco_format!("{e}"))))
     })?;
 
     Ok(dest.to_path_buf())
@@ -541,9 +496,7 @@ fn log_diagnostic(world: &VelystWorld, diagnostic: SourceDiagnostic) {
             .source(id)
             .ok()
             .zip(world.range(diagnostic.span))
-            .and_then(|(source, range)| {
-                source.lines().byte_to_line_column(range.start)
-            });
+            .and_then(|(source, range)| source.lines().byte_to_line_column(range.start));
         match line_col {
             Some((line, col)) => {
                 format!("In file: {:?}:{}:{}", id, line + 1, col + 1)
@@ -551,9 +504,7 @@ fn log_diagnostic(world: &VelystWorld, diagnostic: SourceDiagnostic) {
             None => format!("In file: {:?}", id),
         }
     });
-    log_msg.push_str(
-        &location.unwrap_or_else(|| "In file: <unknown>".to_string()),
-    );
+    log_msg.push_str(&location.unwrap_or_else(|| "In file: <unknown>".to_string()));
     log_msg.push('\n');
     log_msg.push_str(&format!("Trace: {:?}", diagnostic.trace));
     log_msg.push('\n');

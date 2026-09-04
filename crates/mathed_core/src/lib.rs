@@ -30,26 +30,16 @@ pub mod sync;
 pub mod transform;
 pub mod wordnav;
 
-pub use accessibility::{
-    AccessNode, AccessRole, build_access_nodes, describe_segment,
-};
+pub use accessibility::{AccessNode, AccessRole, build_access_nodes, describe_segment};
 pub use doc::{ByteDelta, DocError, MathDoc, ReplaceOp};
-pub use glyphs::{
-    CaretGeom, GlyphEntry, GlyphIndex, LineBand, RectF, V2,
-    build_glyph_index,
-};
+pub use glyphs::{CaretGeom, GlyphEntry, GlyphIndex, LineBand, RectF, V2, build_glyph_index};
 pub use markers::{
-    Arg, Marker, MarkerScan, PropKind, PropertyStmt, ReferenceEntry,
-    ReferenceKind, ReferencesEntry, Segment, auto_marker_id,
-    auto_marker_token, backslash_escaped, cite_label_text,
-    derive_tag, lowest_free_marker_numbers, next_marker_id,
-    references_for_cursor, resolve_segments, scan, scan_references,
+    Arg, Marker, MarkerScan, PropKind, PropertyStmt, ReferenceEntry, ReferenceKind,
+    ReferencesEntry, Segment, auto_marker_id, auto_marker_token, backslash_escaped,
+    cite_label_text, derive_tag, lowest_free_marker_numbers, next_marker_id, references_for_cursor,
+    resolve_segments, scan, scan_references,
 };
-pub use semantics::{
-    Definition, KernelStatement, Occurrence, SemanticIndex,
-    TranslatorDef,
-};
+pub use semantics::{Definition, KernelStatement, Occurrence, SemanticIndex, TranslatorDef};
 pub use transform::{
-    CopySpan, OffsetMap, RenderOutput, TransformOptions,
-    to_render_text, to_render_text_range,
+    CopySpan, OffsetMap, RenderOutput, TransformOptions, to_render_text, to_render_text_range,
 };

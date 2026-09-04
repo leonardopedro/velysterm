@@ -30,10 +30,7 @@ impl MathDoc {
     }
 
     /// Import a remote delta patch, merging concurrent operations.
-    pub fn import_delta(
-        &mut self,
-        delta: &[u8],
-    ) -> Result<(), crate::doc::DocError> {
+    pub fn import_delta(&mut self, delta: &[u8]) -> Result<(), crate::doc::DocError> {
         self.doc
             .import(delta)
             .map_err(|e| crate::doc::DocError::Loro(e.to_string()))?;
@@ -92,9 +89,7 @@ impl Clone for PresenceStore {
             store: self.store.clone(),
             peer: self.peer.clone(),
             local: Arc::clone(&self.local),
-            last_set_ms: AtomicI64::new(
-                self.last_set_ms.load(Ordering::Relaxed),
-            ),
+            last_set_ms: AtomicI64::new(self.last_set_ms.load(Ordering::Relaxed)),
             timeout_ms: self.timeout_ms,
         }
     }
@@ -117,11 +112,7 @@ impl PresenceStore {
     /// `timeout_ms` is the inactivity timeout: a peer that has not
     /// been heard from within this window is skipped by `encode`
     /// and pruned by `remove_outdated`.
-    pub fn new(
-        peer: impl Into<String>,
-        name: impl Into<String>,
-        timeout_ms: i64,
-    ) -> Self {
+    pub fn new(peer: impl Into<String>, name: impl Into<String>, timeout_ms: i64) -> Self {
         Self {
             store: EphemeralStore::new(timeout_ms),
             peer: peer.into(),
@@ -150,26 +141,17 @@ impl PresenceStore {
     /// brief busy-wait, bounded by the millisecond granularity,
     /// and only when two publishes collide).
     fn publish(&self) {
-        let local =
-            self.local.read().unwrap_or_else(|e| e.into_inner());
+        let local = self.local.read().unwrap_or_else(|e| e.into_inner());
         let seen = self.reserve_timestamp();
         let mut fields = vec![
-            (
-                KEY_NAME.to_string(),
-                LoroValue::from(local.name.clone()),
-            ),
+            (KEY_NAME.to_string(), LoroValue::from(local.name.clone())),
             (KEY_SEEN.to_string(), LoroValue::from(seen)),
         ];
         if let Some(c) = local.cursor {
-            fields.push((
-                KEY_CURSOR.to_string(),
-                LoroValue::from(c as i64),
-            ));
+            fields.push((KEY_CURSOR.to_string(), LoroValue::from(c as i64)));
         }
-        self.store.set(
-            &self.peer,
-            LoroValue::Map(LoroMapValue::from(fields)),
-        );
+        self.store
+            .set(&self.peer, LoroValue::Map(LoroMapValue::from(fields)));
     }
 
     /// Reserve a millisecond strictly greater than every previously
@@ -182,12 +164,7 @@ impl PresenceStore {
             if seen > last {
                 if self
                     .last_set_ms
-                    .compare_exchange(
-                        last,
-                        seen,
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    )
+                    .compare_exchange(last, seen, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
                 {
                     return seen;
@@ -200,18 +177,14 @@ impl PresenceStore {
 
     /// Set this peer's display name and republish.
     pub fn set_name(&self, name: impl Into<String>) {
-        self.local.write().unwrap_or_else(|e| e.into_inner()).name =
-            name.into();
+        self.local.write().unwrap_or_else(|e| e.into_inner()).name = name.into();
         self.publish();
     }
 
     /// Set this peer's caret position and republish. `None` signals
     /// the peer left the document.
     pub fn set_cursor(&self, cursor: Option<usize>) {
-        self.local
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .cursor = cursor;
+        self.local.write().unwrap_or_else(|e| e.into_inner()).cursor = cursor;
         self.publish();
     }
 

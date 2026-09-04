@@ -38,11 +38,7 @@ pub struct FireSet {
 
 impl Scheduler {
     /// Note that blocks need re-transforming. Arms the timers.
-    pub fn note_blocks(
-        &mut self,
-        ids: impl IntoIterator<Item = BlockId>,
-        now: f64,
-    ) {
+    pub fn note_blocks(&mut self, ids: impl IntoIterator<Item = BlockId>, now: f64) {
         self.dirty.extend(ids);
         self.deadline = Some(now + LOWER_S);
         self.first_damage.get_or_insert(now);
@@ -64,9 +60,7 @@ impl Scheduler {
     pub fn take(&mut self, now: f64) -> Option<FireSet> {
         let content_ready = !self.dirty.is_empty()
             && (self.deadline.is_some_and(|d| now >= d)
-                || self
-                    .first_damage
-                    .is_some_and(|t| now >= t + UPPER_S));
+                || self.first_damage.is_some_and(|t| now >= t + UPPER_S));
 
         let reveal_ready = self.reveal_dirty;
 
@@ -77,10 +71,8 @@ impl Scheduler {
         // Collect up to MAX_BLOCKS_PER_FIRE block ids.
         let mut blocks: Vec<BlockId> = Vec::new();
         if content_ready {
-            let take_count =
-                MAX_BLOCKS_PER_FIRE.min(self.dirty.len());
-            blocks
-                .extend(self.dirty.iter().copied().take(take_count));
+            let take_count = MAX_BLOCKS_PER_FIRE.min(self.dirty.len());
+            blocks.extend(self.dirty.iter().copied().take(take_count));
             for id in &blocks {
                 self.dirty.remove(id);
             }
@@ -146,10 +138,7 @@ mod tests {
     fn budget_splits_fires() {
         let mut s = Scheduler::default();
         // 6 dirty blocks.
-        s.note_blocks(
-            [id(1), id(2), id(3), id(4), id(5), id(6)],
-            0.0,
-        );
+        s.note_blocks([id(1), id(2), id(3), id(4), id(5), id(6)], 0.0);
         // First fire: 4 blocks.
         let fire = s.take(LOWER_S).unwrap();
         assert_eq!(fire.blocks.len(), 4);

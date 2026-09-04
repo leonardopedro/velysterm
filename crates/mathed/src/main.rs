@@ -38,15 +38,12 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_vello::prelude::*;
 use keymap::{EditorCmd, Mods, Motion};
 use mathed_core::{
-    MathDoc, TransformOptions, auto_marker_id, auto_marker_token,
-    lowest_free_marker_numbers, resolve_segments, scan,
-    semantics::SemanticIndex, sync::PresenceStore, to_render_text,
+    MathDoc, TransformOptions, auto_marker_id, auto_marker_token, lowest_free_marker_numbers,
+    resolve_segments, scan, semantics::SemanticIndex, sync::PresenceStore, to_render_text,
     to_render_text_range,
 };
 use velyst::prelude::*;
-use velyst::typst::syntax::{
-    FileId, RootedPath, Source, VirtualPath, VirtualRoot,
-};
+use velyst::typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 
 use blocks_view::{BlockView, Blocks, EditorRoot, PRELUDE};
 use mathed_core::blocks::BlockId as CoreBlockId;
@@ -63,10 +60,7 @@ pub struct GlyphIndex(pub core_g::GlyphIndex);
 pub use core_g::CaretGeom;
 
 impl GlyphIndex {
-    pub fn caret_for_byte(
-        &self,
-        doc_byte: usize,
-    ) -> Option<CaretGeom> {
+    pub fn caret_for_byte(&self, doc_byte: usize) -> Option<CaretGeom> {
         self.0.caret_for_byte(doc_byte)
     }
 
@@ -74,10 +68,7 @@ impl GlyphIndex {
         self.0.byte_for_point(V2::new(p.x, p.y))
     }
 
-    pub fn rects_for_range(
-        &self,
-        r: Range<usize>,
-    ) -> Vec<bevy_vello::vello::kurbo::Rect> {
+    pub fn rects_for_range(&self, r: Range<usize>) -> Vec<bevy_vello::vello::kurbo::Rect> {
         self.0
             .rects_for_range(r)
             .into_iter()
@@ -103,29 +94,16 @@ pub fn build_glyph_index(
     map: &mathed_core::OffsetMap,
     prelude_len: usize,
 ) -> GlyphIndex {
-    GlyphIndex(core_g::build_glyph_index(
-        frame,
-        source,
-        map,
-        prelude_len,
-    ))
+    GlyphIndex(core_g::build_glyph_index(frame, source, map, prelude_len))
 }
 
 /// System: rebuild glyph indices for blocks whose frames changed.
 pub fn build_glyph_indices(
-    mut q: Query<
-        (&BlockView, &VelystFrame, &mut GlyphIndex),
-        Changed<VelystFrame>,
-    >,
+    mut q: Query<(&BlockView, &VelystFrame, &mut GlyphIndex), Changed<VelystFrame>>,
 ) {
     for (view, frame_ref, mut index) in &mut q {
         let Some(frame) = &frame_ref.0 else { continue };
-        *index = build_glyph_index(
-            frame,
-            &view.source,
-            &view.map,
-            PRELUDE.len(),
-        );
+        *index = build_glyph_index(frame, &view.source, &view.map, PRELUDE.len());
     }
 }
 
@@ -187,15 +165,11 @@ fn main() {
     let transport = match (listen, connect) {
         (Some(addr), _) => Some(
             presence_net::PresenceTransport::listen(&addr)
-                .unwrap_or_else(|e| {
-                    panic!("presence listen {addr}: {e}")
-                }),
+                .unwrap_or_else(|e| panic!("presence listen {addr}: {e}")),
         ),
         (_, Some(addr)) => Some(
             presence_net::PresenceTransport::connect(&addr)
-                .unwrap_or_else(|e| {
-                    panic!("presence connect {addr}: {e}")
-                }),
+                .unwrap_or_else(|e| panic!("presence connect {addr}: {e}")),
         ),
         _ => None,
     };
@@ -218,12 +192,8 @@ fn main() {
             velyst::VelystPlugin,
         ))
         .insert_resource(WinitSettings {
-            focused_mode: UpdateMode::reactive(
-                std::time::Duration::from_secs(5),
-            ),
-            unfocused_mode: UpdateMode::reactive(
-                std::time::Duration::from_secs(60),
-            ),
+            focused_mode: UpdateMode::reactive(std::time::Duration::from_secs(5)),
+            unfocused_mode: UpdateMode::reactive(std::time::Duration::from_secs(60)),
         })
         .insert_resource(EditorDoc::open_or_default(file))
         .init_resource::<EditorState>()
@@ -240,14 +210,8 @@ fn main() {
         .init_resource::<cite_refs::CitePopupStack>()
         .init_resource::<cite_refs::ReferencesPanelOpen>()
         .init_resource::<ImePreedit>()
-        .add_systems(
-            Startup,
-            (setup, durable_sys::spawn_durable_panel),
-        )
-        .add_systems(
-            PreUpdate,
-            (handle_keyboard, handle_mouse, handle_ime),
-        )
+        .add_systems(Startup, (setup, durable_sys::spawn_durable_panel))
+        .add_systems(PreUpdate, (handle_keyboard, handle_mouse, handle_ime))
         .add_systems(
             Update,
             (
@@ -272,14 +236,8 @@ fn main() {
             ),
         )
         .add_systems(Update, autosave)
-        .add_systems(
-            Update,
-            (toggle_presence_overlay, sync_presence).chain(),
-        )
-        .add_systems(
-            Update,
-            sync_presence_overlay.after(sync_presence),
-        )
+        .add_systems(Update, (toggle_presence_overlay, sync_presence).chain())
+        .add_systems(Update, sync_presence_overlay.after(sync_presence))
         .add_systems(
             PostUpdate,
             (build_glyph_indices, draw_overlay)
@@ -301,8 +259,7 @@ struct EditorDoc {
 
 impl EditorDoc {
     fn open_or_default(file: Option<PathBuf>) -> Self {
-        let path =
-            file.unwrap_or_else(|| PathBuf::from("untitled.mathed"));
+        let path = file.unwrap_or_else(|| PathBuf::from("untitled.mathed"));
         let doc = std::fs::read(&path)
             .ok()
             .and_then(|bytes| MathDoc::from_snapshot(&bytes).ok())
@@ -397,9 +354,7 @@ fn sync_presence(
                 "presence: connected to {}, {} peer(s) visible ({:?})",
                 t.peer(),
                 live.len(),
-                live.iter()
-                    .map(|p| p.peer.as_str())
-                    .collect::<Vec<_>>()
+                live.iter().map(|p| p.peer.as_str()).collect::<Vec<_>>()
             );
             *announced = true;
         }
@@ -418,9 +373,7 @@ fn sync_presence(
             info!(
                 "presence: offline demo, {} peer(s) visible ({:?})",
                 live.len(),
-                live.iter()
-                    .map(|p| p.peer.as_str())
-                    .collect::<Vec<_>>()
+                live.iter().map(|p| p.peer.as_str()).collect::<Vec<_>>()
             );
             *announced = true;
         }
@@ -442,10 +395,7 @@ struct PresenceOverlay {
 struct PresenceOverlayRoot;
 
 /// F3 toggles the live-collaborator overlay.
-fn toggle_presence_overlay(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut overlay: ResMut<PresenceOverlay>,
-) {
+fn toggle_presence_overlay(keys: Res<ButtonInput<KeyCode>>, mut overlay: ResMut<PresenceOverlay>) {
     if keys.just_pressed(KeyCode::F3) {
         overlay.visible = !overlay.visible;
     }
@@ -472,10 +422,7 @@ fn sync_presence_overlay(
         Some(t) if t.connected() => {
             format!("presence: connected to {}", t.peer())
         }
-        Some(t) => format!(
-            "presence: listening on {} (no peer yet)",
-            t.local_addr()
-        ),
+        Some(t) => format!("presence: listening on {} (no peer yet)", t.local_addr()),
         None => "presence: offline (demo)".to_string(),
     };
     let now = std::time::SystemTime::now()
@@ -493,10 +440,7 @@ fn sync_presence_overlay(
             None => "away".to_string(),
         };
         let age_s = ((now - p.last_seen_ms) / 1000).max(0);
-        lines.push(format!(
-            "{} · {} · {}s ago",
-            p.name, where_at, age_s
-        ));
+        lines.push(format!("{} · {} · {}s ago", p.name, where_at, age_s));
     }
     if lines.len() == 1 {
         lines.push("(no other peers)".to_string());
@@ -652,10 +596,8 @@ fn handle_keyboard(
     mut clipboard: Local<Option<arboard::Clipboard>>,
 ) {
     let now = time.elapsed_secs_f64();
-    let ctrl = keys.pressed(KeyCode::ControlLeft)
-        || keys.pressed(KeyCode::ControlRight);
-    let shift = keys.pressed(KeyCode::ShiftLeft)
-        || keys.pressed(KeyCode::ShiftRight);
+    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
     state.show_hidden = ctrl && shift;
 
@@ -671,11 +613,7 @@ fn handle_keyboard(
                 Key::Enter => {
                     if let Some(def_idx) = state.rename_def_idx {
                         let new_name = popup_state.input.clone();
-                        let ops = SemanticIndex::plan_rename(
-                            &semantics.0,
-                            def_idx,
-                            &new_name,
-                        );
+                        let ops = SemanticIndex::plan_rename(&semantics.0, def_idx, &new_name);
                         if !ops.is_empty() {
                             editor.doc.replace_many(ops);
                             editor.doc.commit();
@@ -716,19 +654,12 @@ fn handle_keyboard(
             shift,
             alt: false,
         };
-        let Some(cmd) = keymap::keymap(
-            &ev.logical_key,
-            ev.text.as_deref(),
-            mods,
-            searching.active,
-        ) else {
+        let Some(cmd) = keymap::keymap(&ev.logical_key, ev.text.as_deref(), mods, searching.active)
+        else {
             continue;
         };
         // Lazily initialize clipboard when needed.
-        if matches!(
-            cmd,
-            EditorCmd::Cut | EditorCmd::Copy | EditorCmd::Paste
-        ) && clipboard.is_none()
+        if matches!(cmd, EditorCmd::Cut | EditorCmd::Copy | EditorCmd::Paste) && clipboard.is_none()
         {
             *clipboard = arboard::Clipboard::new().ok();
         }
@@ -742,17 +673,11 @@ fn handle_keyboard(
                         searching.state.query.push(c);
                     }
                     let q = searching.state.query.clone();
-                    searching
-                        .state
-                        .update_query(editor.doc.text(), &q);
+                    searching.state.update_query(editor.doc.text(), &q);
                     if let Some(i) = searching.state.current {
-                        state.cursor =
-                            searching.state.matches[i].start;
+                        state.cursor = searching.state.matches[i].start;
                         state.anchor = None;
-                        snap_to_boundary(
-                            editor.doc.text(),
-                            &mut state.cursor,
-                        );
+                        snap_to_boundary(editor.doc.text(), &mut state.cursor);
                         scheduler.note_reveal();
                     }
                     popup_state.input = searching.state.query.clone();
@@ -761,25 +686,17 @@ fn handle_keyboard(
                 EditorCmd::Backspace => {
                     searching.state.query.pop();
                     let q = searching.state.query.clone();
-                    searching
-                        .state
-                        .update_query(editor.doc.text(), &q);
+                    searching.state.update_query(editor.doc.text(), &q);
                     if let Some(i) = searching.state.current {
-                        state.cursor =
-                            searching.state.matches[i].start;
+                        state.cursor = searching.state.matches[i].start;
                         state.anchor = None;
-                        snap_to_boundary(
-                            editor.doc.text(),
-                            &mut state.cursor,
-                        );
+                        snap_to_boundary(editor.doc.text(), &mut state.cursor);
                         scheduler.note_reveal();
                     }
                     popup_state.input = searching.state.query.clone();
                     continue;
                 }
-                EditorCmd::SearchNext
-                | EditorCmd::SearchPrev
-                | EditorCmd::SearchCancel => {}
+                EditorCmd::SearchNext | EditorCmd::SearchPrev | EditorCmd::SearchCancel => {}
                 _ => continue,
             }
         }
@@ -787,90 +704,43 @@ fn handle_keyboard(
         match cmd {
             EditorCmd::InsertText(s) => {
                 if s == "#" {
-                    insert_hash(
-                        &mut editor,
-                        &mut state,
-                        &mut scheduler,
-                        now,
-                    );
+                    insert_hash(&mut editor, &mut state, &mut scheduler, now);
                 } else {
-                    insert_text(
-                        &mut editor,
-                        &mut state,
-                        &s,
-                        &mut scheduler,
-                        now,
-                    );
+                    insert_text(&mut editor, &mut state, &s, &mut scheduler, now);
                 }
                 last_change.0 = Some(now);
             }
             EditorCmd::Newline => {
-                insert_text(
-                    &mut editor,
-                    &mut state,
-                    "\n",
-                    &mut scheduler,
-                    now,
-                );
+                insert_text(&mut editor, &mut state, "\n", &mut scheduler, now);
                 last_change.0 = Some(now);
             }
             EditorCmd::InsertTab => {
-                insert_text(
-                    &mut editor,
-                    &mut state,
-                    "    ",
-                    &mut scheduler,
-                    now,
-                );
+                insert_text(&mut editor, &mut state, "    ", &mut scheduler, now);
                 last_change.0 = Some(now);
             }
             EditorCmd::Backspace => {
                 let sel = state.selection();
                 if let Some(sel) = sel {
-                    delete_range(
-                        &mut editor,
-                        &mut state,
-                        sel,
-                        &mut scheduler,
-                        now,
-                    );
+                    delete_range(&mut editor, &mut state, sel, &mut scheduler, now);
                     last_change.0 = Some(now);
                 } else if state.cursor > 0 {
                     let text = editor.doc.text().to_owned();
                     let start = prev_boundary(&text, state.cursor);
                     let range = start..state.cursor;
-                    delete_range(
-                        &mut editor,
-                        &mut state,
-                        range,
-                        &mut scheduler,
-                        now,
-                    );
+                    delete_range(&mut editor, &mut state, range, &mut scheduler, now);
                     last_change.0 = Some(now);
                 }
             }
             EditorCmd::DeleteForward => {
                 let sel = state.selection();
                 if let Some(sel) = sel {
-                    delete_range(
-                        &mut editor,
-                        &mut state,
-                        sel,
-                        &mut scheduler,
-                        now,
-                    );
+                    delete_range(&mut editor, &mut state, sel, &mut scheduler, now);
                     last_change.0 = Some(now);
                 } else if state.cursor < editor.doc.len() {
                     let text = editor.doc.text().to_owned();
                     let end = next_boundary(&text, state.cursor);
                     let range = state.cursor..end;
-                    delete_range(
-                        &mut editor,
-                        &mut state,
-                        range,
-                        &mut scheduler,
-                        now,
-                    );
+                    delete_range(&mut editor, &mut state, range, &mut scheduler, now);
                     last_change.0 = Some(now);
                 }
             }
@@ -878,41 +748,21 @@ fn handle_keyboard(
                 begin_or_clear_selection(&mut state, extend);
                 let text = editor.doc.text().to_owned();
                 state.cursor = match motion {
-                    Motion::Left => {
-                        prev_boundary(&text, state.cursor)
-                    }
-                    Motion::Right => {
-                        next_boundary(&text, state.cursor)
-                    }
-                    Motion::Up => {
-                        vertical_move(&text, state.cursor, -1)
-                    }
-                    Motion::Down => {
-                        vertical_move(&text, state.cursor, 1)
-                    }
-                    Motion::LineStart => {
-                        line_range(&text, state.cursor).start
-                    }
-                    Motion::LineEnd => {
-                        line_range(&text, state.cursor).end
-                    }
+                    Motion::Left => prev_boundary(&text, state.cursor),
+                    Motion::Right => next_boundary(&text, state.cursor),
+                    Motion::Up => vertical_move(&text, state.cursor, -1),
+                    Motion::Down => vertical_move(&text, state.cursor, 1),
+                    Motion::LineStart => line_range(&text, state.cursor).start,
+                    Motion::LineEnd => line_range(&text, state.cursor).end,
                     Motion::DocStart => 0,
                     Motion::DocEnd => text.len(),
                     Motion::WordLeft => {
                         let atomic = token_ranges(&text);
-                        mathed_core::wordnav::word_boundary_left(
-                            &text,
-                            state.cursor,
-                            &atomic,
-                        )
+                        mathed_core::wordnav::word_boundary_left(&text, state.cursor, &atomic)
                     }
                     Motion::WordRight => {
                         let atomic = token_ranges(&text);
-                        mathed_core::wordnav::word_boundary_right(
-                            &text,
-                            state.cursor,
-                            &atomic,
-                        )
+                        mathed_core::wordnav::word_boundary_right(&text, state.cursor, &atomic)
                     }
                 };
             }
@@ -932,13 +782,7 @@ fn handle_keyboard(
                             warn!("clipboard: {e}");
                         }
                     }
-                    delete_range(
-                        &mut editor,
-                        &mut state,
-                        sel,
-                        &mut scheduler,
-                        now,
-                    );
+                    delete_range(&mut editor, &mut state, sel, &mut scheduler, now);
                     last_change.0 = Some(now);
                 }
             }
@@ -957,13 +801,7 @@ fn handle_keyboard(
                     && let Ok(text) = cb.get_text()
                     && !text.is_empty()
                 {
-                    insert_text(
-                        &mut editor,
-                        &mut state,
-                        &text,
-                        &mut scheduler,
-                        now,
-                    );
+                    insert_text(&mut editor, &mut state, &text, &mut scheduler, now);
                     last_change.0 = Some(now);
                 }
             }
@@ -972,12 +810,7 @@ fn handle_keyboard(
                 let text = editor.doc.text();
                 let s = scan(text);
                 let segs = resolve_segments(&s);
-                let out = to_render_text(
-                    text,
-                    &s,
-                    &segs,
-                    &TransformOptions::default(),
-                );
+                let out = to_render_text(text, &s, &segs, &TransformOptions::default());
                 let full = format!("{PRELUDE}{}", out.text);
                 let path = editor.path.with_extension("typ");
                 match mathed_core::format::export_typ(&full, &path) {
@@ -986,13 +819,7 @@ fn handle_keyboard(
                 }
             }
             EditorCmd::InsertSegment(prop) => {
-                insert_segment(
-                    &mut editor,
-                    &mut state,
-                    prop,
-                    &mut scheduler,
-                    now,
-                );
+                insert_segment(&mut editor, &mut state, prop, &mut scheduler, now);
                 last_change.0 = Some(now);
             }
             EditorCmd::SearchStart => {
@@ -1008,10 +835,7 @@ fn handle_keyboard(
                 if let Some(i) = searching.state.current {
                     state.cursor = searching.state.matches[i].start;
                     state.anchor = None;
-                    snap_to_boundary(
-                        editor.doc.text(),
-                        &mut state.cursor,
-                    );
+                    snap_to_boundary(editor.doc.text(), &mut state.cursor);
                     scheduler.note_reveal();
                 }
             }
@@ -1020,10 +844,7 @@ fn handle_keyboard(
                 if let Some(i) = searching.state.current {
                     state.cursor = searching.state.matches[i].start;
                     state.anchor = None;
-                    snap_to_boundary(
-                        editor.doc.text(),
-                        &mut state.cursor,
-                    );
+                    snap_to_boundary(editor.doc.text(), &mut state.cursor);
                     scheduler.note_reveal();
                 }
             }
@@ -1041,18 +862,10 @@ fn handle_keyboard(
                         // otherwise push (only if the cite exists).
                         let doc = editor.doc.text();
                         let refs =
-                            mathed_core::markers::scan_references(
-                                &mathed_core::markers::scan(doc),
-                            );
-                        let exists = refs
-                            .iter()
-                            .any(|e| e.numbers.contains(&(d as u64)));
+                            mathed_core::markers::scan_references(&mathed_core::markers::scan(doc));
+                        let exists = refs.iter().any(|e| e.numbers.contains(&(d as u64)));
                         if exists {
-                            if let Some(pos) = cite_stack
-                                .0
-                                .iter()
-                                .rposition(|&x| x == d as u32)
-                            {
+                            if let Some(pos) = cite_stack.0.iter().rposition(|&x| x == d as u32) {
                                 cite_stack.0.remove(pos);
                             } else {
                                 cite_stack.0.push(d as u32);
@@ -1067,20 +880,17 @@ fn handle_keyboard(
             }
             EditorCmd::GotoDefinition => {
                 let cursor = state.cursor;
-                if let Some(occ) =
-                    semantics.0.occurrences.iter().find(|o| {
-                        o.resolved.is_some()
-                            && o.range.contains(&cursor)
-                    })
+                if let Some(occ) = semantics
+                    .0
+                    .occurrences
+                    .iter()
+                    .find(|o| o.resolved.is_some() && o.range.contains(&cursor))
                     && let Some(def_idx) = occ.resolved
                     && let Some(def) = semantics.0.defs.get(def_idx)
                 {
                     state.cursor = def.span.start;
                     state.anchor = None;
-                    snap_to_boundary(
-                        editor.doc.text(),
-                        &mut state.cursor,
-                    );
+                    snap_to_boundary(editor.doc.text(), &mut state.cursor);
                     scheduler.note_reveal();
                 }
             }
@@ -1092,19 +902,14 @@ fn handle_keyboard(
                     .iter()
                     .position(|d| {
                         d.span.contains(&cursor)
-                            || d.name_range
-                                .as_ref()
-                                .is_some_and(|r| r.contains(&cursor))
+                            || d.name_range.as_ref().is_some_and(|r| r.contains(&cursor))
                     })
                     .or_else(|| {
                         semantics
                             .0
                             .occurrences
                             .iter()
-                            .find(|o| {
-                                o.resolved.is_some()
-                                    && o.range.contains(&cursor)
-                            })
+                            .find(|o| o.resolved.is_some() && o.range.contains(&cursor))
                             .and_then(|o| o.resolved)
                     });
                 if let Some(idx) = def_idx {
@@ -1149,13 +954,7 @@ fn handle_ime(
             bevy::window::Ime::Commit { value, .. } => {
                 ime.0 = None;
                 if !value.is_empty() {
-                    insert_text(
-                        &mut editor,
-                        &mut state,
-                        value.as_str(),
-                        &mut scheduler,
-                        now,
-                    );
+                    insert_text(&mut editor, &mut state, value.as_str(), &mut scheduler, now);
                     last_change.0 = Some(now);
                 }
             }
@@ -1225,8 +1024,8 @@ fn insert_hash(
         state.anchor = None;
         editor.doc.delete(sel);
     }
-    let token = auto_marker_token(editor.doc.text(), state.cursor)
-        .unwrap_or_else(|| "#".to_owned());
+    let token =
+        auto_marker_token(editor.doc.text(), state.cursor).unwrap_or_else(|| "#".to_owned());
     editor.doc.insert(state.cursor, &token);
     editor.doc.commit();
     state.cursor += token.len();
@@ -1279,30 +1078,18 @@ fn insert_segment(
     notify_doc_changed(scheduler, now);
 }
 
-fn undo(
-    editor: &mut EditorDoc,
-    state: &mut EditorState,
-    scheduler: &mut Scheduler,
-    now: f64,
-) {
+fn undo(editor: &mut EditorDoc, state: &mut EditorState, scheduler: &mut Scheduler, now: f64) {
     if let Some(delta) = editor.doc.undo() {
-        state.cursor = (delta.range.start + delta.inserted.len())
-            .min(editor.doc.len());
+        state.cursor = (delta.range.start + delta.inserted.len()).min(editor.doc.len());
         snap_to_boundary(editor.doc.text(), &mut state.cursor);
         state.anchor = None;
         notify_doc_changed(scheduler, now);
     }
 }
 
-fn redo(
-    editor: &mut EditorDoc,
-    state: &mut EditorState,
-    scheduler: &mut Scheduler,
-    now: f64,
-) {
+fn redo(editor: &mut EditorDoc, state: &mut EditorState, scheduler: &mut Scheduler, now: f64) {
     if let Some(delta) = editor.doc.redo() {
-        state.cursor = (delta.range.start + delta.inserted.len())
-            .min(editor.doc.len());
+        state.cursor = (delta.range.start + delta.inserted.len()).min(editor.doc.len());
         snap_to_boundary(editor.doc.text(), &mut state.cursor);
         state.anchor = None;
         notify_doc_changed(scheduler, now);
@@ -1330,10 +1117,7 @@ fn save(editor: &mut EditorDoc) {
         }
     }
     editor.doc.commit();
-    match mathed_core::format::save_snapshot(
-        &editor.doc,
-        &editor.path,
-    ) {
+    match mathed_core::format::save_snapshot(&editor.doc, &editor.path) {
         Ok(()) => info!("saved {}", editor.path.display()),
         Err(e) => error!("save failed: {e}"),
     }
@@ -1362,8 +1146,7 @@ fn sync_blocks(
     let segments = resolve_segments(&s);
 
     // Detect reveal-only changes.
-    let new_key =
-        (state.cursor, state.selection(), state.show_hidden);
+    let new_key = (state.cursor, state.selection(), state.show_hidden);
     let reveal_changed = new_key != reveal.key;
     if reveal_changed {
         scheduler.note_reveal();
@@ -1386,11 +1169,9 @@ fn sync_blocks(
                 render_outputs.push(&view.render);
             }
         }
-        semantics.0.build_index(
-            text_content,
-            &segments,
-            &render_outputs,
-        );
+        semantics
+            .0
+            .build_index(text_content, &segments, &render_outputs);
     }
 
     let text_content = editor.doc.text();
@@ -1409,24 +1190,20 @@ fn sync_blocks(
         }
 
         // Collect block ids to spawn (avoid borrow conflict).
-        let to_spawn: Vec<(CoreBlockId, std::ops::Range<usize>)> =
-            blocks
-                .index
-                .blocks
-                .iter()
-                .filter(|b| !blocks.entities.contains_key(&b.id))
-                .map(|b| (b.id, b.range.clone()))
-                .collect();
+        let to_spawn: Vec<(CoreBlockId, std::ops::Range<usize>)> = blocks
+            .index
+            .blocks
+            .iter()
+            .filter(|b| !blocks.entities.contains_key(&b.id))
+            .map(|b| (b.id, b.range.clone()))
+            .collect();
 
         for (id, _range) in to_spawn {
             let source = Source::new(
                 FileId::new(RootedPath::new(
                     VirtualRoot::Project,
-                    VirtualPath::new(format!(
-                        "/__block_{}.typ",
-                        id.0
-                    ))
-                    .expect("block virtual path is valid"),
+                    VirtualPath::new(format!("/__block_{}.typ", id.0))
+                        .expect("block virtual path is valid"),
                 )),
                 String::new(),
             );
@@ -1509,8 +1286,7 @@ fn sync_blocks(
         let Some(&entity) = blocks.entities.get(&block.id) else {
             continue;
         };
-        let Ok((mut view, mut content)) = block_q.get_mut(entity)
-        else {
+        let Ok((mut view, mut content)) = block_q.get_mut(entity) else {
             continue;
         };
 
@@ -1526,11 +1302,8 @@ fn sync_blocks(
                 }
             }
             None => {
-                if state.cursor >= block.range.start
-                    && state.cursor <= block.range.end
-                {
-                    std::iter::once(state.cursor..state.cursor)
-                        .collect()
+                if state.cursor >= block.range.start && state.cursor <= block.range.end {
+                    std::iter::once(state.cursor..state.cursor).collect()
                 } else {
                     vec![]
                 }
@@ -1544,13 +1317,7 @@ fn sync_blocks(
             ..Default::default()
         };
 
-        let out = to_render_text_range(
-            text_content,
-            &s,
-            &segments,
-            block.range.clone(),
-            &opts,
-        );
+        let out = to_render_text_range(text_content, &s, &segments, block.range.clone(), &opts);
 
         let new_text = format!("{PRELUDE}{}", out.text);
         if new_text != view.source.text() {
@@ -1576,9 +1343,7 @@ fn handle_mouse(
     mut state: ResMut<EditorState>,
     mut last_click: Local<(f64, usize)>,
 ) {
-    if !mouse.pressed(MouseButton::Left)
-        && !mouse.just_pressed(MouseButton::Left)
-    {
+    if !mouse.pressed(MouseButton::Left) && !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Ok(window) = window_query.single() else {
@@ -1591,16 +1356,11 @@ fn handle_mouse(
     for (node, transform, glyph_idx) in &block_q {
         let origin = node_origin(transform, node);
         let local = cursor_pos - origin;
-        if local.x < 0.0
-            || local.y < 0.0
-            || local.x > node.size.x
-            || local.y > node.size.y
-        {
+        if local.x < 0.0 || local.y < 0.0 || local.x > node.size.x || local.y > node.size.y {
             continue;
         }
 
-        let Some((doc_byte, after)) = glyph_idx.byte_for_point(local)
-        else {
+        let Some((doc_byte, after)) = glyph_idx.byte_for_point(local) else {
             continue;
         };
         let mut doc_byte = doc_byte;
@@ -1618,9 +1378,7 @@ fn handle_mouse(
                 // Double-click: select word at cursor.
                 let text = editor.doc.text();
                 let atomic = token_ranges(text);
-                let r = mathed_core::wordnav::word_range_at(
-                    text, doc_byte, &atomic,
-                );
+                let r = mathed_core::wordnav::word_range_at(text, doc_byte, &atomic);
                 state.anchor = Some(r.start);
                 state.cursor = r.end;
                 // Reset so triple-click doesn't keep selecting.
@@ -1650,10 +1408,7 @@ fn draw_overlay(
     kernel_bridge: Res<kernel_sys::KernelBridge>,
     searching: Res<Searching>,
     block_q: Query<(&ComputedNode, &GlobalTransform, &GlyphIndex)>,
-    root_q: Query<
-        (&ComputedNode, &GlobalTransform),
-        With<PaddedRoot>,
-    >,
+    root_q: Query<(&ComputedNode, &GlobalTransform), With<PaddedRoot>>,
     mut overlay_q: Query<&mut UiVelloScene, With<OverlayLayer>>,
 ) {
     let Ok(mut ui_scene) = overlay_q.single_mut() else {
@@ -1672,18 +1427,15 @@ fn draw_overlay(
         .and_then(|(cn, tf, gi)| {
             let block_origin = node_origin(tf, cn);
             let offset = block_origin - root_origin;
-            gi.caret_for_byte(state.cursor).map(|g| {
-                overlay::CaretGeom {
-                    x: offset.x + g.x,
-                    top: offset.y + g.top,
-                    height: g.height,
-                }
+            gi.caret_for_byte(state.cursor).map(|g| overlay::CaretGeom {
+                x: offset.x + g.x,
+                top: offset.y + g.top,
+                height: g.height,
             })
         });
 
     // Selection rects.
-    let mut sel_rects: Vec<bevy_vello::vello::kurbo::Rect> =
-        Vec::new();
+    let mut sel_rects: Vec<bevy_vello::vello::kurbo::Rect> = Vec::new();
     if let Some(sel) = state.selection() {
         for block in blocks.index.blocks.iter() {
             let cs = sel.start.max(block.range.start);
@@ -1772,9 +1524,7 @@ fn draw_overlay(
         if ks.kind != mathed_core::PropKind::Prob {
             continue;
         }
-        let Some(result) =
-            kernel_bridge.results().get(&ks.span.start)
-        else {
+        let Some(result) = kernel_bridge.results().get(&ks.span.start) else {
             continue;
         };
         for block in blocks.index.blocks.iter() {
@@ -1797,15 +1547,9 @@ fn draw_overlay(
                 r.y0 += offset.y as f64;
                 r.y1 += offset.y as f64;
                 match result {
-                    kernel_sys::KernelResult::Value(_) => {
-                        prob_ok_rects.push(r)
-                    }
-                    kernel_sys::KernelResult::StringValue(_) => {
-                        prob_ok_rects.push(r)
-                    }
-                    kernel_sys::KernelResult::Error { .. } => {
-                        prob_err_rects.push(r)
-                    }
+                    kernel_sys::KernelResult::Value(_) => prob_ok_rects.push(r),
+                    kernel_sys::KernelResult::StringValue(_) => prob_ok_rects.push(r),
+                    kernel_sys::KernelResult::Error { .. } => prob_err_rects.push(r),
                 }
             }
         }
@@ -1815,11 +1559,8 @@ fn draw_overlay(
     // currently-selected one (fill + stroke). The matches are byte
     // ranges maintained by `Searching`; only built while a search
     // is active.
-    let mut search_rects: Vec<bevy_vello::vello::kurbo::Rect> =
-        Vec::new();
-    let mut search_current_rect: Option<
-        bevy_vello::vello::kurbo::Rect,
-    > = None;
+    let mut search_rects: Vec<bevy_vello::vello::kurbo::Rect> = Vec::new();
+    let mut search_current_rect: Option<bevy_vello::vello::kurbo::Rect> = None;
     if searching.active {
         let matches = &searching.state.matches;
         for (i, m) in matches.iter().enumerate() {
@@ -1829,8 +1570,7 @@ fn draw_overlay(
                 if cs >= ce {
                     continue;
                 }
-                let Some(&entity) = blocks.entities.get(&block.id)
-                else {
+                let Some(&entity) = blocks.entities.get(&block.id) else {
                     continue;
                 };
                 let Ok((cn, tf, gi)) = block_q.get(entity) else {
@@ -1865,8 +1605,7 @@ fn draw_overlay(
         prob_err: &prob_err_rects,
     };
 
-    *ui_scene =
-        UiVelloScene::from(overlay::build_overlay_scene(&input));
+    *ui_scene = UiVelloScene::from(overlay::build_overlay_scene(&input));
 }
 
 // ---- text navigation helpers (doc byte space) ----
@@ -1962,10 +1701,7 @@ fn autosave(
         return;
     };
     let now = time.elapsed_secs_f64();
-    if now - t > 2.0
-        && !searching.active
-        && popup_state.kind.is_none()
-    {
+    if now - t > 2.0 && !searching.active && popup_state.kind.is_none() {
         save(&mut editor);
     }
 }

@@ -3,10 +3,7 @@
 use hashbrown::HashMap;
 use imaging::kurbo::Affine;
 use imaging::peniko::{BlendMode, Style};
-use imaging::{
-    ClipRef, Composite, FillRef, GeometryRef, GroupRef, PaintSink,
-    StrokeRef,
-};
+use imaging::{ClipRef, Composite, FillRef, GeometryRef, GroupRef, PaintSink, StrokeRef};
 
 pub mod builder;
 pub mod modifiers;
@@ -21,12 +18,10 @@ use node::*;
 pub mod prelude {
     pub use crate::Kanva;
     pub use crate::builder::KanvaBuilder;
-    pub use crate::modifiers::{
-        GroupModEntry, GroupMods, PathModEntry, PathMods,
-    };
+    pub use crate::modifiers::{GroupModEntry, GroupMods, PathModEntry, PathMods};
     pub use crate::node::{
-        Command, Group, GroupRange, KanvaClip, KanvaFill, KanvaPath,
-        KanvaStroke, NodeIndex, PaintOrder,
+        Command, Group, GroupRange, KanvaClip, KanvaFill, KanvaPath, KanvaStroke, NodeIndex,
+        PaintOrder,
     };
     pub use crate::sink::{GlyphRun, KanvaSink};
 }
@@ -177,10 +172,7 @@ impl Kanva {
     ///
     /// assert_eq!(kanva.get_group_path_range(0).unwrap().len(), 2);
     /// ```
-    pub fn get_group_path_range(
-        &self,
-        group_idx: usize,
-    ) -> Option<core::ops::Range<usize>> {
+    pub fn get_group_path_range(&self, group_idx: usize) -> Option<core::ops::Range<usize>> {
         let range = self.group_cmds.get(group_idx)?;
         let cmds = &self.commands[range.start + 1..range.end];
         let first = cmds.iter().find_map(|c| {
@@ -238,10 +230,7 @@ impl Kanva {
 
     /// Return a cursor for setting per-group field overrides at
     /// `group_idx`.
-    pub fn mod_group(
-        &mut self,
-        group_idx: usize,
-    ) -> GroupModEntry<'_> {
+    pub fn mod_group(&mut self, group_idx: usize) -> GroupModEntry<'_> {
         GroupModEntry::new(&mut self.group_mods, group_idx)
     }
 
@@ -274,9 +263,7 @@ impl Kanva {
                         .unwrap_or(group.transform);
                     group_tf_stack.push(group_tf * parent_tf);
 
-                    let clip = if let Some(clip_mod) =
-                        self.group_mods.clip.get(&idx)
-                    {
+                    let clip = if let Some(clip_mod) = self.group_mods.clip.get(&idx) {
                         clip_mod.as_ref()
                     } else {
                         group.clip.as_ref()
@@ -314,11 +301,9 @@ impl Kanva {
                     // group may turn out to be a Vello bug, in which
                     // case we'd unconditionally
                     // push the group again.
-                    let pushed = clip.is_some()
-                        || composite != Composite::default();
+                    let pushed = clip.is_some() || composite != Composite::default();
                     if pushed {
-                        let mut group_ref =
-                            GroupRef::new().with_composite(composite);
+                        let mut group_ref = GroupRef::new().with_composite(composite);
                         if let Some(c) = clip {
                             group_ref = group_ref.with_clip(c);
                         }
@@ -336,11 +321,7 @@ impl Kanva {
                     let path = &self.paths[idx];
                     let group_tf = *group_tf_stack.last().unwrap();
 
-                    let data = self
-                        .path_mods
-                        .shape
-                        .get(&idx)
-                        .unwrap_or(&path.path);
+                    let data = self.path_mods.shape.get(&idx).unwrap_or(&path.path);
                     let base_tf = self
                         .path_mods
                         .transform
@@ -352,33 +333,19 @@ impl Kanva {
                     // Only open push a group when the alpha < 1.0.
                     // (vello is not good at rendering too many groups
                     // right now)
-                    let alpha = self
-                        .path_mods
-                        .alpha
-                        .get(&idx)
-                        .copied()
-                        .filter(|&a| a < 1.0);
+                    let alpha = self.path_mods.alpha.get(&idx).copied().filter(|&a| a < 1.0);
                     if let Some(a) = alpha {
                         sink.push_group(
-                            GroupRef::new().with_composite(
-                                Composite::new(
-                                    BlendMode::default(),
-                                    a,
-                                ),
-                            ),
+                            GroupRef::new().with_composite(Composite::new(BlendMode::default(), a)),
                         );
                     }
 
-                    let fill = if let Some(fill_mod) =
-                        self.path_mods.fill.get(&idx)
-                    {
+                    let fill = if let Some(fill_mod) = self.path_mods.fill.get(&idx) {
                         fill_mod.as_ref()
                     } else {
                         path.fill.map(|i| &self.fills[i])
                     };
-                    let stroke = if let Some(stroke_mod) =
-                        self.path_mods.stroke.get(&idx)
-                    {
+                    let stroke = if let Some(stroke_mod) = self.path_mods.stroke.get(&idx) {
                         stroke_mod.as_ref()
                     } else {
                         path.stroke.map(|i| &self.strokes[i])
@@ -402,8 +369,7 @@ impl Kanva {
                                 transform: eff_tf,
                                 stroke: &stroke.stroke,
                                 brush: (&stroke.brush).into(),
-                                brush_transform: stroke
-                                    .brush_transform,
+                                brush_transform: stroke.brush_transform,
                                 shape: GeometryRef::Path(data),
                                 composite: stroke.composite,
                             });
@@ -494,23 +460,13 @@ mod tests {
             PaintOrder::default(),
         );
         let kanva = b.build();
-        assert_eq!(
-            kanva.paths().len(),
-            1,
-            "one KanvaPath for both fill+stroke"
-        );
+        assert_eq!(kanva.paths().len(), 1, "one KanvaPath for both fill+stroke");
         let mut scene = Scene::new();
         kanva.render(&mut scene);
         let cmds = scene.commands();
         assert_eq!(cmds.len(), 2, "two draw ops from one path");
-        assert!(
-            matches!(cmds[0], Command::Draw(_)),
-            "first op is Draw"
-        );
-        assert!(
-            matches!(cmds[1], Command::Draw(_)),
-            "second op is Draw"
-        );
+        assert!(matches!(cmds[0], Command::Draw(_)), "first op is Draw");
+        assert!(matches!(cmds[1], Command::Draw(_)), "second op is Draw");
         let Command::Draw(fill_id) = cmds[0] else {
             unreachable!()
         };
@@ -648,10 +604,7 @@ mod tests {
         // but the group transform is still baked into the
         // path.
         let Command::Draw(id) = cmds[0] else {
-            panic!(
-                "expected Command::Draw at index 0, got {:?}",
-                cmds[0]
-            )
+            panic!("expected Command::Draw at index 0, got {:?}", cmds[0])
         };
         let Draw::Fill { transform, .. } = scene.draw_op(id) else {
             panic!("expected Draw::Fill, got {:?}", scene.draw_op(id))
@@ -674,10 +627,7 @@ mod tests {
         let mut scene = Scene::new();
         kanva.render(&mut scene);
         let Command::Draw(id) = scene.commands()[0] else {
-            panic!(
-                "expected Command::Draw, got {:?}",
-                scene.commands()[0]
-            )
+            panic!("expected Command::Draw, got {:?}", scene.commands()[0])
         };
         let Draw::Fill { brush, .. } = scene.draw_op(id) else {
             panic!("expected Draw::Fill, got {:?}", scene.draw_op(id))
@@ -687,8 +637,7 @@ mod tests {
 
     #[test]
     fn render_path_mod_alpha_wraps_group() {
-        let mut kanva =
-            build_fill(&Brush::default(), Affine::IDENTITY);
+        let mut kanva = build_fill(&Brush::default(), Affine::IDENTITY);
         kanva.path_mods.alpha(0, 0.5);
         let mut scene = Scene::new();
         kanva.render(&mut scene);
@@ -705,16 +654,12 @@ mod tests {
     #[test]
     fn render_path_mod_transform() {
         let override_tf = Affine::translate((5.0, 3.0));
-        let mut kanva =
-            build_fill(&Brush::default(), Affine::IDENTITY);
+        let mut kanva = build_fill(&Brush::default(), Affine::IDENTITY);
         kanva.path_mods.transform(0, override_tf);
         let mut scene = Scene::new();
         kanva.render(&mut scene);
         let Command::Draw(id) = scene.commands()[0] else {
-            panic!(
-                "expected Command::Draw, got {:?}",
-                scene.commands()[0]
-            )
+            panic!("expected Command::Draw, got {:?}", scene.commands()[0])
         };
         let Draw::Fill { transform, .. } = scene.draw_op(id) else {
             panic!("expected Draw::Fill, got {:?}", scene.draw_op(id))
@@ -789,10 +734,7 @@ mod tests {
         let mut scene = Scene::new();
         kanva.render(&mut scene);
         let Command::PushGroup(gid) = scene.commands()[0] else {
-            panic!(
-                "expected Command::PushGroup, got {:?}",
-                scene.commands()[0]
-            )
+            panic!("expected Command::PushGroup, got {:?}", scene.commands()[0])
         };
         assert_eq!(scene.group(gid).composite, composite);
     }
@@ -814,10 +756,7 @@ mod tests {
         let mut scene = Scene::new();
         kanva.render(&mut scene);
         let Command::Draw(id) = scene.commands()[0] else {
-            panic!(
-                "expected Command::Draw, got {:?}",
-                scene.commands()[0]
-            )
+            panic!("expected Command::Draw, got {:?}", scene.commands()[0])
         };
         let Draw::Fill {
             brush: first_brush, ..
@@ -833,10 +772,7 @@ mod tests {
         let mut scene = Scene::new();
         kanva.render(&mut scene);
         let Command::Draw(id) = scene.commands()[0] else {
-            panic!(
-                "expected Command::Draw, got {:?}",
-                scene.commands()[0]
-            )
+            panic!("expected Command::Draw, got {:?}", scene.commands()[0])
         };
         let Draw::Fill {
             brush: second_brush,

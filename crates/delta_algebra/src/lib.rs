@@ -47,79 +47,64 @@ impl DeltaAlgebraEngine {
             .await
             .ok()?;
 
-        let shader = device.create_shader_module(
-            wgpu::ShaderModuleDescriptor {
-                label: Some("Delta-Algebra Expansion Shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(
-                    include_str!("expand.wgsl"),
-                )),
-            },
-        );
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Delta-Algebra Expansion Shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("expand.wgsl"))),
+        });
 
-        let bind_group_layout = device.create_bind_group_layout(
-            &wgpu::BindGroupLayoutDescriptor {
-                label: Some("Delta-Algebra Bind Group Layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage {
-                                read_only: true,
-                            },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Delta-Algebra Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage {
-                                read_only: false,
-                            },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            },
-        );
+                    count: None,
+                },
+            ],
+        });
 
-        let pipeline_layout = device.create_pipeline_layout(
-            &wgpu::PipelineLayoutDescriptor {
-                label: Some("Delta-Algebra Pipeline Layout"),
-                // wgpu 29: single bind-group slot, push constants
-                // replaced by `immediate_size` (zero
-                // = no push-constant space).
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            },
-        );
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Delta-Algebra Pipeline Layout"),
+            // wgpu 29: single bind-group slot, push constants
+            // replaced by `immediate_size` (zero
+            // = no push-constant space).
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
 
-        let expand_pipeline = device.create_compute_pipeline(
-            &wgpu::ComputePipelineDescriptor {
-                label: Some("Delta-Algebra Expansion Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("apply_recursion"),
-                compilation_options:
-                    wgpu::PipelineCompilationOptions::default(),
-                cache: None,
-            },
-        );
+        let expand_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Delta-Algebra Expansion Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("apply_recursion"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
 
         Some(Self {
             device,
@@ -147,8 +132,7 @@ impl DeltaAlgebraEngine {
 
         // One pass per operator term (addition)
         for &op in operator_terms {
-            let result =
-                self.execute_monomial(initial_states, op).await;
+            let result = self.execute_monomial(initial_states, op).await;
             all_results.extend(result);
         }
 
@@ -168,87 +152,73 @@ impl DeltaAlgebraEngine {
 
         let input_size = std::mem::size_of_val(input) as u64;
 
-        let input_buf = self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let input_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Delta-Algebra Input Buffer"),
                 contents: bytemuck::cast_slice(input),
                 usage: wgpu::BufferUsages::STORAGE,
-            },
-        );
-
-        let output_buf =
-            self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Delta-Algebra Output Buffer"),
-                size: input_size,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
             });
 
-        let uniform_buf = self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
+        let output_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Delta-Algebra Output Buffer"),
+            size: input_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let uniform_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Delta-Algebra Uniform Buffer"),
                 contents: bytemuck::cast_slice(&[op]),
                 usage: wgpu::BufferUsages::UNIFORM,
-            },
-        );
+            });
 
-        let bind_group = self.device.create_bind_group(
-            &wgpu::BindGroupDescriptor {
-                label: Some("Delta-Algebra Bind Group"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: input_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: output_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: uniform_buf.as_entire_binding(),
-                    },
-                ],
-            },
-        );
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Delta-Algebra Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+            ],
+        });
 
-        let mut encoder = self.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Delta-Algebra Encoder"),
-            },
-        );
+            });
 
         {
-            let mut cpass = encoder.begin_compute_pass(
-                &wgpu::ComputePassDescriptor {
-                    label: Some("Delta-Algebra Compute Pass"),
-                    timestamp_writes: None,
-                },
-            );
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Delta-Algebra Compute Pass"),
+                timestamp_writes: None,
+            });
             cpass.set_pipeline(&self.expand_pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroups = (input.len() as u32).div_ceil(256);
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
 
-        let staging_buf =
-            self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Delta-Algebra Staging Buffer"),
-                size: input_size,
-                usage: wgpu::BufferUsages::MAP_READ
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+        let staging_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Delta-Algebra Staging Buffer"),
+            size: input_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
-        encoder.copy_buffer_to_buffer(
-            &output_buf,
-            0,
-            &staging_buf,
-            0,
-            input_size,
-        );
+        encoder.copy_buffer_to_buffer(&output_buf, 0, &staging_buf, 0, input_size);
         self.queue.submit(Some(encoder.finish()));
 
         // Readback
@@ -265,25 +235,19 @@ impl DeltaAlgebraEngine {
             .expect("Buffer mapping failed");
 
         let data = buffer_slice.get_mapped_range();
-        let result: Vec<HermiteState> =
-            bytemuck::cast_slice(&data).to_vec();
+        let result: Vec<HermiteState> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging_buf.unmap();
 
         // Filter out "dead" states (zero amplitude)
         result
             .into_iter()
-            .filter(|s| {
-                s.coeff_re.abs() > 1e-12 || s.coeff_im.abs() > 1e-12
-            })
+            .filter(|s| s.coeff_re.abs() > 1e-12 || s.coeff_im.abs() > 1e-12)
             .collect()
     }
 
     /// Aggregate states with identical quantum numbers.
-    fn aggregate_states(
-        &self,
-        mut states: Vec<HermiteState>,
-    ) -> Vec<HermiteState> {
+    fn aggregate_states(&self, mut states: Vec<HermiteState>) -> Vec<HermiteState> {
         if states.is_empty() {
             return states;
         }
@@ -299,17 +263,13 @@ impl DeltaAlgebraEngine {
                     current.coeff_re += next.coeff_re;
                     current.coeff_im += next.coeff_im;
                 } else {
-                    if current.coeff_re.abs() > 1e-12
-                        || current.coeff_im.abs() > 1e-12
-                    {
+                    if current.coeff_re.abs() > 1e-12 || current.coeff_im.abs() > 1e-12 {
                         merged.push(current);
                     }
                     current = *next;
                 }
             }
-            if current.coeff_re.abs() > 1e-12
-                || current.coeff_im.abs() > 1e-12
-            {
+            if current.coeff_re.abs() > 1e-12 || current.coeff_im.abs() > 1e-12 {
                 merged.push(current);
             }
         }
@@ -318,11 +278,7 @@ impl DeltaAlgebraEngine {
     }
 
     /// Computes the exact inner product <Bra | Ket>.
-    pub fn inner_product(
-        &self,
-        bra: &[HermiteState],
-        ket: &[HermiteState],
-    ) -> (f32, f32) {
+    pub fn inner_product(&self, bra: &[HermiteState], ket: &[HermiteState]) -> (f32, f32) {
         // Simple sparse dot product: sum(bra_coeff* * ket_coeff)
         // Since basis is sorted, we can use dual pointers.
         let mut bra_sorted = bra.to_vec();
@@ -344,10 +300,8 @@ impl DeltaAlgebraEngine {
             if b_key == k_key {
                 // (br - i*bi) * (kr + i*ki) = (br*kr + bi*ki) +
                 // i*(br*ki - bi*kr)
-                total_re +=
-                    b.coeff_re * k.coeff_re + b.coeff_im * k.coeff_im;
-                total_im +=
-                    b.coeff_re * k.coeff_im - b.coeff_im * k.coeff_re;
+                total_re += b.coeff_re * k.coeff_re + b.coeff_im * k.coeff_im;
+                total_im += b.coeff_re * k.coeff_im - b.coeff_im * k.coeff_re;
                 b_idx += 1;
                 k_idx += 1;
             } else if b_key < k_key {
@@ -364,9 +318,7 @@ impl DeltaAlgebraEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reference::{
-        apply_operator_reference, inner_product_reference,
-    };
+    use crate::reference::{apply_operator_reference, inner_product_reference};
 
     /// Build the engine, skipping the test (with a clear message)
     /// when no GPU adapter is available — the CI-without-GPU
@@ -376,9 +328,7 @@ mod tests {
         match DeltaAlgebraEngine::try_new().await {
             Some(engine) => Some(engine),
             None => {
-                eprintln!(
-                    "SKIP: no wgpu adapter available — GPU test skipped"
-                );
+                eprintln!("SKIP: no wgpu adapter available — GPU test skipped");
                 None
             }
         }
@@ -394,8 +344,7 @@ mod tests {
         let vac = vec![HermiteState::vacuum()];
 
         // 1. Apply a†_0: |0> -> |1>
-        let op_create =
-            vec![OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0)];
+        let op_create = vec![OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0)];
         let state_1 = engine.apply_operator(&vac, &op_create).await;
 
         assert_eq!(state_1.len(), 1);
@@ -404,14 +353,8 @@ mod tests {
         assert!((state_1[0].coeff_re - 1.0).abs() < 1e-6);
 
         // 2. Apply a_0 on |1>: |1> -> |0>
-        let op_annihilate = vec![OperatorTerm::new(
-            OpType::Annihilation,
-            0,
-            1.0,
-            0.0,
-        )];
-        let state_0 =
-            engine.apply_operator(&state_1, &op_annihilate).await;
+        let op_annihilate = vec![OperatorTerm::new(OpType::Annihilation, 0, 1.0, 0.0)];
+        let state_0 = engine.apply_operator(&state_1, &op_annihilate).await;
 
         assert_eq!(state_0.len(), 1);
         assert_eq!(state_0[0].n, [0, 0, 0, 0]);
@@ -419,8 +362,7 @@ mod tests {
         assert!((state_0[0].coeff_re - 1.0).abs() < 1e-6);
 
         // 3. Apply a_0 on |0>: should be annihilated (empty result)
-        let state_null =
-            engine.apply_operator(&state_0, &op_annihilate).await;
+        let state_null = engine.apply_operator(&state_0, &op_annihilate).await;
         assert!(state_null.is_empty());
     }
 
@@ -480,8 +422,7 @@ mod tests {
                 terms,
             );
             assert!(
-                (g.coeff_re - c.coeff_re).abs() < 1e-5
-                    && (g.coeff_im - c.coeff_im).abs() < 1e-5,
+                (g.coeff_re - c.coeff_re).abs() < 1e-5 && (g.coeff_im - c.coeff_im).abs() < 1e-5,
                 "amplitude mismatch: gpu=({}, {}) cpu=({}, {}) for terms {:?}",
                 g.coeff_re,
                 g.coeff_im,
@@ -498,8 +439,7 @@ mod tests {
             return;
         };
         let vac = vec![HermiteState::vacuum()];
-        let excited =
-            vec![HermiteState::new([2, 1, 0, 3], 0.5, -0.25)];
+        let excited = vec![HermiteState::new([2, 1, 0, 3], 0.5, -0.25)];
 
         for dim in 0..4 {
             differential_case(
@@ -511,12 +451,7 @@ mod tests {
             differential_case(
                 &engine,
                 &excited,
-                &[OperatorTerm::new(
-                    OpType::Annihilation,
-                    dim,
-                    0.7,
-                    0.3,
-                )],
+                &[OperatorTerm::new(OpType::Annihilation, dim, 0.7, 0.3)],
             )
             .await;
             differential_case(
@@ -534,34 +469,13 @@ mod tests {
             return;
         };
         let vac = vec![HermiteState::vacuum()];
-        let excited =
-            vec![HermiteState::new([3, 0, 0, 0], 0.25, 0.5)];
+        let excited = vec![HermiteState::new([3, 0, 0, 0], 0.25, 0.5)];
 
         for dim in 0..4 {
-            differential_case(
-                &engine,
-                &vac,
-                &OperatorTerm::position(dim, 1.0),
-            )
-            .await;
-            differential_case(
-                &engine,
-                &excited,
-                &OperatorTerm::position(dim, 2.0),
-            )
-            .await;
-            differential_case(
-                &engine,
-                &vac,
-                &OperatorTerm::momentum(dim, 1.0),
-            )
-            .await;
-            differential_case(
-                &engine,
-                &excited,
-                &OperatorTerm::momentum(dim, 1.5),
-            )
-            .await;
+            differential_case(&engine, &vac, &OperatorTerm::position(dim, 1.0)).await;
+            differential_case(&engine, &excited, &OperatorTerm::position(dim, 2.0)).await;
+            differential_case(&engine, &vac, &OperatorTerm::momentum(dim, 1.0)).await;
+            differential_case(&engine, &excited, &OperatorTerm::momentum(dim, 1.5)).await;
         }
     }
 
@@ -574,18 +488,8 @@ mod tests {
         let excited = vec![HermiteState::new([4, 0, 0, 0], 1.0, 1.0)];
 
         for dim in 0..4 {
-            differential_case(
-                &engine,
-                &vac,
-                &OperatorTerm::number_op(dim),
-            )
-            .await;
-            differential_case(
-                &engine,
-                &excited,
-                &OperatorTerm::number_op(dim),
-            )
-            .await;
+            differential_case(&engine, &vac, &OperatorTerm::number_op(dim)).await;
+            differential_case(&engine, &excited, &OperatorTerm::number_op(dim)).await;
         }
     }
 
@@ -614,22 +518,11 @@ mod tests {
         };
         let vac = vec![HermiteState::vacuum()];
         for dim in 0..4 {
-            let terms = [OperatorTerm::new(
-                OpType::Annihilation,
-                dim,
-                1.0,
-                0.0,
-            )];
+            let terms = [OperatorTerm::new(OpType::Annihilation, dim, 1.0, 0.0)];
             let gpu = engine.apply_operator(&vac, &terms).await;
             let cpu = apply_operator_reference(&vac, &terms);
-            assert!(
-                gpu.is_empty(),
-                "annihilation on vacuum must vanish on GPU"
-            );
-            assert!(
-                cpu.is_empty(),
-                "annihilation on vacuum must vanish on CPU"
-            );
+            assert!(gpu.is_empty(), "annihilation on vacuum must vanish on GPU");
+            assert!(cpu.is_empty(), "annihilation on vacuum must vanish on CPU");
         }
     }
 

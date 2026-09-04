@@ -114,35 +114,20 @@ fn extra_literal(seg: &Segment) -> Option<String> {
 /// `seg.prop` is consulted for the `Statement` family so theorems,
 /// lemmas and axioms keep their distinct wording even though they
 /// share a [`PropKind`].
-pub fn describe_segment(
-    seg: &Segment,
-    content: &str,
-) -> (AccessRole, String) {
+pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
     let content = content.trim();
     let name = extra_literal(seg);
     match seg.kind {
-        PropKind::Bold => {
-            (AccessRole::Emphasis, format!("bold {content}"))
-        }
-        PropKind::Italic => {
-            (AccessRole::Emphasis, format!("italic {content}"))
-        }
-        PropKind::Underline => {
-            (AccessRole::Emphasis, format!("underlined {content}"))
-        }
-        PropKind::Function => {
-            (AccessRole::Function, format!("function {content}"))
-        }
+        PropKind::Bold => (AccessRole::Emphasis, format!("bold {content}")),
+        PropKind::Italic => (AccessRole::Emphasis, format!("italic {content}")),
+        PropKind::Underline => (AccessRole::Emphasis, format!("underlined {content}")),
+        PropKind::Function => (AccessRole::Function, format!("function {content}")),
         PropKind::Definition => {
             let n = name.as_deref().unwrap_or(content);
             (AccessRole::Definition, format!("definition of {n}"))
         }
-        PropKind::Variable => {
-            (AccessRole::Variable, format!("variable {content}"))
-        }
-        PropKind::Reference => {
-            (AccessRole::Reference, format!("reference to {content}"))
-        }
+        PropKind::Variable => (AccessRole::Variable, format!("variable {content}")),
+        PropKind::Reference => (AccessRole::Reference, format!("reference to {content}")),
         PropKind::Statement => {
             let (role, kw) = match seg.prop.as_str() {
                 "theorem" => (AccessRole::Theorem, "theorem"),
@@ -152,18 +137,10 @@ pub fn describe_segment(
             };
             (role, format!("{kw}: {content}"))
         }
-        PropKind::Model => {
-            (AccessRole::Model, format!("model: {content}"))
-        }
-        PropKind::Prior => {
-            (AccessRole::Prior, format!("prior: {content}"))
-        }
-        PropKind::Solver => {
-            (AccessRole::Solver, format!("solver: {content}"))
-        }
-        PropKind::Event => {
-            (AccessRole::Event, format!("event: {content}"))
-        }
+        PropKind::Model => (AccessRole::Model, format!("model: {content}")),
+        PropKind::Prior => (AccessRole::Prior, format!("prior: {content}")),
+        PropKind::Solver => (AccessRole::Solver, format!("solver: {content}")),
+        PropKind::Event => (AccessRole::Event, format!("event: {content}")),
         PropKind::Prob => {
             let lead = match &name {
                 Some(n) => format!("probability {n}"),
@@ -171,9 +148,7 @@ pub fn describe_segment(
             };
             (AccessRole::Probability, format!("{lead} of {content}"))
         }
-        PropKind::Translator => {
-            (AccessRole::Translator, format!("translator: {content}"))
-        }
+        PropKind::Translator => (AccessRole::Translator, format!("translator: {content}")),
         PropKind::Bibliography => {
             let lead = match &name {
                 Some(n) => format!("bibliography {n}"),
@@ -181,25 +156,15 @@ pub fn describe_segment(
             };
             (AccessRole::Bibliography, lead)
         }
-        PropKind::Cite => {
-            (AccessRole::Citation, format!("citation: {content}"))
-        }
-        PropKind::Did => {
-            (AccessRole::Math, format!("DID: {content}"))
-        }
-        PropKind::Content => {
-            (AccessRole::Math, format!("content: {content}"))
-        }
-        PropKind::Resolve => {
-            (AccessRole::Math, format!("resolve: {content}"))
-        }
+        PropKind::Cite => (AccessRole::Citation, format!("citation: {content}")),
+        PropKind::Did => (AccessRole::Math, format!("DID: {content}")),
+        PropKind::Content => (AccessRole::Math, format!("content: {content}")),
+        PropKind::Resolve => (AccessRole::Math, format!("resolve: {content}")),
         PropKind::Skill => {
             let n = name.as_deref().unwrap_or(content);
             (AccessRole::Math, format!("skill: {n}"))
         }
-        PropKind::Layout => {
-            (AccessRole::Math, format!("layout claim: {content}"))
-        }
+        PropKind::Layout => (AccessRole::Math, format!("layout claim: {content}")),
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }
@@ -222,11 +187,7 @@ pub fn build_access_nodes(
         let Some(span) = seg.span.clone() else {
             continue;
         };
-        let content = doc_text
-            .get(span.clone())
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let content = doc_text.get(span.clone()).unwrap_or("").trim().to_string();
         let (role, label) = describe_segment(seg, &content);
         nodes.push(AccessNode {
             role,
@@ -247,9 +208,7 @@ pub fn build_access_nodes(
         }
     }
 
-    nodes.sort_by_key(|n| {
-        n.range.as_ref().map(|r| r.start).unwrap_or(usize::MAX)
-    });
+    nodes.sort_by_key(|n| n.range.as_ref().map(|r| r.start).unwrap_or(usize::MAX));
     nodes
 }
 
@@ -262,12 +221,7 @@ mod tests {
     fn nodes_for(doc: &str) -> Vec<AccessNode> {
         let scan = scan(doc);
         let segments = resolve_segments(&scan);
-        let render = to_render_text(
-            doc,
-            &scan,
-            &segments,
-            &TransformOptions::default(),
-        );
+        let render = to_render_text(doc, &scan, &segments, &TransformOptions::default());
         let mut idx = SemanticIndex::default();
         idx.build_index(doc, &segments, &[&render]);
         build_access_nodes(doc, &segments, &idx)
@@ -352,8 +306,11 @@ mod tests {
                    #3 n(0) == 1 #4 \\prob(#3,#4,heads)";
         let nodes = nodes_for(doc);
         // Model + Prob segments are described.
-        assert!(nodes.iter().any(|n| n.role == AccessRole::Model
-            && n.label == "model: harmonic_chain(g: 0.5)"));
+        assert!(
+            nodes
+                .iter()
+                .any(|n| n.role == AccessRole::Model && n.label == "model: harmonic_chain(g: 0.5)")
+        );
         assert!(
             nodes.iter().any(|n| n.role == AccessRole::Probability
                 && n.label == "probability heads of n(0) == 1")
@@ -373,8 +330,9 @@ mod tests {
         let doc = "#1 $norm$ #2 \\def(#1,#2, norm)\n\n$foo$";
         let nodes = nodes_for(doc);
         assert!(
-            nodes.iter().any(|n| n.role == AccessRole::Reference
-                && n.label == "unresolved reference foo")
+            nodes
+                .iter()
+                .any(|n| n.role == AccessRole::Reference && n.label == "unresolved reference foo")
         );
     }
 }

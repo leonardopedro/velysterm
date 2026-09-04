@@ -28,8 +28,7 @@ fn eval_source(
 
     for asset_event in evr_asset_event.read() {
         match asset_event {
-            AssetEvent::Added { id }
-            | AssetEvent::Modified { id } => {
+            AssetEvent::Added { id } | AssetEvent::Modified { id } => {
                 let Some(source) = sources.get(*id) else {
                     continue;
                 };
@@ -37,8 +36,7 @@ fn eval_source(
                 // Reset the file slots if this is the first
                 // compilation in this frame.
                 if !reset {
-                    let mut file_slots =
-                        world.file_slots.lock().unwrap();
+                    let mut file_slots = world.file_slots.lock().unwrap();
                     for slot in file_slots.values_mut() {
                         slot.reset()
                     }
@@ -49,8 +47,7 @@ fn eval_source(
                     modules.insert(*id, module);
                 }
             }
-            AssetEvent::Removed { id }
-            | AssetEvent::Unused { id } => {
+            AssetEvent::Removed { id } | AssetEvent::Unused { id } => {
                 modules.remove(id);
             }
             AssetEvent::LoadedWithDependencies { .. } => {}
@@ -88,12 +85,8 @@ impl AssetLoader for VelystSourceLoader {
         let source = Source::new(
             FileId::new(RootedPath::new(
                 typst::syntax::VirtualRoot::Project,
-                VirtualPath::new(&path).map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        e,
-                    )
-                })?,
+                VirtualPath::new(&path)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?,
             )),
             text,
         );

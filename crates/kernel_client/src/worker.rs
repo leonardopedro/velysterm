@@ -60,19 +60,14 @@ impl KernelWorker {
                 break;
             }
             let block_id = req.block_id();
-            let outcome = std::panic::catch_unwind(
-                std::panic::AssertUnwindSafe(|| self.handle(req)),
-            );
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.handle(req)));
             if let Err(payload) = outcome {
                 let reason = payload
                     .downcast_ref::<&str>()
                     .map(|s| (*s).to_string())
-                    .or_else(|| {
-                        payload.downcast_ref::<String>().cloned()
-                    })
-                    .unwrap_or_else(|| {
-                        "(non-string panic payload)".to_string()
-                    });
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "(non-string panic payload)".to_string());
                 let msg = format!(
                     "kernel worker panicked while handling a request: {reason} \
                      (internal client bug; the worker stays alive for \
@@ -82,11 +77,7 @@ impl KernelWorker {
                     Some(id) => {
                         let _ = self.tx.send(BlockResponse::Error(
                             id,
-                            Diagnostic::new(
-                                Code::INTERNAL,
-                                msg,
-                                Severity::Error,
-                            ),
+                            Diagnostic::new(Code::INTERNAL, msg, Severity::Error),
                         ));
                     }
                     None => eprintln!("kernel_client worker: {msg}"),
@@ -100,38 +91,27 @@ impl KernelWorker {
     /// instead of killing the worker thread (see [`Self::run`]).
     fn handle(&mut self, req: KernelRequest) {
         match req {
-            KernelRequest::DefineModel { block_id, spec } => {
-                match Session::new(&spec) {
-                    Ok(session) => {
-                        self.sessions.insert(block_id, session);
-                        let _ = self
-                            .tx
-                            .send(BlockResponse::Success(block_id));
-                    }
-                    Err(e) => {
-                        let _ = self.tx.send(BlockResponse::Error(
-                            block_id,
-                            e.to_diagnostic(),
-                        ));
-                    }
+            KernelRequest::DefineModel { block_id, spec } => match Session::new(&spec) {
+                Ok(session) => {
+                    self.sessions.insert(block_id, session);
+                    let _ = self.tx.send(BlockResponse::Success(block_id));
                 }
-            }
+                Err(e) => {
+                    let _ = self
+                        .tx
+                        .send(BlockResponse::Error(block_id, e.to_diagnostic()));
+                }
+            },
             KernelRequest::Evolve { block_id, t } => {
-                if let Some(session) =
-                    self.sessions.get_mut(&block_id)
-                {
+                if let Some(session) = self.sessions.get_mut(&block_id) {
                     match session.evolve(t) {
                         Ok(_) => {
-                            let _ = self.tx.send(
-                                BlockResponse::Success(block_id),
-                            );
+                            let _ = self.tx.send(BlockResponse::Success(block_id));
                         }
                         Err(e) => {
-                            let _ =
-                                self.tx.send(BlockResponse::Error(
-                                    block_id,
-                                    e.to_diagnostic(),
-                                ));
+                            let _ = self
+                                .tx
+                                .send(BlockResponse::Error(block_id, e.to_diagnostic()));
                         }
                     }
                 } else {
@@ -144,40 +124,26 @@ impl KernelWorker {
                 event_json,
             } => {
                 if let Some(session) = self.sessions.get(&model_id) {
-                    match serde_json::from_str::<
-                        unfer_protocol::EventPredicate,
-                    >(&event_json)
-                    {
-                        Ok(pred) => {
-                            match session.probability(&pred) {
-                                Ok(p) => {
-                                    let _ = self.tx.send(
-                                        BlockResponse::Value(
-                                            block_id, p,
-                                        ),
-                                    );
-                                }
-                                Err(e) => {
-                                    let _ = self.tx.send(
-                                        BlockResponse::Error(
-                                            block_id,
-                                            e.to_diagnostic(),
-                                        ),
-                                    );
-                                }
+                    match serde_json::from_str::<unfer_protocol::EventPredicate>(&event_json) {
+                        Ok(pred) => match session.probability(&pred) {
+                            Ok(p) => {
+                                let _ = self.tx.send(BlockResponse::Value(block_id, p));
                             }
-                        }
+                            Err(e) => {
+                                let _ = self
+                                    .tx
+                                    .send(BlockResponse::Error(block_id, e.to_diagnostic()));
+                            }
+                        },
                         Err(_) => {
-                            let _ =
-                                self.tx.send(BlockResponse::Error(
-                                    block_id,
-                                    Diagnostic::new(
-                                        Code(1003),
-                                        "Invalid event JSON"
-                                            .to_string(),
-                                        Severity::Error,
-                                    ),
-                                ));
+                            let _ = self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code(1003),
+                                    "Invalid event JSON".to_string(),
+                                    Severity::Error,
+                                ),
+                            ));
                         }
                     }
                 } else {
@@ -189,39 +155,27 @@ impl KernelWorker {
                 block_id,
                 event_json,
             } => {
-                if let Some(session) =
-                    self.sessions.get_mut(&model_id)
-                {
-                    match serde_json::from_str::<
-                        unfer_protocol::EventPredicate,
-                    >(&event_json)
-                    {
+                if let Some(session) = self.sessions.get_mut(&model_id) {
+                    match serde_json::from_str::<unfer_protocol::EventPredicate>(&event_json) {
                         Ok(pred) => match session.condition(&pred) {
                             Ok(p) => {
-                                let _ = self.tx.send(
-                                    BlockResponse::Value(block_id, p),
-                                );
+                                let _ = self.tx.send(BlockResponse::Value(block_id, p));
                             }
                             Err(e) => {
-                                let _ = self.tx.send(
-                                    BlockResponse::Error(
-                                        block_id,
-                                        e.to_diagnostic(),
-                                    ),
-                                );
+                                let _ = self
+                                    .tx
+                                    .send(BlockResponse::Error(block_id, e.to_diagnostic()));
                             }
                         },
                         Err(_) => {
-                            let _ =
-                                self.tx.send(BlockResponse::Error(
-                                    block_id,
-                                    Diagnostic::new(
-                                        Code(1003),
-                                        "Invalid event JSON"
-                                            .to_string(),
-                                        Severity::Error,
-                                    ),
-                                ));
+                            let _ = self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code(1003),
+                                    "Invalid event JSON".to_string(),
+                                    Severity::Error,
+                                ),
+                            ));
                         }
                     }
                 } else {
@@ -230,18 +184,14 @@ impl KernelWorker {
             }
             KernelRequest::CloseModel { block_id } => {
                 if self.sessions.remove(&block_id).is_some() {
-                    let _ = self
-                        .tx
-                        .send(BlockResponse::Success(block_id));
+                    let _ = self.tx.send(BlockResponse::Success(block_id));
                 } else {
                     let _ = self.tx.send(Self::bad_handle(block_id));
                 }
             }
             KernelRequest::CloseModelById { model_id } => {
                 if self.sessions.remove(&model_id).is_some() {
-                    let _ = self
-                        .tx
-                        .send(BlockResponse::Success(model_id));
+                    let _ = self.tx.send(BlockResponse::Success(model_id));
                 } else {
                     let _ = self.tx.send(Self::bad_handle(model_id));
                 }
@@ -250,16 +200,11 @@ impl KernelWorker {
                 block_id,
                 service_endpoint,
             } => {
-                let mut mgr = unfer_identity::DidManager::new(
-                    &mut self.consensus,
-                );
-                match mgr.create_did(&self.keypair, service_endpoint)
-                {
+                let mut mgr = unfer_identity::DidManager::new(&mut self.consensus);
+                match mgr.create_did(&self.keypair, service_endpoint) {
                     Ok(did) => {
                         self.did = Some(did.clone());
-                        let _ = self.tx.send(
-                            BlockResponse::StringValue(block_id, did),
-                        );
+                        let _ = self.tx.send(BlockResponse::StringValue(block_id, did));
                     }
                     Err(e) => {
                         let _ = self.tx.send(BlockResponse::Error(
@@ -280,67 +225,49 @@ impl KernelWorker {
                 display_name,
             } => {
                 let kp = self.keypair.clone();
-                let mut pub_ = unfer_data::DataPublisher::new(
-                    &mut self.consensus,
-                );
-                match pub_.publish(
-                    &kp,
-                    &data,
-                    &mime_type,
-                    display_name.as_deref(),
-                ) {
+                let mut pub_ = unfer_data::DataPublisher::new(&mut self.consensus);
+                match pub_.publish(&kp, &data, &mime_type, display_name.as_deref()) {
                     Ok(content_ref) => {
-                        let _ =
-                            self.tx.send(BlockResponse::StringValue(
-                                block_id,
-                                content_ref.cid,
-                            ));
+                        let _ = self
+                            .tx
+                            .send(BlockResponse::StringValue(block_id, content_ref.cid));
                     }
                     Err(e) => {
                         let _ = self.tx.send(BlockResponse::Error(
                             block_id,
                             Diagnostic::new(
                                 Code(6002),
-                                format!(
-                                    "content publish failed: {e}"
-                                ),
+                                format!("content publish failed: {e}"),
                                 Severity::Error,
                             ),
                         ));
                     }
                 }
             }
-            KernelRequest::ContentResolve { block_id, cid } => {
-                match self.consensus.content(&cid) {
-                    Some(content_ref) => {
-                        let _ =
-                            self.tx.send(BlockResponse::StringValue(
-                                block_id,
-                                content_ref.cid.clone(),
-                            ));
-                    }
-                    None => {
-                        let _ = self.tx.send(BlockResponse::Error(
-                            block_id,
-                            Diagnostic::new(
-                                Code(6003),
-                                format!("content not found: {cid}"),
-                                Severity::Error,
-                            ),
-                        ));
-                    }
+            KernelRequest::ContentResolve { block_id, cid } => match self.consensus.content(&cid) {
+                Some(content_ref) => {
+                    let _ = self.tx.send(BlockResponse::StringValue(
+                        block_id,
+                        content_ref.cid.clone(),
+                    ));
                 }
-            }
+                None => {
+                    let _ = self.tx.send(BlockResponse::Error(
+                        block_id,
+                        Diagnostic::new(
+                            Code(6003),
+                            format!("content not found: {cid}"),
+                            Severity::Error,
+                        ),
+                    ));
+                }
+            },
             KernelRequest::Shutdown => {
-                unreachable!(
-                    "run() breaks on Shutdown before dispatching"
-                )
+                unreachable!("run() breaks on Shutdown before dispatching")
             }
             #[cfg(test)]
             KernelRequest::PanicTest { .. } => {
-                panic!(
-                    "worker panic injected by a PanicTest request (test only)"
-                )
+                panic!("worker panic injected by a PanicTest request (test only)")
             }
         }
     }
@@ -416,14 +343,10 @@ mod tests {
         let resp = h.send(KernelRequest::PanicTest { block_id: 42 });
         match resp {
             BlockResponse::Error(id, diag) => {
-                assert_eq!(
-                    id, 42,
-                    "the panicked request must be answered"
-                );
+                assert_eq!(id, 42, "the panicked request must be answered");
                 assert_eq!(diag.code, Code::INTERNAL);
                 assert!(
-                    diag.message
-                        .contains("injected by a PanicTest request"),
+                    diag.message.contains("injected by a PanicTest request"),
                     "message must carry the panic payload: {}",
                     diag.message
                 );
@@ -433,9 +356,7 @@ mod tests {
                     diag.message
                 );
             }
-            _ => panic!(
-                "expected Error for the panicked request, got {resp:?}"
-            ),
+            _ => panic!("expected Error for the panicked request, got {resp:?}"),
         }
         // The worker must have survived the panic: a later request
         // still reaches the session table (bad-handle answer
@@ -449,9 +370,7 @@ mod tests {
                 assert_eq!(id, 999);
                 assert_eq!(diag.code, Code(1004));
             }
-            _ => panic!(
-                "expected Error for unknown model, got {resp:?}"
-            ),
+            _ => panic!("expected Error for unknown model, got {resp:?}"),
         }
     }
 
@@ -497,8 +416,7 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def =
-            h.send(KernelRequest::DefineModel { block_id: 1, spec });
+        let def = h.send(KernelRequest::DefineModel { block_id: 1, spec });
         assert!(matches!(def, BlockResponse::Success(1)));
 
         let prob = h.send(KernelRequest::Probability {
@@ -523,8 +441,7 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def =
-            h.send(KernelRequest::DefineModel { block_id: 1, spec });
+        let def = h.send(KernelRequest::DefineModel { block_id: 1, spec });
         assert!(matches!(def, BlockResponse::Success(1)));
 
         let cond = h.send(KernelRequest::Condition {
@@ -549,8 +466,7 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def =
-            h.send(KernelRequest::DefineModel { block_id: 10, spec });
+        let def = h.send(KernelRequest::DefineModel { block_id: 10, spec });
         assert!(matches!(def, BlockResponse::Success(10)));
 
         // model_id=10 (session), block_id=20 (condition block).
@@ -561,10 +477,7 @@ mod tests {
         });
         match cond {
             BlockResponse::Value(id, p) => {
-                assert_eq!(
-                    id, 20,
-                    "response keyed by block_id, not model_id"
-                );
+                assert_eq!(id, 20, "response keyed by block_id, not model_id");
                 assert!((p - 1.0).abs() < 1e-6, "vacuum prior → P=1");
             }
             _ => panic!("expected Value, got {:?}", cond),
@@ -579,8 +492,7 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def =
-            h.send(KernelRequest::DefineModel { block_id: 10, spec });
+        let def = h.send(KernelRequest::DefineModel { block_id: 10, spec });
         assert!(matches!(def, BlockResponse::Success(10)));
 
         // model_id=10 (session), block_id=20 (prob block).
@@ -591,10 +503,7 @@ mod tests {
         });
         match prob {
             BlockResponse::Value(id, p) => {
-                assert_eq!(
-                    id, 20,
-                    "response keyed by block_id, not model_id"
-                );
+                assert_eq!(id, 20, "response keyed by block_id, not model_id");
                 assert!((p - 1.0).abs() < 1e-6, "vacuum prior → P=1");
             }
             _ => panic!("expected Value, got {:?}", prob),
@@ -641,12 +550,10 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def =
-            h.send(KernelRequest::DefineModel { block_id: 42, spec });
+        let def = h.send(KernelRequest::DefineModel { block_id: 42, spec });
         assert!(matches!(def, BlockResponse::Success(42)));
 
-        let close =
-            h.send(KernelRequest::CloseModel { block_id: 42 });
+        let close = h.send(KernelRequest::CloseModel { block_id: 42 });
         assert!(matches!(close, BlockResponse::Success(42)));
 
         // Subsequent op on that handle → UK-1004.
@@ -666,8 +573,7 @@ mod tests {
     #[test]
     fn close_model_nonexistent_returns_uk1004() {
         let h = Harness::new();
-        let close =
-            h.send(KernelRequest::CloseModel { block_id: 999 });
+        let close = h.send(KernelRequest::CloseModel { block_id: 999 });
         match close {
             BlockResponse::Error(id, diag) => {
                 assert_eq!(id, 999);
@@ -685,12 +591,10 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let def =
-            h.send(KernelRequest::DefineModel { block_id: 42, spec });
+        let def = h.send(KernelRequest::DefineModel { block_id: 42, spec });
         assert!(matches!(def, BlockResponse::Success(42)));
 
-        let close =
-            h.send(KernelRequest::CloseModelById { model_id: 42 });
+        let close = h.send(KernelRequest::CloseModelById { model_id: 42 });
         match close {
             BlockResponse::Success(block_id) => {
                 assert_eq!(block_id, 42)
@@ -716,8 +620,7 @@ mod tests {
     #[test]
     fn close_model_by_id_nonexistent() {
         let h = Harness::new();
-        let close =
-            h.send(KernelRequest::CloseModelById { model_id: 999 });
+        let close = h.send(KernelRequest::CloseModelById { model_id: 999 });
         match close {
             BlockResponse::Error(block_id, diag) => {
                 assert_eq!(block_id, 999);
@@ -765,8 +668,7 @@ mod tests {
             "prior": {"kind": "vacuum"},
             "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
         })).unwrap();
-        let _ = req_tx
-            .send(KernelRequest::DefineModel { block_id: 1, spec });
+        let _ = req_tx.send(KernelRequest::DefineModel { block_id: 1, spec });
         let mut _drained = 0;
         for _ in 0..70 {
             let _ = req_tx.send(KernelRequest::Evolve {
@@ -781,8 +683,7 @@ mod tests {
         // The ring is 64 capacity, so after 70 events we should have
         // drained 64 (filled), then the remaining 6 overflow
         // and leave events_dropped 6 (with one per overflow).
-        let _ = req_tx
-            .send(KernelRequest::CloseModelById { model_id: 1 });
+        let _ = req_tx.send(KernelRequest::CloseModelById { model_id: 1 });
         let resp = resp_rx.recv().unwrap();
         assert!(matches!(resp, BlockResponse::Success(1)));
         drop(req_tx);

@@ -10,9 +10,7 @@
 use typst::comemo::Track;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::engine::{Engine, Route, Sink, Traced};
-use typst::foundations::{
-    Bytes, Content, Datetime, Duration, StyleChain, Value,
-};
+use typst::foundations::{Bytes, Content, Datetime, Duration, StyleChain, Value};
 use typst::introspection::{EmptyIntrospector, Locator};
 use typst::layout::{Frame, Region};
 use typst::syntax::{FileId, Source};
@@ -99,10 +97,7 @@ impl MiniWorld {
     /// Used by the translator pipeline (P3 #10) to read the JSON
     /// string a translator produced, without constructing a full
     /// layout `Vm`.
-    pub fn eval_binding(
-        &self,
-        name: &str,
-    ) -> Result<Option<Value>, String> {
+    pub fn eval_binding(&self, name: &str) -> Result<Option<Value>, String> {
         let world: &dyn World = self;
         let mut sink = Sink::new();
         let module = typst_eval::eval(
@@ -124,11 +119,7 @@ impl MiniWorld {
     }
 
     /// Lay out `content` within `region`, or `None` on error.
-    pub fn layout(
-        &self,
-        content: &Content,
-        region: Region,
-    ) -> Option<Frame> {
+    pub fn layout(&self, content: &Content, region: Region) -> Option<Frame> {
         let world: &dyn World = self;
         let styles = StyleChain::new(&world.library().styles);
         let introspector = EmptyIntrospector;
@@ -145,13 +136,7 @@ impl MiniWorld {
         };
         let locator = Locator::root();
 
-        match typst_layout_frame(
-            &mut engine,
-            content,
-            locator,
-            styles,
-            region,
-        ) {
+        match typst_layout_frame(&mut engine, content, locator, styles, region) {
             Ok(frame) => Some(frame),
             Err(errors) => {
                 report(&errors);

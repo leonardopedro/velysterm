@@ -72,12 +72,7 @@ pub struct Mods {
 }
 
 /// Map one key event to a command. `text` is `KeyboardInput::text`.
-pub fn keymap(
-    key: &Key,
-    text: Option<&str>,
-    mods: Mods,
-    searching: bool,
-) -> Option<EditorCmd> {
+pub fn keymap(key: &Key, text: Option<&str>, mods: Mods, searching: bool) -> Option<EditorCmd> {
     // Searching overrides.
     if searching {
         match key {
@@ -185,14 +180,10 @@ pub fn keymap(
                     return Some(EditorCmd::InsertSegment("bold"));
                 }
                 "u" => {
-                    return Some(EditorCmd::InsertSegment(
-                        "underline",
-                    ));
+                    return Some(EditorCmd::InsertSegment("underline"));
                 }
                 "m" => {
-                    return Some(EditorCmd::InsertSegment(
-                        "function",
-                    ));
+                    return Some(EditorCmd::InsertSegment("function"));
                 }
                 "f" => return Some(EditorCmd::SearchStart),
                 _ => {}
@@ -225,8 +216,7 @@ pub fn keymap(
     if !mods.alt
         && let Some(t) = text
     {
-        let filtered: String =
-            t.chars().filter(|c| !c.is_control()).collect();
+        let filtered: String = t.chars().filter(|c| !c.is_control()).collect();
         if !filtered.is_empty() {
             return Some(EditorCmd::InsertText(filtered));
         }
@@ -245,12 +235,7 @@ mod tests {
 
     #[test]
     fn arrow_left() {
-        let cmd = keymap(
-            &Key::ArrowLeft,
-            None,
-            mods(false, false, false),
-            false,
-        );
+        let cmd = keymap(&Key::ArrowLeft, None, mods(false, false, false), false);
         assert_eq!(
             cmd,
             Some(EditorCmd::Move {
@@ -262,12 +247,7 @@ mod tests {
 
     #[test]
     fn ctrl_arrow_left_is_word_left() {
-        let cmd = keymap(
-            &Key::ArrowLeft,
-            None,
-            mods(true, false, false),
-            false,
-        );
+        let cmd = keymap(&Key::ArrowLeft, None, mods(true, false, false), false);
         assert_eq!(
             cmd,
             Some(EditorCmd::Move {
@@ -279,12 +259,7 @@ mod tests {
 
     #[test]
     fn shift_arrow_extends() {
-        let cmd = keymap(
-            &Key::ArrowRight,
-            None,
-            mods(false, true, false),
-            false,
-        );
+        let cmd = keymap(&Key::ArrowRight, None, mods(false, true, false), false);
         assert_eq!(
             cmd,
             Some(EditorCmd::Move {
@@ -329,30 +304,19 @@ mod tests {
 
     #[test]
     fn searching_enter_is_search_next() {
-        let cmd = keymap(
-            &Key::Enter,
-            None,
-            mods(false, false, false),
-            true,
-        );
+        let cmd = keymap(&Key::Enter, None, mods(false, false, false), true);
         assert_eq!(cmd, Some(EditorCmd::SearchNext));
     }
 
     #[test]
     fn searching_shift_enter_is_search_prev() {
-        let cmd =
-            keymap(&Key::Enter, None, mods(false, true, false), true);
+        let cmd = keymap(&Key::Enter, None, mods(false, true, false), true);
         assert_eq!(cmd, Some(EditorCmd::SearchPrev));
     }
 
     #[test]
     fn searching_escape_cancels() {
-        let cmd = keymap(
-            &Key::Escape,
-            None,
-            mods(false, false, false),
-            true,
-        );
+        let cmd = keymap(&Key::Escape, None, mods(false, false, false), true);
         assert_eq!(cmd, Some(EditorCmd::SearchCancel));
     }
 
@@ -380,8 +344,7 @@ mod tests {
 
     #[test]
     fn f12_goto_definition() {
-        let cmd =
-            keymap(&Key::F12, None, mods(false, false, false), false);
+        let cmd = keymap(&Key::F12, None, mods(false, false, false), false);
         assert_eq!(cmd, Some(EditorCmd::GotoDefinition));
     }
 
@@ -421,12 +384,7 @@ mod tests {
 
     #[test]
     fn home_end() {
-        let cmd = keymap(
-            &Key::Home,
-            None,
-            mods(false, false, false),
-            false,
-        );
+        let cmd = keymap(&Key::Home, None, mods(false, false, false), false);
         assert_eq!(
             cmd,
             Some(EditorCmd::Move {
@@ -434,8 +392,7 @@ mod tests {
                 extend: false
             })
         );
-        let cmd =
-            keymap(&Key::End, None, mods(true, false, false), false);
+        let cmd = keymap(&Key::End, None, mods(true, false, false), false);
         assert_eq!(
             cmd,
             Some(EditorCmd::Move {

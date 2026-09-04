@@ -39,9 +39,8 @@ use prob_kernel::{Session, SessionBlob};
 use unfer_consensus::{ConsensusNode, Keypair, LocalConsensus};
 use unfer_identity::DidManager;
 use unfer_protocol::{
-    AgentRequest, AgentResponse, BeliefPropagationOptsSpec, Code,
-    ConsensusTransaction, ContentOp, ContentRef, Diagnostic,
-    EventPredicate, HintKind, HmcOptsSpec, KernelEvent, ModelSpec,
+    AgentRequest, AgentResponse, BeliefPropagationOptsSpec, Code, ConsensusTransaction, ContentOp,
+    ContentRef, Diagnostic, EventPredicate, HintKind, HmcOptsSpec, KernelEvent, ModelSpec,
     PriorSpec, RepairHint, Severity, codes,
 };
 
@@ -110,29 +109,23 @@ fn bad_json_diag(msg: &str) -> Diagnostic {
 // keypair so the node's signature check passes.
 
 fn parse_hex32(s: &str, field: &str) -> Result<[u8; 32], Diagnostic> {
-    let bytes = hex::decode(s).map_err(|e| {
-        bad_json_diag(&format!("{field}: invalid hex: {e}"))
-    })?;
-    bytes.try_into().map_err(|_| {
-        bad_json_diag(&format!("{field}: expected 32 bytes"))
-    })
+    let bytes = hex::decode(s).map_err(|e| bad_json_diag(&format!("{field}: invalid hex: {e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| bad_json_diag(&format!("{field}: expected 32 bytes")))
 }
 
-fn parse_coinref(
-    v: &serde_json::Value,
-) -> Result<unfer_protocol::CoinRef, Diagnostic> {
-    let amount =
-        v.get("amount").and_then(|x| x.as_u64()).ok_or_else(
-            || bad_json_diag("coin ref missing 'amount' (u64)"),
-        )?;
-    let owner =
-        v.get("owner").and_then(|x| x.as_str()).ok_or_else(|| {
-            bad_json_diag("coin ref missing 'owner' (DID)")
-        })?;
+fn parse_coinref(v: &serde_json::Value) -> Result<unfer_protocol::CoinRef, Diagnostic> {
+    let amount = v
+        .get("amount")
+        .and_then(|x| x.as_u64())
+        .ok_or_else(|| bad_json_diag("coin ref missing 'amount' (u64)"))?;
+    let owner = v
+        .get("owner")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| bad_json_diag("coin ref missing 'owner' (DID)"))?;
     let coin_id = match v.get("coin_id").and_then(|x| x.as_str()) {
-        Some(hex_s) => {
-            unfer_protocol::CertId(parse_hex32(hex_s, "coin_id")?)
-        }
+        Some(hex_s) => unfer_protocol::CertId(parse_hex32(hex_s, "coin_id")?),
         None => unfer_protocol::CertId([0u8; 32]),
     };
     Ok(unfer_protocol::CoinRef {
@@ -146,9 +139,9 @@ fn parse_coinrefs(
     v: &serde_json::Value,
     field: &str,
 ) -> Result<Vec<unfer_protocol::CoinRef>, Diagnostic> {
-    let arr = v.as_array().ok_or_else(|| {
-        bad_json_diag(&format!("{field}: expected an array"))
-    })?;
+    let arr = v
+        .as_array()
+        .ok_or_else(|| bad_json_diag(&format!("{field}: expected an array")))?;
     arr.iter().map(parse_coinref).collect()
 }
 
@@ -173,9 +166,7 @@ impl AgentState {
             .ok()
             .map(|dir| {
                 unfer_protocol::preset::Roster::from_entries(
-                    unfer_protocol::preset::discover_roster(
-                        Path::new(&dir),
-                    ),
+                    unfer_protocol::preset::discover_roster(Path::new(&dir)),
                 )
             })
             .unwrap_or_default();
@@ -184,19 +175,13 @@ impl AgentState {
             events: HashMap::new(),
             events_dropped: HashMap::new(),
             next_id: 1,
-            consensus: ConsensusNode::new(Box::new(
-                LocalConsensus::new(),
-            )),
+            consensus: ConsensusNode::new(Box::new(LocalConsensus::new())),
             keypairs: HashMap::new(),
             roster,
         }
     }
 
-    fn push_event(
-        &mut self,
-        model_id: u64,
-        event: serde_json::Value,
-    ) {
+    fn push_event(&mut self, model_id: u64, event: serde_json::Value) {
         let q = self.events.entry(model_id).or_default();
         if q.len() >= EVENT_QUEUE_CAPACITY {
             q.pop_front();
@@ -205,10 +190,7 @@ impl AgentState {
         q.push_back(event);
     }
 
-    fn drain_events(
-        &mut self,
-        model_id: u64,
-    ) -> Vec<serde_json::Value> {
+    fn drain_events(&mut self, model_id: u64) -> Vec<serde_json::Value> {
         self.events
             .get_mut(&model_id)
             .map(|q| q.drain(..).collect())
@@ -237,14 +219,12 @@ impl AgentState {
         id: &str,
     ) -> AgentResponse {
         let seq = self.consensus.current_seq() + 1;
-        let mut tx = ConsensusTransaction::CertificateOp(
-            unfer_protocol::CertificateOp {
-                did: actor.to_string(),
-                kind,
-                seq,
-                signature: [0u8; 64],
-            },
-        );
+        let mut tx = ConsensusTransaction::CertificateOp(unfer_protocol::CertificateOp {
+            did: actor.to_string(),
+            kind,
+            seq,
+            signature: [0u8; 64],
+        });
         unfer_consensus::sign_transaction(&mut tx, kp);
         match self.consensus.submit(tx) {
             Ok(_) => match self.consensus.sync() {
@@ -277,14 +257,12 @@ impl AgentState {
         id: &str,
     ) -> AgentResponse {
         let seq = self.consensus.current_seq() + 1;
-        let mut tx = ConsensusTransaction::AuctionOp(
-            unfer_protocol::AuctionOp {
-                did: actor.to_string(),
-                kind,
-                seq,
-                signature: [0u8; 64],
-            },
-        );
+        let mut tx = ConsensusTransaction::AuctionOp(unfer_protocol::AuctionOp {
+            did: actor.to_string(),
+            kind,
+            seq,
+            signature: [0u8; 64],
+        });
         unfer_consensus::sign_transaction(&mut tx, kp);
         match self.consensus.submit(tx) {
             Ok(_) => match self.consensus.sync() {
@@ -338,31 +316,25 @@ impl AgentState {
                 // CUDA init failure. Surfaced here so the agent loop
                 // can react to GPU failures without
                 // parsing kernel stderr.
-                let gpu_triage: Vec<serde_json::Value> =
-                    GPU_TRIAGE_CODES
-                        .iter()
-                        .map(|(code, fix)| {
-                            serde_json::json!({
-                                "code": code,
-                                "fix": fix,
-                            })
+                let gpu_triage: Vec<serde_json::Value> = GPU_TRIAGE_CODES
+                    .iter()
+                    .map(|(code, fix)| {
+                        serde_json::json!({
+                            "code": code,
+                            "fix": fix,
                         })
-                        .collect();
+                    })
+                    .collect();
                 AgentResponse::ok(
                     &req.id,
                     serde_json::json!({ "codes": codes, "gpu_triage": gpu_triage }),
                 )
             }
             "create_model" => {
-                let spec: ModelSpec = match serde_json::from_value(
-                    req.params.clone(),
-                ) {
+                let spec: ModelSpec = match serde_json::from_value(req.params.clone()) {
                     Ok(s) => s,
                     Err(e) => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag(&e.to_string()),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag(&e.to_string()));
                     }
                 };
                 match Session::new(&spec) {
@@ -370,234 +342,140 @@ impl AgentState {
                         let id = self.next_id;
                         self.next_id += 1;
                         self.sessions.insert(id, session);
-                        AgentResponse::ok(
-                            &req.id,
-                            serde_json::json!({ "model_id": id }),
-                        )
+                        AgentResponse::ok(&req.id, serde_json::json!({ "model_id": id }))
                     }
-                    Err(e) => {
-                        AgentResponse::err(&req.id, e.to_diagnostic())
-                    }
+                    Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
                 }
             }
             "set_prior" => {
-                let (model_id, prior) = match parse_model_and_param::<
-                    PriorSpec,
-                >(
-                    &req.params, "prior"
-                ) {
-                    Ok(v) => v,
-                    Err(d) => return AgentResponse::err(&req.id, d),
-                };
+                let (model_id, prior) =
+                    match parse_model_and_param::<PriorSpec>(&req.params, "prior") {
+                        Ok(v) => v,
+                        Err(d) => return AgentResponse::err(&req.id, d),
+                    };
                 match self.sessions.get_mut(&model_id) {
-                    Some(session) => {
-                        match session.set_prior(&prior) {
-                            Ok(_) => {
-                                self.push_event(
-                                    model_id,
-                                    serde_json::to_value(
-                                        KernelEvent::PriorSet,
-                                    )
-                                    .unwrap(),
-                                );
-                                AgentResponse::ok(
-                                    &req.id,
-                                    serde_json::json!({ "ok": true }),
-                                )
-                            }
-                            Err(e) => AgentResponse::err(
-                                &req.id,
-                                e.to_diagnostic(),
-                            ),
+                    Some(session) => match session.set_prior(&prior) {
+                        Ok(_) => {
+                            self.push_event(
+                                model_id,
+                                serde_json::to_value(KernelEvent::PriorSet).unwrap(),
+                            );
+                            AgentResponse::ok(&req.id, serde_json::json!({ "ok": true }))
                         }
-                    }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                        Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                    },
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "evolve" => {
-                let (model_id, t) = match parse_model_and_param::<f64>(
-                    &req.params,
-                    "t",
-                ) {
+                let (model_id, t) = match parse_model_and_param::<f64>(&req.params, "t") {
                     Ok(v) => v,
                     Err(d) => return AgentResponse::err(&req.id, d),
                 };
                 match self.sessions.get_mut(&model_id) {
                     Some(session) => match session.evolve(t) {
                         Ok(report) => {
-                            let mut ev = serde_json::to_value(
-                                KernelEvent::Evolved {
-                                    t: report.t,
-                                    norm: report.norm,
-                                    solve_ms: report.solve_ms,
-                                },
-                            )
+                            let mut ev = serde_json::to_value(KernelEvent::Evolved {
+                                t: report.t,
+                                norm: report.norm,
+                                solve_ms: report.solve_ms,
+                            })
                             .unwrap();
                             ev.as_object_mut().unwrap().insert(
                                 "components".to_string(),
-                                serde_json::to_value(
-                                    report.components,
-                                )
-                                .unwrap(),
+                                serde_json::to_value(report.components).unwrap(),
                             );
                             self.push_event(model_id, ev);
-                            AgentResponse::ok(
-                                &req.id,
-                                serde_json::to_value(report).unwrap(),
-                            )
+                            AgentResponse::ok(&req.id, serde_json::to_value(report).unwrap())
                         }
-                        Err(e) => AgentResponse::err(
-                            &req.id,
-                            e.to_diagnostic(),
-                        ),
+                        Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
                     },
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "probability" => {
-                let (model_id, event) = match parse_model_and_param::<
-                    EventPredicate,
-                >(
-                    &req.params, "event"
-                ) {
-                    Ok(v) => v,
-                    Err(d) => return AgentResponse::err(&req.id, d),
-                };
+                let (model_id, event) =
+                    match parse_model_and_param::<EventPredicate>(&req.params, "event") {
+                        Ok(v) => v,
+                        Err(d) => return AgentResponse::err(&req.id, d),
+                    };
                 match self.sessions.get(&model_id) {
-                    Some(session) => {
-                        match session.probability(&event) {
-                            Ok(p) => AgentResponse::ok(
-                                &req.id,
-                                serde_json::json!({ "probability": p }),
-                            ),
-                            Err(e) => AgentResponse::err(
-                                &req.id,
-                                e.to_diagnostic(),
-                            ),
+                    Some(session) => match session.probability(&event) {
+                        Ok(p) => {
+                            AgentResponse::ok(&req.id, serde_json::json!({ "probability": p }))
                         }
-                    }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                        Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                    },
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "condition" => {
-                let (model_id, event) = match parse_model_and_param::<
-                    EventPredicate,
-                >(
-                    &req.params, "event"
-                ) {
-                    Ok(v) => v,
-                    Err(d) => return AgentResponse::err(&req.id, d),
-                };
+                let (model_id, event) =
+                    match parse_model_and_param::<EventPredicate>(&req.params, "event") {
+                        Ok(v) => v,
+                        Err(d) => return AgentResponse::err(&req.id, d),
+                    };
                 match self.sessions.get_mut(&model_id) {
-                    Some(session) => {
-                        match session.condition(&event) {
-                            Ok(p) => {
-                                self.push_event(
-                                    model_id,
-                                    serde_json::to_value(
-                                        KernelEvent::Conditioned {
-                                            prior_probability: p,
-                                        },
-                                    )
-                                    .unwrap(),
-                                );
-                                AgentResponse::ok(
-                                    &req.id,
-                                    serde_json::json!({ "prior_probability": p }),
-                                )
-                            }
-                            Err(e) => AgentResponse::err(
+                    Some(session) => match session.condition(&event) {
+                        Ok(p) => {
+                            self.push_event(
+                                model_id,
+                                serde_json::to_value(KernelEvent::Conditioned {
+                                    prior_probability: p,
+                                })
+                                .unwrap(),
+                            );
+                            AgentResponse::ok(
                                 &req.id,
-                                e.to_diagnostic(),
-                            ),
+                                serde_json::json!({ "prior_probability": p }),
+                            )
                         }
-                    }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                        Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                    },
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "snapshot" => {
-                let (model_id, top_k) = match parse_model_and_param::<
-                    usize,
-                >(
-                    &req.params, "top_k"
-                ) {
+                let (model_id, top_k) = match parse_model_and_param::<usize>(&req.params, "top_k") {
                     Ok(v) => v,
                     Err(d) => return AgentResponse::err(&req.id, d),
                 };
                 match self.sessions.get(&model_id) {
                     Some(session) => {
                         let summary = session.snapshot(top_k);
-                        AgentResponse::ok(
-                            &req.id,
-                            serde_json::to_value(summary).unwrap(),
-                        )
+                        AgentResponse::ok(&req.id, serde_json::to_value(summary).unwrap())
                     }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "poll_events" => {
-                let model_id = match req
-                    .params
-                    .get("model_id")
-                    .and_then(|v| v.as_u64())
-                {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
                     Some(id) => id,
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(
-                                "missing or non-integer 'model_id' field",
-                            ),
+                            bad_json_diag("missing or non-integer 'model_id' field"),
                         );
                     }
                 };
                 if !self.sessions.contains_key(&model_id) {
-                    return AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    );
+                    return AgentResponse::err(&req.id, bad_handle_diag(model_id));
                 }
                 let events = self.drain_events(model_id);
-                let dropped = self
-                    .events_dropped
-                    .remove(&model_id)
-                    .unwrap_or(0);
-                let mut resp =
-                    serde_json::json!({ "events": events });
+                let dropped = self.events_dropped.remove(&model_id).unwrap_or(0);
+                let mut resp = serde_json::json!({ "events": events });
                 if dropped > 0 {
-                    resp["events_dropped"] =
-                        serde_json::json!(dropped);
+                    resp["events_dropped"] = serde_json::json!(dropped);
                 }
                 AgentResponse::ok(&req.id, resp)
             }
             "save_session" => {
-                let model_id = match req
-                    .params
-                    .get("model_id")
-                    .and_then(|v| v.as_u64())
-                {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
                     Some(id) => id,
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(
-                                "missing or non-integer 'model_id' field",
-                            ),
+                            bad_json_diag("missing or non-integer 'model_id' field"),
                         );
                     }
                 };
@@ -610,31 +488,22 @@ impl AgentState {
                                 &req.id,
                                 Diagnostic::new(
                                     Code::INTERNAL,
-                                    format!(
-                                        "serialization failed: {e}"
-                                    ),
+                                    format!("serialization failed: {e}"),
                                     Severity::Error,
                                 ),
                             ),
                         }
                     }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "restore_session" => {
-                let blob: SessionBlob = match serde_json::from_value(
-                    req.params.clone(),
-                ) {
+                let blob: SessionBlob = match serde_json::from_value(req.params.clone()) {
                     Ok(b) => b,
                     Err(e) => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(&format!(
-                                "invalid SessionBlob: {e}"
-                            )),
+                            bad_json_diag(&format!("invalid SessionBlob: {e}")),
                         );
                     }
                 };
@@ -643,167 +512,106 @@ impl AgentState {
                         let id = self.next_id;
                         self.next_id += 1;
                         self.sessions.insert(id, session);
-                        AgentResponse::ok(
-                            &req.id,
-                            serde_json::json!({ "model_id": id }),
-                        )
+                        AgentResponse::ok(&req.id, serde_json::json!({ "model_id": id }))
                     }
-                    Err(e) => {
-                        AgentResponse::err(&req.id, e.to_diagnostic())
-                    }
+                    Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
                 }
             }
             "close_model" => {
-                let model_id = match req
-                    .params
-                    .get("model_id")
-                    .and_then(|v| v.as_u64())
-                {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
                     Some(id) => id,
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(
-                                "missing or non-integer 'model_id' field",
-                            ),
+                            bad_json_diag("missing or non-integer 'model_id' field"),
                         );
                     }
                 };
                 if self.sessions.remove(&model_id).is_some() {
                     self.events.remove(&model_id);
                     self.events_dropped.remove(&model_id);
-                    AgentResponse::ok(
-                        &req.id,
-                        serde_json::json!({ "ok": true }),
-                    )
+                    AgentResponse::ok(&req.id, serde_json::json!({ "ok": true }))
                 } else {
-                    AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    )
+                    AgentResponse::err(&req.id, bad_handle_diag(model_id))
                 }
             }
             "bayesian_update" => {
                 let (model_id, observations) =
-                    match parse_model_and_param::<Vec<Vec<f64>>>(
-                        &req.params,
-                        "observations",
-                    ) {
+                    match parse_model_and_param::<Vec<Vec<f64>>>(&req.params, "observations") {
                         Ok(v) => v,
                         Err(d) => {
                             return AgentResponse::err(&req.id, d);
                         }
                     };
-                let hmc_opts: HmcOptsSpec =
-                    match req.params.get("hmc_opts") {
-                        Some(v) => {
-                            match serde_json::from_value(v.clone()) {
-                                Ok(o) => o,
-                                Err(e) => {
-                                    return AgentResponse::err(
-                                        &req.id,
-                                        bad_json_diag(&format!(
-                                            "invalid hmc_opts: {e}"
-                                        )),
-                                    );
-                                }
-                            }
-                        }
-                        None => HmcOptsSpec::default(),
-                    };
-                match self.sessions.get(&model_id) {
-                    Some(session) => {
-                        match session
-                            .bayesian_update(&observations, &hmc_opts)
-                        {
-                            Ok(report) => {
-                                self.push_event(
-                                    model_id,
-                                    serde_json::json!({
-                                        "type": "bayesian_updated",
-                                        "log_posterior": report.log_posterior,
-                                        "mean_likelihood": report.mean_likelihood,
-                                        "n_observations": report.n_observations,
-                                        "solve_ms": report.solve_ms,
-                                    }),
-                                );
-                                AgentResponse::ok(
-                                    &req.id,
-                                    serde_json::to_value(report)
-                                        .unwrap(),
-                                )
-                            }
-                            Err(e) => AgentResponse::err(
+                let hmc_opts: HmcOptsSpec = match req.params.get("hmc_opts") {
+                    Some(v) => match serde_json::from_value(v.clone()) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            return AgentResponse::err(
                                 &req.id,
-                                e.to_diagnostic(),
-                            ),
+                                bad_json_diag(&format!("invalid hmc_opts: {e}")),
+                            );
                         }
-                    }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                    },
+                    None => HmcOptsSpec::default(),
+                };
+                match self.sessions.get(&model_id) {
+                    Some(session) => match session.bayesian_update(&observations, &hmc_opts) {
+                        Ok(report) => {
+                            self.push_event(
+                                model_id,
+                                serde_json::json!({
+                                    "type": "bayesian_updated",
+                                    "log_posterior": report.log_posterior,
+                                    "mean_likelihood": report.mean_likelihood,
+                                    "n_observations": report.n_observations,
+                                    "solve_ms": report.solve_ms,
+                                }),
+                            );
+                            AgentResponse::ok(&req.id, serde_json::to_value(report).unwrap())
+                        }
+                        Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                    },
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "belief_propagation" => {
                 let (model_id, observations) =
-                    match parse_model_and_param::<Vec<Vec<f64>>>(
-                        &req.params,
-                        "observations",
-                    ) {
+                    match parse_model_and_param::<Vec<Vec<f64>>>(&req.params, "observations") {
                         Ok(v) => v,
                         Err(d) => {
                             return AgentResponse::err(&req.id, d);
                         }
                     };
-                let opts: BeliefPropagationOptsSpec =
-                    match req.params.get("opts") {
-                        Some(v) => {
-                            match serde_json::from_value(v.clone()) {
-                                Ok(o) => o,
-                                Err(e) => {
-                                    return AgentResponse::err(
-                                        &req.id,
-                                        bad_json_diag(&format!(
-                                            "invalid opts: {e}"
-                                        )),
-                                    );
-                                }
-                            }
-                        }
-                        None => BeliefPropagationOptsSpec::default(),
-                    };
-                match self.sessions.get(&model_id) {
-                    Some(session) => {
-                        match session
-                            .belief_propagation(&observations, &opts)
-                        {
-                            Ok(report) => {
-                                self.push_event(
-                                    model_id,
-                                    serde_json::json!({
-                                        "type": "belief_propagated",
-                                        "log_posterior": report.log_posterior,
-                                        "n_observations": report.n_observations,
-                                        "solve_ms": report.solve_ms,
-                                    }),
-                                );
-                                AgentResponse::ok(
-                                    &req.id,
-                                    serde_json::to_value(report)
-                                        .unwrap(),
-                                )
-                            }
-                            Err(e) => AgentResponse::err(
+                let opts: BeliefPropagationOptsSpec = match req.params.get("opts") {
+                    Some(v) => match serde_json::from_value(v.clone()) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            return AgentResponse::err(
                                 &req.id,
-                                e.to_diagnostic(),
-                            ),
+                                bad_json_diag(&format!("invalid opts: {e}")),
+                            );
                         }
-                    }
-                    None => AgentResponse::err(
-                        &req.id,
-                        bad_handle_diag(model_id),
-                    ),
+                    },
+                    None => BeliefPropagationOptsSpec::default(),
+                };
+                match self.sessions.get(&model_id) {
+                    Some(session) => match session.belief_propagation(&observations, &opts) {
+                        Ok(report) => {
+                            self.push_event(
+                                model_id,
+                                serde_json::json!({
+                                    "type": "belief_propagated",
+                                    "log_posterior": report.log_posterior,
+                                    "n_observations": report.n_observations,
+                                    "solve_ms": report.solve_ms,
+                                }),
+                            );
+                            AgentResponse::ok(&req.id, serde_json::to_value(report).unwrap())
+                        }
+                        Err(e) => AgentResponse::err(&req.id, e.to_diagnostic()),
+                    },
+                    None => AgentResponse::err(&req.id, bad_handle_diag(model_id)),
                 }
             }
             "did_create" => {
@@ -817,34 +625,21 @@ impl AgentState {
                 match mgr.create_did(&kp, service_endpoint) {
                     Ok(did) => {
                         self.keypairs.insert(did.clone(), kp);
-                        AgentResponse::ok(
-                            &req.id,
-                            serde_json::json!({ "did": did }),
-                        )
+                        AgentResponse::ok(&req.id, serde_json::json!({ "did": did }))
                     }
                     Err(e) => AgentResponse::err(&req.id, e),
                 }
             }
             "did_resolve" => {
-                let did = match req
-                    .params
-                    .get("did")
-                    .and_then(|v| v.as_str())
-                {
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
                     Some(d) => d.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'did' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'did' field"));
                     }
                 };
                 let mgr = DidManager::new(&mut self.consensus);
                 match mgr.resolve(&did) {
-                    Some(doc) => AgentResponse::ok(
-                        &req.id,
-                        serde_json::to_value(doc).unwrap(),
-                    ),
+                    Some(doc) => AgentResponse::ok(&req.id, serde_json::to_value(doc).unwrap()),
                     None => AgentResponse::err(
                         &req.id,
                         Diagnostic::new(
@@ -856,17 +651,10 @@ impl AgentState {
                 }
             }
             "did_update" => {
-                let did = match req
-                    .params
-                    .get("did")
-                    .and_then(|v| v.as_str())
-                {
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
                     Some(d) => d.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'did' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'did' field"));
                     }
                 };
                 let kp = match self.keypairs.get(&did) {
@@ -889,25 +677,15 @@ impl AgentState {
                     .map(String::from);
                 let mut mgr = DidManager::new(&mut self.consensus);
                 match mgr.update_did(&kp, service_endpoint) {
-                    Ok(()) => AgentResponse::ok(
-                        &req.id,
-                        serde_json::json!({ "ok": true }),
-                    ),
+                    Ok(()) => AgentResponse::ok(&req.id, serde_json::json!({ "ok": true })),
                     Err(e) => AgentResponse::err(&req.id, e),
                 }
             }
             "did_revoke" => {
-                let did = match req
-                    .params
-                    .get("did")
-                    .and_then(|v| v.as_str())
-                {
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
                     Some(d) => d.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'did' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'did' field"));
                     }
                 };
                 let kp = match self.keypairs.get(&did) {
@@ -927,38 +705,25 @@ impl AgentState {
                 match mgr.revoke_did(&kp) {
                     Ok(()) => {
                         self.keypairs.remove(&did);
-                        AgentResponse::ok(
-                            &req.id,
-                            serde_json::json!({ "ok": true }),
-                        )
+                        AgentResponse::ok(&req.id, serde_json::json!({ "ok": true }))
                     }
                     Err(e) => AgentResponse::err(&req.id, e),
                 }
             }
             "content_publish" => {
-                let content_ref: ContentRef =
-                    match serde_json::from_value(req.params.clone()) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            return AgentResponse::err(
-                                &req.id,
-                                bad_json_diag(&format!(
-                                    "invalid ContentRef: {e}"
-                                )),
-                            );
-                        }
-                    };
-                let did = match req
-                    .params
-                    .get("did")
-                    .and_then(|v| v.as_str())
-                {
-                    Some(d) => d.to_string(),
-                    None => {
+                let content_ref: ContentRef = match serde_json::from_value(req.params.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag("missing 'did' field"),
+                            bad_json_diag(&format!("invalid ContentRef: {e}")),
                         );
+                    }
+                };
+                let did = match req.params.get("did").and_then(|v| v.as_str()) {
+                    Some(d) => d.to_string(),
+                    None => {
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'did' field"));
                     }
                 };
                 let kp = match self.keypairs.get(&did) {
@@ -974,12 +739,11 @@ impl AgentState {
                         );
                     }
                 };
-                let mut tx =
-                    ConsensusTransaction::ContentOp(ContentOp {
-                        did: did.clone(),
-                        content_ref: content_ref.clone(),
-                        signature: [0u8; 64],
-                    });
+                let mut tx = ConsensusTransaction::ContentOp(ContentOp {
+                    did: did.clone(),
+                    content_ref: content_ref.clone(),
+                    signature: [0u8; 64],
+                });
                 unfer_consensus::sign_transaction(&mut tx, &kp);
                 match self.consensus.submit(tx) {
                     Ok(seq) => {
@@ -996,24 +760,14 @@ impl AgentState {
                 }
             }
             "content_resolve" => {
-                let cid = match req
-                    .params
-                    .get("cid")
-                    .and_then(|v| v.as_str())
-                {
+                let cid = match req.params.get("cid").and_then(|v| v.as_str()) {
                     Some(c) => c.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'cid' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'cid' field"));
                     }
                 };
                 match self.consensus.content(&cid) {
-                    Some(cr) => AgentResponse::ok(
-                        &req.id,
-                        serde_json::to_value(cr).unwrap(),
-                    ),
+                    Some(cr) => AgentResponse::ok(&req.id, serde_json::to_value(cr).unwrap()),
                     None => AgentResponse::err(
                         &req.id,
                         Diagnostic::new(
@@ -1055,58 +809,31 @@ impl AgentState {
                     unfer_consensus::MintAuthority::Only(did)
                 };
                 self.consensus.set_mint_authority(authority);
-                AgentResponse::ok(
-                    &req.id,
-                    serde_json::json!({ "ok": true }),
-                )
+                AgentResponse::ok(&req.id, serde_json::json!({ "ok": true }))
             }
             "cert_mint" => {
-                let actor = match req
-                    .params
-                    .get("actor")
-                    .and_then(|v| v.as_str())
-                {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
                     Some(a) => a.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'actor' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'actor' field"));
                     }
                 };
-                let amount = match req
-                    .params
-                    .get("amount")
-                    .and_then(|v| v.as_u64())
-                {
+                let amount = match req.params.get("amount").and_then(|v| v.as_u64()) {
                     Some(a) => a,
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(
-                                "missing 'amount' (u64) field",
-                            ),
+                            bad_json_diag("missing 'amount' (u64) field"),
                         );
                     }
                 };
-                let owner = match req
-                    .params
-                    .get("owner")
-                    .and_then(|v| v.as_str())
-                {
+                let owner = match req.params.get("owner").and_then(|v| v.as_str()) {
                     Some(o) => o.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'owner' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'owner' field"));
                     }
                 };
-                let blinding = match req
-                    .params
-                    .get("blinding")
-                    .and_then(|v| v.as_str())
-                {
+                let blinding = match req.params.get("blinding").and_then(|v| v.as_str()) {
                     Some(b) => match parse_hex32(b, "blinding") {
                         Ok(x) => x,
                         Err(e) => {
@@ -1116,9 +843,7 @@ impl AgentState {
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(
-                                "missing 'blinding' (hex32) field",
-                            ),
+                            bad_json_diag("missing 'blinding' (hex32) field"),
                         );
                     }
                 };
@@ -1137,23 +862,14 @@ impl AgentState {
                 self.submit_cert_op(&actor, &kp, kind, &req.id)
             }
             "cert_transfer" => {
-                let actor = match req
-                    .params
-                    .get("actor")
-                    .and_then(|v| v.as_str())
-                {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
                     Some(a) => a.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'actor' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'actor' field"));
                     }
                 };
                 let inputs = match parse_coinrefs(
-                    req.params
-                        .get("inputs")
-                        .unwrap_or(&serde_json::Value::Null),
+                    req.params.get("inputs").unwrap_or(&serde_json::Value::Null),
                     "inputs",
                 ) {
                     Ok(i) => i,
@@ -1169,40 +885,25 @@ impl AgentState {
                     Err(e) => return AgentResponse::err(&req.id, e),
                 };
                 let kp = self.keypair_for(&actor);
-                let kind =
-                    unfer_protocol::CertificateOpKind::Transfer {
-                        inputs,
-                        outputs,
-                    };
+                let kind = unfer_protocol::CertificateOpKind::Transfer { inputs, outputs };
                 self.submit_cert_op(&actor, &kp, kind, &req.id)
             }
             "cert_burn" => {
-                let actor = match req
-                    .params
-                    .get("actor")
-                    .and_then(|v| v.as_str())
-                {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
                     Some(a) => a.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'actor' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'actor' field"));
                     }
                 };
                 let inputs = match parse_coinrefs(
-                    req.params
-                        .get("inputs")
-                        .unwrap_or(&serde_json::Value::Null),
+                    req.params.get("inputs").unwrap_or(&serde_json::Value::Null),
                     "inputs",
                 ) {
                     Ok(i) => i,
                     Err(e) => return AgentResponse::err(&req.id, e),
                 };
                 let kp = self.keypair_for(&actor);
-                let kind = unfer_protocol::CertificateOpKind::Burn {
-                    inputs,
-                };
+                let kind = unfer_protocol::CertificateOpKind::Burn { inputs };
                 self.submit_cert_op(&actor, &kp, kind, &req.id)
             }
             "cert_status" => {
@@ -1218,33 +919,27 @@ impl AgentState {
             }
             "cert_root" => {
                 let root = self.consensus.certs().root();
-                AgentResponse::ok(
-                    &req.id,
-                    serde_json::json!({ "root": hex::encode(root) }),
-                )
+                AgentResponse::ok(&req.id, serde_json::json!({ "root": hex::encode(root) }))
             }
             "auction_open" => {
-                let lot: unfer_protocol::AuctionLot =
-                    match serde_json::from_value(
-                        req.params
-                            .get("lot")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null),
-                    ) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            return AgentResponse::err(
-                                &req.id,
-                                Diagnostic::new(
-                                    Code(1001),
-                                    format!(
-                                        "auction_open: bad 'lot': {e}"
-                                    ),
-                                    Severity::Error,
-                                ),
-                            );
-                        }
-                    };
+                let lot: unfer_protocol::AuctionLot = match serde_json::from_value(
+                    req.params
+                        .get("lot")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        return AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code(1001),
+                                format!("auction_open: bad 'lot': {e}"),
+                                Severity::Error,
+                            ),
+                        );
+                    }
+                };
                 let actor = req
                     .params
                     .get("actor")
@@ -1258,9 +953,7 @@ impl AgentState {
                             &req.id,
                             Diagnostic::new(
                                 Code(6001),
-                                format!(
-                                    "no keypair for actor {actor}"
-                                ),
+                                format!("no keypair for actor {actor}"),
                                 Severity::Error,
                             ),
                         );
@@ -1276,17 +969,10 @@ impl AgentState {
                 )
             }
             "auction_bid" => {
-                let actor = match req
-                    .params
-                    .get("actor")
-                    .and_then(|v| v.as_str())
-                {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
                     Some(a) => a.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'actor' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'actor' field"));
                     }
                 };
                 let kp = match self.keypairs.get(&actor) {
@@ -1296,9 +982,7 @@ impl AgentState {
                             &req.id,
                             Diagnostic::new(
                                 Code(6001),
-                                format!(
-                                    "no keypair for actor {actor}"
-                                ),
+                                format!("no keypair for actor {actor}"),
                                 Severity::Error,
                             ),
                         );
@@ -1336,17 +1020,10 @@ impl AgentState {
                 )
             }
             "auction_close" => {
-                let actor = match req
-                    .params
-                    .get("actor")
-                    .and_then(|v| v.as_str())
-                {
+                let actor = match req.params.get("actor").and_then(|v| v.as_str()) {
                     Some(a) => a.to_string(),
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("missing 'actor' field"),
-                        );
+                        return AgentResponse::err(&req.id, bad_json_diag("missing 'actor' field"));
                     }
                 };
                 let kp = match self.keypairs.get(&actor) {
@@ -1356,9 +1033,7 @@ impl AgentState {
                             &req.id,
                             Diagnostic::new(
                                 Code(6001),
-                                format!(
-                                    "no keypair for actor {actor}"
-                                ),
+                                format!("no keypair for actor {actor}"),
                                 Severity::Error,
                             ),
                         );
@@ -1389,54 +1064,35 @@ impl AgentState {
                     .unwrap_or("");
                 if lot_id_hex.is_empty() {
                     let lots = self.consensus.auction().open_lots();
-                    return AgentResponse::ok(
-                        &req.id,
-                        serde_json::json!({ "lots": lots }),
-                    );
+                    return AgentResponse::ok(&req.id, serde_json::json!({ "lots": lots }));
                 }
                 let lot_id = match parse_hex32(lot_id_hex, "lot_id") {
                     Ok(bytes) => unfer_protocol::AuctionId(bytes),
                     Err(e) => return AgentResponse::err(&req.id, e),
                 };
                 match self.consensus.auction().report(&lot_id) {
-                    Some(report) => AgentResponse::ok(
-                        &req.id,
-                        serde_json::json!(report),
-                    ),
+                    Some(report) => AgentResponse::ok(&req.id, serde_json::json!(report)),
                     None => AgentResponse::err(
                         &req.id,
                         Diagnostic::new(
                             Code(7301),
-                            format!(
-                                "auction_report: no such lot {lot_id_hex}"
-                            ),
+                            format!("auction_report: no such lot {lot_id_hex}"),
                             Severity::Error,
                         ),
                     ),
                 }
             }
             "logos_compile" => {
-                let cnl = req
-                    .params
-                    .get("cnl")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let lexicon = logos::lexicon::Lexicon::parse("")
-                    .unwrap_or_default();
-                let tokens: Vec<String> = cnl
-                    .split_whitespace()
-                    .map(String::from)
-                    .collect();
-                let trees = logos::ccg::parser::parse_sentence(
-                    &tokens, &lexicon,
-                );
+                let cnl = req.params.get("cnl").and_then(|v| v.as_str()).unwrap_or("");
+                let lexicon = logos::lexicon::Lexicon::parse("").unwrap_or_default();
+                let tokens: Vec<String> = cnl.split_whitespace().map(String::from).collect();
+                let trees = logos::ccg::parser::parse_sentence(&tokens, &lexicon);
                 if trees.is_empty() {
                     AgentResponse::err(
                         &req.id,
                         Diagnostic::new(
                             Code(7002),
-                            "logos: no parse trees for input"
-                                .to_string(),
+                            "logos: no parse trees for input".to_string(),
                             Severity::Error,
                         ),
                     )
@@ -1463,9 +1119,7 @@ impl AgentState {
                     .and_then(|v| v.as_array())
                     .map(|a| {
                         a.iter()
-                            .filter_map(|v| {
-                                v.as_str().map(String::from)
-                            })
+                            .filter_map(|v| v.as_str().map(String::from))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1475,26 +1129,17 @@ impl AgentState {
                     .and_then(|v| v.as_array())
                     .map(|a| {
                         a.iter()
-                            .filter_map(|v| {
-                                v.as_str().map(String::from)
-                            })
+                            .filter_map(|v| v.as_str().map(String::from))
                             .collect()
                     })
                     .unwrap_or_default();
-                let rhs_refs: Vec<&str> =
-                    rhs.iter().map(|s| s.as_str()).collect();
+                let rhs_refs: Vec<&str> = rhs.iter().map(|s| s.as_str()).collect();
                 let t_max = req
                     .params
                     .get("t_max")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(10.0);
-                match ode_sirk::analyze_ode_system(
-                    vars,
-                    &rhs_refs,
-                    None,
-                    t_max,
-                    &[],
-                ) {
+                match ode_sirk::analyze_ode_system(vars, &rhs_refs, None, t_max, &[]) {
                     Ok((report, _ham)) => AgentResponse::ok(
                         &req.id,
                         serde_json::json!({
@@ -1512,28 +1157,14 @@ impl AgentState {
                 }
             }
             "export_html" => {
-                let doc = req
-                    .params
-                    .get("doc")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let doc = req.params.get("doc").and_then(|v| v.as_str()).unwrap_or("");
                 let html = doc_export_html(doc);
-                AgentResponse::ok(
-                    &req.id,
-                    serde_json::json!({ "html": html }),
-                )
+                AgentResponse::ok(&req.id, serde_json::json!({ "html": html }))
             }
             "export_tex" => {
-                let doc = req
-                    .params
-                    .get("doc")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let doc = req.params.get("doc").and_then(|v| v.as_str()).unwrap_or("");
                 let tex = doc_export_tex(doc);
-                AgentResponse::ok(
-                    &req.id,
-                    serde_json::json!({ "tex": tex }),
-                )
+                AgentResponse::ok(&req.id, serde_json::json!({ "tex": tex }))
             }
             // ── H10: named GrantSet presets
             // ───────────────────────────────
@@ -1545,10 +1176,7 @@ impl AgentState {
                 let presets: Vec<serde_json::Value> = ids
                     .iter()
                     .map(|id| {
-                        let p = self
-                            .roster
-                            .get(id)
-                            .expect("id from roster");
+                        let p = self.roster.get(id).expect("id from roster");
                         serde_json::json!({
                             "id": p.id,
                             "trust": p.trust,
@@ -1580,26 +1208,16 @@ impl AgentState {
                 // Record the start preset on a blank session (a
                 // switch is valid only while the
                 // session has produced nothing).
-                let model_id = match req
-                    .params
-                    .get("model_id")
-                    .and_then(|v| v.as_u64())
-                {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
                     Some(id) => id,
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag(
-                                "missing or non-integer 'model_id' field",
-                            ),
+                            bad_json_diag("missing or non-integer 'model_id' field"),
                         );
                     }
                 };
-                let preset_id = match req
-                    .params
-                    .get("preset")
-                    .and_then(|v| v.as_str())
-                {
+                let preset_id = match req.params.get("preset").and_then(|v| v.as_str()) {
                     Some(p) => p.to_string(),
                     None => {
                         return AgentResponse::err(
@@ -1611,21 +1229,15 @@ impl AgentState {
                 let session = match self.sessions.get_mut(&model_id) {
                     Some(s) => s,
                     None => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_handle_diag(model_id),
-                        );
+                        return AgentResponse::err(&req.id, bad_handle_diag(model_id));
                     }
                 };
                 // Blank-session check: refuse a switch once the
                 // session has produced anything (the
                 // tool surface must not change under a
                 // model that already ran).
-                let produced =
-                    session.event_log_len_for_preset_switch();
-                if !unfer_protocol::preset::switch_valid_when_blank(
-                    produced,
-                ) {
+                let produced = session.event_log_len_for_preset_switch();
+                if !unfer_protocol::preset::switch_valid_when_blank(produced) {
                     return AgentResponse::err(
                         &req.id,
                         Diagnostic::new(
@@ -1656,25 +1268,19 @@ impl AgentState {
                             .iter()
                             .find(|b| b.id == preset_id)
                             .and_then(|b| b.reason.clone())
-                            .unwrap_or_else(|| {
-                                "unknown preset".to_string()
-                            });
+                            .unwrap_or_else(|| "unknown preset".to_string());
                         AgentResponse::err(
                             &req.id,
                             Diagnostic::new(
                                 Code(1001),
-                                format!(
-                                    "preset '{preset_id}' is not available: {reason}"
-                                ),
+                                format!("preset '{preset_id}' is not available: {reason}"),
                                 Severity::Error,
                             ),
                         )
                     }
                 }
             }
-            _ => {
-                AgentResponse::err(&req.id, unknown_op_diag(&req.op))
-            }
+            _ => AgentResponse::err(&req.id, unknown_op_diag(&req.op)),
         }
     }
 }
@@ -1694,16 +1300,12 @@ fn parse_model_and_param<T: serde::de::DeserializeOwned>(
     let model_id = params
         .get("model_id")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            bad_json_diag("missing or non-integer 'model_id' field")
-        })?;
-    let param = params.get(param_name).ok_or_else(|| {
-        bad_json_diag(&format!("missing '{}' field", param_name))
-    })?;
-    let value: T =
-        serde_json::from_value(param.clone()).map_err(|e| {
-            bad_json_diag(&format!("invalid '{}': {}", param_name, e))
-        })?;
+        .ok_or_else(|| bad_json_diag("missing or non-integer 'model_id' field"))?;
+    let param = params
+        .get(param_name)
+        .ok_or_else(|| bad_json_diag(&format!("missing '{}' field", param_name)))?;
+    let value: T = serde_json::from_value(param.clone())
+        .map_err(|e| bad_json_diag(&format!("invalid '{}': {}", param_name, e)))?;
     Ok((model_id, value))
 }
 
@@ -1716,9 +1318,7 @@ fn doc_export_html(doc_text: &str) -> String {
     for seg in &segments {
         if let Some(span) = &seg.span {
             if span.start > last_end {
-                body.push_str(&escape_html(
-                    &doc_text[last_end..span.start],
-                ));
+                body.push_str(&escape_html(&doc_text[last_end..span.start]));
             }
             let raw = doc_text[span.clone()].trim();
             if seg.kind.is_kernel() {
@@ -1794,25 +1394,14 @@ fn main() {
         let req: AgentRequest = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                let resp = AgentResponse::err(
-                    "unknown",
-                    bad_json_diag(&e.to_string()),
-                );
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::to_string(&resp).unwrap()
-                );
+                let resp = AgentResponse::err("unknown", bad_json_diag(&e.to_string()));
+                let _ = writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap());
                 let _ = stdout.flush();
                 continue;
             }
         };
         let resp = state.handle(&req);
-        let _ = writeln!(
-            stdout,
-            "{}",
-            serde_json::to_string(&resp).unwrap()
-        );
+        let _ = writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap());
         let _ = stdout.flush();
     }
 }
@@ -1824,8 +1413,7 @@ mod tests {
     #[test]
     fn version_op() {
         let mut state = AgentState::new();
-        let req =
-            AgentRequest::new("1", "version", serde_json::json!({}));
+        let req = AgentRequest::new("1", "version", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(resp.ok);
         assert_eq!(resp.id, "1");
@@ -1841,11 +1429,7 @@ mod tests {
     #[test]
     fn list_codes_op() {
         let mut state = AgentState::new();
-        let req = AgentRequest::new(
-            "2",
-            "list_codes",
-            serde_json::json!({}),
-        );
+        let req = AgentRequest::new("2", "list_codes", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(resp.ok);
         let result = resp.result.clone().unwrap();
@@ -1856,16 +1440,13 @@ mod tests {
             .expect("list_codes carries gpu_triage");
         assert_eq!(triage.len(), 5);
         assert!(
-            triage
-                .iter()
-                .any(|t| t["code"] == "UK-GPU-ARCH_MISMATCH"),
+            triage.iter().any(|t| t["code"] == "UK-GPU-ARCH_MISMATCH"),
             "ARCH_MISMATCH triage present"
         );
         assert!(
-            triage.iter().any(|t| t["fix"]
-                .as_str()
-                .unwrap_or("")
-                .contains("LD_LIBRARY_PATH")),
+            triage
+                .iter()
+                .any(|t| t["fix"].as_str().unwrap_or("").contains("LD_LIBRARY_PATH")),
             "ARCH_MISMATCH fix mentions LD_LIBRARY_PATH"
         );
         // The layout codes from T1.2 are in the kernel registry.
@@ -1876,11 +1457,7 @@ mod tests {
     #[test]
     fn unknown_op_returns_hint() {
         let mut state = AgentState::new();
-        let req = AgentRequest::new(
-            "3",
-            "frobnicate",
-            serde_json::json!({}),
-        );
+        let req = AgentRequest::new("3", "frobnicate", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(!resp.ok);
         let diag = resp.error.unwrap();
@@ -1907,8 +1484,7 @@ mod tests {
     #[test]
     fn response_includes_timing_ms() {
         let mut state = AgentState::new();
-        let req =
-            AgentRequest::new("5", "version", serde_json::json!({}));
+        let req = AgentRequest::new("5", "version", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(resp.ok);
         assert!(resp.timing_ms.is_some());
@@ -1928,10 +1504,9 @@ mod tests {
                 "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
             }),
         );
-        let model_id =
-            state.handle(&create).result.unwrap()["model_id"]
-                .as_u64()
-                .unwrap();
+        let model_id = state.handle(&create).result.unwrap()["model_id"]
+            .as_u64()
+            .unwrap();
 
         // No events yet.
         let poll0 = state.handle(&AgentRequest::new(
@@ -1940,10 +1515,7 @@ mod tests {
             serde_json::json!({"model_id": model_id}),
         ));
         assert!(poll0.ok);
-        assert_eq!(
-            poll0.result.unwrap()["events"].as_array().unwrap().len(),
-            0
-        );
+        assert_eq!(poll0.result.unwrap()["events"].as_array().unwrap().len(), 0);
 
         // Evolve → event.
         state.handle(&AgentRequest::new(
@@ -1970,10 +1542,7 @@ mod tests {
             "poll_events",
             serde_json::json!({"model_id": model_id}),
         ));
-        assert_eq!(
-            poll2.result.unwrap()["events"].as_array().unwrap().len(),
-            0
-        );
+        assert_eq!(poll2.result.unwrap()["events"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -1992,8 +1561,7 @@ mod tests {
         );
         let create_resp = state.handle(&create);
         assert!(create_resp.ok, "{:?}", create_resp.error);
-        let model_id =
-            create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
 
         // Save the session.
         let save = AgentRequest::new(
@@ -2006,13 +1574,10 @@ mod tests {
         let blob_value = save_resp.result.unwrap();
 
         // Restore into a new model id.
-        let restore =
-            AgentRequest::new("12", "restore_session", blob_value);
+        let restore = AgentRequest::new("12", "restore_session", blob_value);
         let restore_resp = state.handle(&restore);
         assert!(restore_resp.ok, "{:?}", restore_resp.error);
-        let new_model_id = restore_resp.result.unwrap()["model_id"]
-            .as_u64()
-            .unwrap();
+        let new_model_id = restore_resp.result.unwrap()["model_id"].as_u64().unwrap();
         assert_ne!(new_model_id, model_id);
 
         // Query probability on restored model — should work without
@@ -2024,9 +1589,7 @@ mod tests {
         );
         let prob_resp = state.handle(&prob);
         assert!(prob_resp.ok, "{:?}", prob_resp.error);
-        let p = prob_resp.result.unwrap()["probability"]
-            .as_f64()
-            .unwrap();
+        let p = prob_resp.result.unwrap()["probability"].as_f64().unwrap();
         // Vacuum-started state at t=0 should be entirely in the
         // vacuum sector.
         assert!((p - 1.0).abs() < 1e-6, "expected p≈1.0, got {p}");
@@ -2046,8 +1609,7 @@ mod tests {
         );
         let create_resp = state.handle(&create);
         assert!(create_resp.ok, "{:?}", create_resp.error);
-        let model_id =
-            create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
 
         let req = AgentRequest::new(
             "31",
@@ -2078,8 +1640,7 @@ mod tests {
         );
         let create_resp = state.handle(&create);
         assert!(create_resp.ok, "{:?}", create_resp.error);
-        let model_id =
-            create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
 
         let req = AgentRequest::new(
             "41",
@@ -2132,11 +1693,7 @@ mod tests {
     #[test]
     fn bayesian_update_missing_observations() {
         let mut state = AgentState::new();
-        let req = AgentRequest::new(
-            "60",
-            "bayesian_update",
-            serde_json::json!({"model_id": 1}),
-        );
+        let req = AgentRequest::new("60", "bayesian_update", serde_json::json!({"model_id": 1}));
         let resp = state.handle(&req);
         assert!(!resp.ok);
     }
@@ -2154,18 +1711,14 @@ mod tests {
             }),
         );
         let create_resp = state.handle(&create);
-        let model_id =
-            create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
 
         let close = state.handle(&AgentRequest::new(
             "71",
             "close_model",
             serde_json::json!({"model_id": model_id}),
         ));
-        assert!(
-            close.ok,
-            "close_model should succeed for existing model"
-        );
+        assert!(close.ok, "close_model should succeed for existing model");
 
         // Subsequent op → BAD_HANDLE.
         let evolve = state.handle(&AgentRequest::new(
@@ -2202,16 +1755,12 @@ mod tests {
             }),
         );
         let create_resp = state.handle(&create);
-        let model_id =
-            create_resp.result.unwrap()["model_id"].as_u64().unwrap();
+        let model_id = create_resp.result.unwrap()["model_id"].as_u64().unwrap();
 
         // Push more events than the capacity to trigger overflow.
         let max = EVENT_QUEUE_CAPACITY;
         for i in 0..max + 10 {
-            state.push_event(
-                model_id,
-                serde_json::json!({"type": "evolved", "seq": i}),
-            );
+            state.push_event(model_id, serde_json::json!({"type": "evolved", "seq": i}));
         }
         // 10 events were dropped.
         assert_eq!(state.events_dropped.get(&model_id), Some(&10));
@@ -2234,23 +1783,19 @@ mod tests {
             serde_json::json!({"model_id": model_id}),
         ));
         assert!(poll2.ok);
-        assert!(
-            poll2.result.unwrap().get("events_dropped").is_none()
-        );
+        assert!(poll2.result.unwrap().get("events_dropped").is_none());
     }
 
     #[test]
     fn did_create_and_resolve() {
         let mut state = AgentState::new();
         let create = state.handle(&AgentRequest::new(
-            "d1", "did_create",
+            "d1",
+            "did_create",
             serde_json::json!({"service_endpoint": "https://node.example.com"}),
         ));
         assert!(create.ok, "{:?}", create.error);
-        let did = create.result.unwrap()["did"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let did = create.result.unwrap()["did"].as_str().unwrap().to_string();
         assert!(did.starts_with("did:unfer:"));
 
         let resolve = state.handle(&AgentRequest::new(
@@ -2287,13 +1832,11 @@ mod tests {
             "did_create",
             serde_json::json!({}),
         ));
-        let did = create.result.unwrap()["did"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let did = create.result.unwrap()["did"].as_str().unwrap().to_string();
 
         let update = state.handle(&AgentRequest::new(
-            "d5", "did_update",
+            "d5",
+            "did_update",
             serde_json::json!({"did": did, "service_endpoint": "https://new.example.com"}),
         ));
         assert!(update.ok, "{:?}", update.error);
@@ -2332,10 +1875,7 @@ mod tests {
             "did_create",
             serde_json::json!({}),
         ));
-        let did = create.result.unwrap()["did"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let did = create.result.unwrap()["did"].as_str().unwrap().to_string();
 
         let publish = state.handle(&AgentRequest::new(
             "c2",
@@ -2420,10 +1960,7 @@ mod tests {
             serde_json::json!({ "doc": "= Title\n\n#1 a #2 \\model(#1,#2)\n\nSome <text>." }),
         ));
         assert!(resp.ok, "{:?}", resp.error);
-        let html = resp.result.unwrap()["html"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let html = resp.result.unwrap()["html"].as_str().unwrap().to_string();
         assert!(html.contains("<!DOCTYPE html>"), "doctype: {html}");
         assert!(html.contains("&lt;text&gt;"), "escaped: {html}");
         assert!(html.contains("math-kernel"), "kernel span: {html}");
@@ -2438,12 +1975,8 @@ mod tests {
             serde_json::json!({ "doc": "#1 a #2 \\model(#1,#2)\n\nEuler: $ e^{i\\pi} + 1 = 0 $" }),
         ));
         assert!(resp.ok, "{:?}", resp.error);
-        let tex =
-            resp.result.unwrap()["tex"].as_str().unwrap().to_string();
-        assert!(
-            tex.contains("\\documentclass{article}"),
-            "preamble: {tex}"
-        );
+        let tex = resp.result.unwrap()["tex"].as_str().unwrap().to_string();
+        assert!(tex.contains("\\documentclass{article}"), "preamble: {tex}");
         assert!(tex.contains("\\begin{document}"), "begin: {tex}");
         assert!(tex.contains("\\end{document}"), "end: {tex}");
     }
@@ -2512,11 +2045,7 @@ mod tests {
         assert!(mint.ok, "{:?}", mint.error);
         assert_eq!(mint.result.unwrap()["total_supply"], 1000);
 
-        let alice_coin = unfer_consensus::certs::commit_coin(
-            1000,
-            &alice.did(),
-            &[1u8; 32],
-        );
+        let alice_coin = unfer_consensus::certs::commit_coin(1000, &alice.did(), &[1u8; 32]);
 
         // Transfer the whole thing to bob.
         let transfer = state.handle(&AgentRequest::new(
@@ -2535,11 +2064,7 @@ mod tests {
         assert!(transfer.ok, "{:?}", transfer.error);
         assert_eq!(transfer.result.unwrap()["total_supply"], 1000);
 
-        let bob_coin = unfer_consensus::certs::commit_coin(
-            1000,
-            &bob.did(),
-            &[0u8; 32],
-        );
+        let bob_coin = unfer_consensus::certs::commit_coin(1000, &bob.did(), &[0u8; 32]);
 
         // Burn bob's certificate.
         let burn = state.handle(&AgentRequest::new(
@@ -2594,10 +2119,7 @@ mod tests {
             }),
         ));
         assert!(!mint.ok);
-        assert_eq!(
-            mint.error.unwrap().code,
-            Code::CERT_MINT_NOT_AUTHORIZED
-        );
+        assert_eq!(mint.error.unwrap().code, Code::CERT_MINT_NOT_AUTHORIZED);
     }
 
     // ── H10: named GrantSet presets
@@ -2611,11 +2133,7 @@ mod tests {
         let mut state = AgentState::new();
         // With no roster dir configured, the roster is empty (but not
         // broken).
-        let req = AgentRequest::new(
-            "1",
-            "preset_list",
-            serde_json::json!({}),
-        );
+        let req = AgentRequest::new("1", "preset_list", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(resp.ok);
         let list = resp.result.as_ref().unwrap();
@@ -2644,20 +2162,14 @@ mod tests {
         state.roster = unfer_protocol::preset::Roster::from_entries(
             unfer_protocol::preset::discover_roster(&dir),
         );
-        let req = AgentRequest::new(
-            "2",
-            "preset_list",
-            serde_json::json!({}),
-        );
+        let req = AgentRequest::new("2", "preset_list", serde_json::json!({}));
         let resp = state.handle(&req);
         assert!(resp.ok);
         let list = resp.result.as_ref().unwrap();
         assert_eq!(list["presets"].as_array().unwrap().len(), 1);
         let broken = list["broken"].as_array().unwrap();
         assert_eq!(broken.len(), 1);
-        assert!(
-            broken[0]["reason"].as_str().unwrap().contains("broken")
-        );
+        assert!(broken[0]["reason"].as_str().unwrap().contains("broken"));
 
         // Create a blank session, set its start preset.
         let spec = ModelSpec {
@@ -2668,16 +2180,10 @@ mod tests {
             prior: unfer_protocol::PriorSpec::Vacuum,
             solver: unfer_protocol::SolverSpec::default(),
         };
-        let req = AgentRequest::new(
-            "3",
-            "create_model",
-            serde_json::to_value(spec).unwrap(),
-        );
+        let req = AgentRequest::new("3", "create_model", serde_json::to_value(spec).unwrap());
         let resp = state.handle(&req);
         assert!(resp.ok);
-        let model_id = resp.result.as_ref().unwrap()["model_id"]
-            .as_u64()
-            .unwrap();
+        let model_id = resp.result.as_ref().unwrap()["model_id"].as_u64().unwrap();
 
         let req = AgentRequest::new(
             "4",
@@ -2685,18 +2191,9 @@ mod tests {
             serde_json::json!({ "model_id": model_id, "preset": "analyst" }),
         );
         let resp = state.handle(&req);
-        assert!(
-            resp.ok,
-            "blank-session preset_set must succeed: {resp:?}"
-        );
-        assert_eq!(
-            resp.result.as_ref().unwrap()["preset"],
-            "analyst"
-        );
-        assert_eq!(
-            state.sessions[&model_id].start_preset(),
-            Some("analyst")
-        );
+        assert!(resp.ok, "blank-session preset_set must succeed: {resp:?}");
+        assert_eq!(resp.result.as_ref().unwrap()["preset"], "analyst");
+        assert_eq!(state.sessions[&model_id].start_preset(), Some("analyst"));
 
         // A broken/unknown preset is refused with its reason.
         let req = AgentRequest::new(
@@ -2724,15 +2221,9 @@ mod tests {
             prior: unfer_protocol::PriorSpec::Vacuum,
             solver: unfer_protocol::SolverSpec::default(),
         };
-        let req = AgentRequest::new(
-            "1",
-            "create_model",
-            serde_json::to_value(spec).unwrap(),
-        );
+        let req = AgentRequest::new("1", "create_model", serde_json::to_value(spec).unwrap());
         let resp = state.handle(&req);
-        let model_id = resp.result.as_ref().unwrap()["model_id"]
-            .as_u64()
-            .unwrap();
+        let model_id = resp.result.as_ref().unwrap()["model_id"].as_u64().unwrap();
 
         let req = AgentRequest::new(
             "2",

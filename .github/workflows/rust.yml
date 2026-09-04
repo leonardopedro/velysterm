@@ -36,8 +36,8 @@ jobs:
       # Single stable toolchain across the project: rust-toolchain.toml pins
       # 1.97.1 as the active toolchain here, so the rustfmt component added
       # below (and the rustfmt run) resolve to 1.97.1 — same rustfmt as the
-      # unfer/dynamic-arctic/australVM format gates. rustfmt.toml holds only
-      # stable options (no nightly-only wrap_comments etc.).
+      # unfer/dynamic-arctic/australVM format gates. No rustfmt.toml in the
+      # repo, so the default style (max_width 100) applies project-wide.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
       - run: rustup component add rustfmt

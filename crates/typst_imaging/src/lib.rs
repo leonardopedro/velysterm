@@ -1,11 +1,6 @@
 use imaging::peniko::kurbo::{Affine, Vec2};
-use imaging::{
-    ClipRef, ContextKindRef, ContextRef, ContextValueRef, GroupRef,
-    PaintSink,
-};
-use typst_library::layout::{
-    Frame, FrameItem, FrameKind, GroupItem, Point, Size, Transform,
-};
+use imaging::{ClipRef, ContextKindRef, ContextRef, ContextValueRef, GroupRef, PaintSink};
+use typst_library::layout::{Frame, FrameItem, FrameKind, GroupItem, Point, Size, Transform};
 
 pub mod convert;
 pub mod image;
@@ -19,65 +14,36 @@ pub fn render_frame(frame: &Frame, sink: &mut impl PaintSink) {
     render_items(frame, sink, state);
 }
 
-fn render_items(
-    frame: &Frame,
-    sink: &mut impl PaintSink,
-    state: RenderState,
-) {
+fn render_items(frame: &Frame, sink: &mut impl PaintSink, state: RenderState) {
     for (pos, item) in frame.items() {
         match item {
             FrameItem::Group(group) => {
                 render_group(group, sink, state, *pos);
             }
             FrameItem::Text(text) => {
-                text::render_text(
-                    text,
-                    sink,
-                    state.pre_translate(*pos),
-                );
+                text::render_text(text, sink, state.pre_translate(*pos));
             }
             FrameItem::Shape(shape, _) => {
-                shape::render_shape(
-                    shape,
-                    sink,
-                    state.pre_translate(*pos),
-                );
+                shape::render_shape(shape, sink, state.pre_translate(*pos));
             }
             FrameItem::Image(image, size, _) => {
-                image::render_image(
-                    image,
-                    *size,
-                    sink,
-                    state.pre_translate(*pos),
-                );
+                image::render_image(image, *size, sink, state.pre_translate(*pos));
             }
             FrameItem::Link(_, _) | FrameItem::Tag(_) => {}
         }
     }
 }
 
-fn render_group(
-    group: &GroupItem,
-    sink: &mut impl PaintSink,
-    state: RenderState,
-    pos: Point,
-) {
+fn render_group(group: &GroupItem, sink: &mut impl PaintSink, state: RenderState, pos: Point) {
     let group_transform = convert::convert_transform(group.transform);
 
     let state = match group.frame.kind() {
-        FrameKind::Soft => {
-            state.pre_translate(pos).pre_concat(group_transform)
-        }
+        FrameKind::Soft => state.pre_translate(pos).pre_concat(group_transform),
         FrameKind::Hard => state
             .pre_translate(pos)
             .pre_concat(group_transform)
-            .pre_concat_container(
-                state.container_transform.inverse() * state.transform,
-            )
-            .pre_concat_container(Affine::translate((
-                pos.x.to_pt(),
-                pos.y.to_pt(),
-            )))
+            .pre_concat_container(state.container_transform.inverse() * state.transform)
+            .pre_concat_container(Affine::translate((pos.x.to_pt(), pos.y.to_pt())))
             .pre_concat_container(group_transform)
             .with_size(group.frame.size()),
     };
@@ -94,9 +60,9 @@ fn render_group(
     let has_clip = group.clip.is_some();
     if let Some(clip) = &group.clip {
         let clip_path = convert::convert_curve(clip);
-        sink.push_group(GroupRef::new().with_clip(
-            ClipRef::fill(clip_path).with_transform(state.transform),
-        ));
+        sink.push_group(
+            GroupRef::new().with_clip(ClipRef::fill(clip_path).with_transform(state.transform)),
+        );
     }
 
     render_items(&group.frame, sink, state);
@@ -133,10 +99,9 @@ impl RenderState {
     /// `pos` is applied before the current transform.
     pub fn pre_translate(self, pos: Point) -> Self {
         Self {
-            transform: self.transform.pre_translate(Vec2::new(
-                pos.x.to_pt(),
-                pos.y.to_pt(),
-            )),
+            transform: self
+                .transform
+                .pre_translate(Vec2::new(pos.x.to_pt(), pos.y.to_pt())),
             ..self
         }
     }

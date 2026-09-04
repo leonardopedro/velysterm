@@ -55,8 +55,7 @@ fn normalize_line(line: &str) -> String {
                     }
                 }
             }
-            serde_json::to_string(&v)
-                .expect("re-serialize normalized response")
+            serde_json::to_string(&v).expect("re-serialize normalized response")
         }
         Err(_) => line.to_string(),
     }
@@ -66,9 +65,7 @@ fn normalize_line(line: &str) -> String {
 /// the normalized NDJSON response lines.
 fn replay() -> Vec<String> {
     let transcript = std::fs::read_to_string(fixture_path())
-        .unwrap_or_else(|e| {
-            panic!("missing transcript fixture: {e}")
-        });
+        .unwrap_or_else(|e| panic!("missing transcript fixture: {e}"));
 
     let mut child = Command::new(BIN)
         .stdin(Stdio::piped())
@@ -105,15 +102,10 @@ fn keyless_snapshot_replay_matches_golden() {
     let canonical = built.join("\n") + "\n";
 
     if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        let dir =
-            golden_path().parent().expect("golden dir").to_path_buf();
+        let dir = golden_path().parent().expect("golden dir").to_path_buf();
         std::fs::create_dir_all(&dir).expect("golden dir");
-        std::fs::write(golden_path(), &canonical)
-            .expect("write golden");
-        eprintln!(
-            "UPDATE_GOLDEN=1: regenerated {}",
-            golden_path().display()
-        );
+        std::fs::write(golden_path(), &canonical).expect("write golden");
+        eprintln!("UPDATE_GOLDEN=1: regenerated {}", golden_path().display());
         return;
     }
 
@@ -129,9 +121,7 @@ fn keyless_snapshot_replay_matches_golden() {
         let b: Vec<&str> = canonical.lines().collect();
         for (i, (gl, bl)) in g.iter().zip(b.iter()).enumerate() {
             if gl != bl {
-                diff_lines.push(format!(
-                    "line {i}:\n  golden: {gl}\n  built : {bl}"
-                ));
+                diff_lines.push(format!("line {i}:\n  golden: {gl}\n  built : {bl}"));
             }
         }
         if g.len() != b.len() {
@@ -157,17 +147,9 @@ fn snapshot_replay_produces_well_formed_ndjson() {
     let built = replay();
     assert!(!built.is_empty(), "transcript must produce responses");
     for line in &built {
-        let v: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|e| {
-                panic!("non-NDJSON line '{line}': {e}")
-            });
-        assert!(
-            v.get("id").is_some(),
-            "response must carry its id: {line}"
-        );
-        assert!(
-            v.get("ok").is_some(),
-            "response must carry ok: {line}"
-        );
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("non-NDJSON line '{line}': {e}"));
+        assert!(v.get("id").is_some(), "response must carry its id: {line}");
+        assert!(v.get("ok").is_some(), "response must carry ok: {line}");
     }
 }

@@ -80,12 +80,7 @@ pub struct OperatorTerm {
 }
 
 impl OperatorTerm {
-    pub fn new(
-        op: OpType,
-        dim: u32,
-        factor_re: f32,
-        factor_im: f32,
-    ) -> Self {
+    pub fn new(op: OpType, dim: u32, factor_re: f32, factor_im: f32) -> Self {
         Self {
             op_type: op as u32,
             target_dim: dim,

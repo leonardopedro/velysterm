@@ -122,9 +122,7 @@ fn dirty_prob_blocks(
     let dirty: Vec<BlockId> = inner
         .results()
         .keys()
-        .filter_map(|&offset| {
-            blocks.block_for_cursor(offset).map(|b| b.id)
-        })
+        .filter_map(|&offset| blocks.block_for_cursor(offset).map(|b| b.id))
         .collect();
     if !dirty.is_empty() {
         scheduler.note_blocks(dirty, now);

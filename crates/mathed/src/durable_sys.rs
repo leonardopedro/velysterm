@@ -17,9 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
-use unfer_ffi::durable::{
-    Backend, DurableStatus, consult_status, open_store,
-};
+use unfer_ffi::durable::{Backend, DurableStatus, consult_status, open_store};
 use unfer_protocol::durable::DurableStore;
 
 /// Latest consulted status, refreshed on the poll cadence. The
@@ -98,8 +96,7 @@ pub fn open_panel_store() -> Option<Arc<dyn DurableStore>> {
     // reports via `snapshot_load_error` — exactly what the chip
     // shows).
     Some(Arc::from(
-        open_store(Some(&d), Backend::Loro)
-            .expect("loro open_store cannot fail"),
+        open_store(Some(&d), Backend::Loro).expect("loro open_store cannot fail"),
     ))
 }
 
@@ -150,9 +147,7 @@ pub fn update_durable_panel(
     text.0 = match &status.snapshot_load_error {
         Some(err) => {
             color.0 = Color::srgb(0.95, 0.45, 0.40);
-            format!(
-                "{first}\n⚠ snapshot recovery: {err}\n{streams_line}"
-            )
+            format!("{first}\n⚠ snapshot recovery: {err}\n{streams_line}")
         }
         None => {
             color.0 = Color::srgb(0.72, 0.78, 0.85);
@@ -201,10 +196,8 @@ mod tests {
         )
         .unwrap();
 
-        let store: Arc<dyn DurableStore> = Arc::from(
-            open_store(Some(dir), Backend::Loro)
-                .expect("loro open cannot fail"),
-        );
+        let store: Arc<dyn DurableStore> =
+            Arc::from(open_store(Some(dir), Backend::Loro).expect("loro open cannot fail"));
         let status = consult_status(Some(store.as_ref()));
         assert_eq!(status.backend, "loro");
         assert!(
@@ -224,10 +217,7 @@ mod tests {
             Some(err) => format!("⚠ snapshot recovery: {err}"),
             None => String::new(),
         };
-        assert!(
-            line.contains("snapshot recovery"),
-            "chip line: {line}"
-        );
+        assert!(line.contains("snapshot recovery"), "chip line: {line}");
     }
 
     /// The kernel's no-store shape: RAM-only, stable schema, no

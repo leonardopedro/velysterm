@@ -1,5 +1,0 @@
-# Stable-only config: the format CI job runs the pinned 1.97.1 rustfmt
-# (rust-toolchain.toml), so the nightly-only unstable options
-# (wrap_comments, format_code_in_doc_comments) are deliberately not set —
-# single toolchain across all project repos.
-max_width = 70

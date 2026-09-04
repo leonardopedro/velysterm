@@ -151,9 +151,7 @@ impl PropKind {
             "def" | "define" | "definition" => Self::Definition,
             "var" | "variable" => Self::Variable,
             "ref" | "reference" => Self::Reference,
-            "statement" | "theorem" | "lemma" | "axiom" => {
-                Self::Statement
-            }
+            "statement" | "theorem" | "lemma" | "axiom" => Self::Statement,
             "model" => Self::Model,
             "prior" => Self::Prior,
             "solver" => Self::Solver,
@@ -317,15 +315,11 @@ pub fn resolve_segments(scan: &MarkerScan) -> Vec<Segment> {
         let [a, b, rest @ ..] = stmt.args.as_slice() else {
             continue;
         };
-        let (Some(start_id), Some(end_id)) =
-            (a.marker_id(), b.marker_id())
-        else {
+        let (Some(start_id), Some(end_id)) = (a.marker_id(), b.marker_id()) else {
             continue;
         };
         let span = match (by_id.get(start_id), by_id.get(end_id)) {
-            (Some(s), Some(e)) if s.range.end <= e.range.start => {
-                Some(s.range.end..e.range.start)
-            }
+            (Some(s), Some(e)) if s.range.end <= e.range.start => Some(s.range.end..e.range.start),
             _ => None,
         };
         segments.push(Segment {
@@ -357,10 +351,7 @@ pub fn next_marker_id(scan: &MarkerScan) -> u64 {
 /// the text anymore) — uniqueness is just "is this exact id string
 /// already taken," checked against the word each candidate number
 /// would produce.
-pub fn lowest_free_marker_numbers(
-    scan: &MarkerScan,
-    count: usize,
-) -> Vec<u64> {
+pub fn lowest_free_marker_numbers(scan: &MarkerScan, count: usize) -> Vec<u64> {
     let used: std::collections::HashSet<&str> =
         scan.markers.iter().map(|m| m.id.as_str()).collect();
     (1..)
@@ -452,16 +443,11 @@ pub fn scan_references(scan: &MarkerScan) -> Vec<ReferenceEntry> {
                 Arg::MarkerRef { id: s, .. },
                 Arg::MarkerRef { id: e, .. },
                 ..,
-            ] if stmt
-                .args
-                .iter()
-                .all(|a| matches!(a, Arg::MarkerRef { .. })) =>
-            {
+            ] if stmt.args.iter().all(|a| matches!(a, Arg::MarkerRef { .. })) => {
                 let body = (|| -> Option<Range<usize>> {
                     let s_m = by_id.get(s.as_str())?;
                     let e_m = by_id.get(e.as_str())?;
-                    (s_m.range.end <= e_m.range.start)
-                        .then_some(s_m.range.end..e_m.range.start)
+                    (s_m.range.end <= e_m.range.start).then_some(s_m.range.end..e_m.range.start)
                 })();
                 ReferenceKind::DocumentRef {
                     start_id: s.clone(),
@@ -474,9 +460,7 @@ pub fn scan_references(scan: &MarkerScan) -> Vec<ReferenceEntry> {
                     .args
                     .iter()
                     .filter_map(|a| match a {
-                        Arg::Literal { text, .. } => {
-                            Some(text.clone())
-                        }
+                        Arg::Literal { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .collect();
@@ -506,8 +490,7 @@ pub fn cite_label_text(entry: &ReferenceEntry) -> String {
     if entry.numbers.len() == 1 {
         format!("[{}]", entry.numbers[0])
     } else {
-        let nums: Vec<String> =
-            entry.numbers.iter().map(|n| n.to_string()).collect();
+        let nums: Vec<String> = entry.numbers.iter().map(|n| n.to_string()).collect();
         format!("[{}]", nums.join(", "))
     }
 }
@@ -566,8 +549,7 @@ pub fn references_for_cursor(
         .into_iter()
         .filter_map(|seg| {
             let span = seg.span?;
-            if !(span.start <= cursor_byte && cursor_byte <= span.end)
-            {
+            if !(span.start <= cursor_byte && cursor_byte <= span.end) {
                 return None;
             }
             let body = &doc_text[span.clone()];
@@ -581,10 +563,8 @@ pub fn references_for_cursor(
                 references: body_refs,
                 ..Default::default()
             };
-            let body_rendered = crate::transform::to_render_text(
-                body, &body_scan, &body_segs, &opts,
-            )
-            .text;
+            let body_rendered =
+                crate::transform::to_render_text(body, &body_scan, &body_segs, &opts).text;
             Some(ReferencesEntry {
                 tag: derive_tag(&body_rendered),
                 segment_range: span,
@@ -616,9 +596,7 @@ fn try_parse_stmt(text: &str, at: usize) -> Option<PropertyStmt> {
     if j >= bytes.len() || !bytes[j].is_ascii_alphabetic() {
         return None;
     }
-    while j < bytes.len()
-        && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
-    {
+    while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
         j += 1;
     }
     if j >= bytes.len() || bytes[j] != b'(' {
@@ -669,8 +647,7 @@ fn parse_arg(text: &str, raw: Range<usize>) -> Option<Arg> {
     if trimmed.is_empty() {
         return None;
     }
-    let start = raw.start
-        + (text[raw.clone()].len() - text[raw].trim_start().len());
+    let start = raw.start + (text[raw.clone()].len() - text[raw].trim_start().len());
     let range = start..start + trimmed.len();
     if let Some(rest) = trimmed.strip_prefix('#')
         && rest.starts_with(|c: char| c.is_ascii_digit())
@@ -815,8 +792,7 @@ mod tests {
         // is_skill() is true.
         let s = scan(r"\skill(acme/carbon-audit, scope:org)");
         assert_eq!(s.stmts.len(), 1);
-        let kind =
-            PropKind::resolve(&s.stmts[0].name, &s.stmts[0].args);
+        let kind = PropKind::resolve(&s.stmts[0].name, &s.stmts[0].args);
         assert_eq!(kind, PropKind::Skill);
         assert!(kind.is_skill());
         assert!(!kind.is_kernel());
@@ -849,17 +825,10 @@ mod tests {
         // Markers already using the words for 1 and 3 (built from
         // `auto_marker_id` itself, so this doesn't hardcode RFC 1751
         // table entries).
-        let text = format!(
-            "#{} a #{} b",
-            auto_marker_id(1),
-            auto_marker_id(3)
-        );
+        let text = format!("#{} a #{} b", auto_marker_id(1), auto_marker_id(3));
         let s = scan(&text);
         assert_eq!(lowest_free_marker_numbers(&s, 3), vec![2, 4, 5]);
-        assert_eq!(
-            lowest_free_marker_numbers(&scan("no markers"), 1),
-            vec![1]
-        );
+        assert_eq!(lowest_free_marker_numbers(&scan("no markers"), 1), vec![1]);
     }
 
     #[test]
@@ -884,15 +853,9 @@ mod tests {
     #[test]
     fn auto_token_respects_escapes() {
         assert_eq!(auto_marker_token("", 0).as_deref(), Some("#i"));
-        assert_eq!(
-            auto_marker_token("#i x ", 5).as_deref(),
-            Some("#o")
-        );
+        assert_eq!(auto_marker_token("#i x ", 5).as_deref(), Some("#o"));
         assert_eq!(auto_marker_token(r"a\", 2), None); // \#  → literal
-        assert_eq!(
-            auto_marker_token(r"a\\", 3).as_deref(),
-            Some("#i")
-        ); // \\# → marker
+        assert_eq!(auto_marker_token(r"a\\", 3).as_deref(), Some("#i")); // \\# → marker
     }
 
     #[test]
@@ -903,12 +866,8 @@ mod tests {
         let s = scan(text);
         let refs = scan_references(&s);
         assert_eq!(refs.len(), 5);
-        let nums: Vec<Vec<u64>> =
-            refs.iter().map(|r| r.numbers.clone()).collect();
-        assert_eq!(
-            nums,
-            vec![vec![1], vec![2], vec![3], vec![4, 5], vec![6]]
-        );
+        let nums: Vec<Vec<u64>> = refs.iter().map(|r| r.numbers.clone()).collect();
+        assert_eq!(nums, vec![vec![1], vec![2], vec![3], vec![4, 5], vec![6]]);
     }
 
     #[test]
@@ -943,10 +902,7 @@ mod tests {
             ReferenceKind::Bibliography { keys } => {
                 assert_eq!(
                     keys,
-                    &vec![
-                        "authorA89".to_string(),
-                        "authorB94".to_string()
-                    ]
+                    &vec!["authorA89".to_string(), "authorB94".to_string()]
                 );
             }
             _ => panic!("expected Bibliography"),
@@ -1030,8 +986,7 @@ mod tests {
         assert_eq!(entries.len(), 2);
         // Tags are derived from the *rendered* body, so inner
         // markers don't pollute them: outer = "ab", inner = "b".
-        let tags: Vec<&str> =
-            entries.iter().map(|e| e.tag.as_str()).collect();
+        let tags: Vec<&str> = entries.iter().map(|e| e.tag.as_str()).collect();
         assert!(tags.contains(&"ab"), "tags: {tags:?}");
         assert!(tags.contains(&"b"), "tags: {tags:?}");
     }
@@ -1062,9 +1017,7 @@ mod tests {
         let entries = references_for_cursor(doc, &s, 6);
         let outer = entries
             .iter()
-            .find(|e| {
-                e.segment_range.start == 2 && e.segment_range.end == 8
-            })
+            .find(|e| e.segment_range.start == 2 && e.segment_range.end == 8)
             .expect("outer segment present");
         assert_eq!(outer.tag, "x");
     }

@@ -3,9 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 /// Stable identifier for a block of text.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,8 +36,7 @@ impl BlockIndex {
         // 1. Calculate hashes and initial IDs for new blocks
         for range in new_ranges {
             let content = &text[range.clone()];
-            let mut s =
-                std::collections::hash_map::DefaultHasher::new();
+            let mut s = std::collections::hash_map::DefaultHasher::new();
             content.hash(&mut s);
             let hash = s.finish();
 
@@ -57,23 +54,20 @@ impl BlockIndex {
 
         for new_block in &mut new_blocks {
             // Try exact match (range + hash)
-            if let Some(old) = old_blocks.iter().find(|o| {
-                o.range == new_block.range && o.hash == new_block.hash
-            }) {
+            if let Some(old) = old_blocks
+                .iter()
+                .find(|o| o.range == new_block.range && o.hash == new_block.hash)
+            {
                 new_block.id = old.id;
                 matched_old.insert(old.id);
                 continue;
             }
 
             // Try fingerprint match (same hash, nearby position)
-            if let Some(old) =
-                old_blocks.iter().find(|o| o.hash == new_block.hash)
-            {
+            if let Some(old) = old_blocks.iter().find(|o| o.hash == new_block.hash) {
                 // If the block is reasonably close to the old one,
                 // assume it's the same block moved
-                let dist = (new_block.range.start as isize
-                    - old.range.start as isize)
-                    .abs();
+                let dist = (new_block.range.start as isize - old.range.start as isize).abs();
                 if dist < 1000 {
                     new_block.id = old.id;
                     matched_old.insert(old.id);
@@ -90,9 +84,7 @@ impl BlockIndex {
                 continue;
             }
 
-            while old_idx < old_blocks.len()
-                && matched_old.contains(&old_blocks[old_idx].id)
-            {
+            while old_idx < old_blocks.len() && matched_old.contains(&old_blocks[old_idx].id) {
                 old_idx += 1;
             }
 
@@ -103,8 +95,7 @@ impl BlockIndex {
             } else {
                 // Truly new block: generate unique ID based on range
                 // and text
-                let mut s =
-                    std::collections::hash_map::DefaultHasher::new();
+                let mut s = std::collections::hash_map::DefaultHasher::new();
                 new_block.range.start.hash(&mut s);
                 new_block.hash.hash(&mut s);
                 new_block.id = BlockId(s.finish());
@@ -119,9 +110,7 @@ impl BlockIndex {
         }
 
         for new in &new_blocks {
-            if let Some(old) =
-                old_blocks.iter().find(|o| o.id == new.id)
-            {
+            if let Some(old) = old_blocks.iter().find(|o| o.id == new.id) {
                 if old.hash != new.hash {
                     damage.dirty.insert(new.id);
                 }
@@ -165,8 +154,7 @@ pub fn split_blocks(text: &str) -> Vec<Range<usize>> {
         if c == '\n' {
             let is_blank = {
                 let mut blank = true;
-                let temp_chars =
-                    text[i + 1..].char_indices().peekable();
+                let temp_chars = text[i + 1..].char_indices().peekable();
                 for (_, ch) in temp_chars {
                     if ch == '\n' {
                         break;
@@ -184,8 +172,7 @@ pub fn split_blocks(text: &str) -> Vec<Range<usize>> {
                     let mut end = i;
                     while end > start
                         && (text.as_bytes()[end - 1] == b'\n'
-                            || text.as_bytes()[end - 1]
-                                .is_ascii_whitespace())
+                            || text.as_bytes()[end - 1].is_ascii_whitespace())
                     {
                         end -= 1;
                     }
@@ -211,8 +198,7 @@ pub fn split_blocks(text: &str) -> Vec<Range<usize>> {
                 let mut end = i;
                 while end > start {
                     if text.as_bytes()[end - 1] == b'\n'
-                        || text.as_bytes()[end - 1]
-                            .is_ascii_whitespace()
+                        || text.as_bytes()[end - 1].is_ascii_whitespace()
                     {
                         end -= 1;
                     } else {
@@ -224,8 +210,7 @@ pub fn split_blocks(text: &str) -> Vec<Range<usize>> {
                 }
             }
             current_block_start = Some(i);
-        } else if current_block_start.is_none() && !c.is_whitespace()
-        {
+        } else if current_block_start.is_none() && !c.is_whitespace() {
             current_block_start = Some(i);
         }
     }
@@ -233,9 +218,7 @@ pub fn split_blocks(text: &str) -> Vec<Range<usize>> {
     if let Some(start) = current_block_start {
         let mut end = text.len();
         while end > start {
-            if text.as_bytes()[end - 1] == b'\n'
-                || text.as_bytes()[end - 1].is_ascii_whitespace()
-            {
+            if text.as_bytes()[end - 1] == b'\n' || text.as_bytes()[end - 1].is_ascii_whitespace() {
                 end -= 1;
             } else {
                 break;

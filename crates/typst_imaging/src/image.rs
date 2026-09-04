@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use imaging::peniko::kurbo::{Affine, Rect};
-use imaging::peniko::{
-    Blob, Brush, Fill, ImageAlphaType, ImageBrush, ImageData,
-    ImageFormat,
-};
+use imaging::peniko::{Blob, Brush, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 use imaging::{Composite, FillRef, GeometryRef, PaintSink, Painter};
 use svg_imaging::{RenderOptions, SvgDocument};
 use typst_library::layout::Size;
@@ -49,28 +46,18 @@ pub(crate) fn render_image(
                 fill_rule: Fill::NonZero,
                 brush: (&brush).into(),
                 brush_transform: None,
-                shape: GeometryRef::Rect(Rect::new(
-                    0.0,
-                    0.0,
-                    width as f64,
-                    height as f64,
-                )),
+                shape: GeometryRef::Rect(Rect::new(0.0, 0.0, width as f64, height as f64)),
                 composite: Composite::default(),
             });
         }
         ImageKind::Svg(svg) => {
-            let Ok(doc) = SvgDocument::from_data(
-                svg.data().as_ref(),
-                &Default::default(),
-            ) else {
+            let Ok(doc) = SvgDocument::from_data(svg.data().as_ref(), &Default::default()) else {
                 return;
             };
 
             let svg_size = doc.size();
 
-            if svg_size.width.abs() < f64::EPSILON
-                || svg_size.height.abs() < f64::EPSILON
-            {
+            if svg_size.width.abs() < f64::EPSILON || svg_size.height.abs() < f64::EPSILON {
                 return;
             }
 
@@ -100,16 +87,11 @@ pub(crate) fn render_image(
                 &Default::default(),
             );
 
-            let Ok(doc) =
-                SvgDocument::from_str(&svg_str, &Default::default())
-            else {
+            let Ok(doc) = SvgDocument::from_str(&svg_str, &Default::default()) else {
                 return;
             };
 
-            let scale = Affine::scale_non_uniform(
-                size.x.to_pt() / w,
-                size.y.to_pt() / h,
-            );
+            let scale = Affine::scale_non_uniform(size.x.to_pt() / w, size.y.to_pt() / h);
 
             let mut painter = Painter::new(sink);
             let _ = doc.render(

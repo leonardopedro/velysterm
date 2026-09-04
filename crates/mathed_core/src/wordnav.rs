@@ -76,20 +76,14 @@ pub fn is_in_math(text: &str, pos: usize) -> bool {
 }
 
 /// Walk left from `pos` to the word boundary.
-pub fn word_boundary_left(
-    text: &str,
-    pos: usize,
-    atomic: &[Range<usize>],
-) -> usize {
+pub fn word_boundary_left(text: &str, pos: usize, atomic: &[Range<usize>]) -> usize {
     if pos == 0 {
         return 0;
     }
     let pos = clamp_to_char_boundary(text, pos);
 
     // Atomic: if strictly inside, snap to start.
-    if let Some(r) =
-        atomic.iter().find(|r| r.start < pos && pos < r.end)
-    {
+    if let Some(r) = atomic.iter().find(|r| r.start < pos && pos < r.end) {
         return r.start;
     }
 
@@ -138,9 +132,7 @@ pub fn word_boundary_left(
         let next_p = p - c.len_utf8();
         // Atomic snap: if stepping lands strictly inside an atomic
         // range.
-        if let Some(r) =
-            atomic.iter().find(|r| r.start < next_p && next_p < r.end)
-        {
+        if let Some(r) = atomic.iter().find(|r| r.start < next_p && next_p < r.end) {
             return r.start;
         }
         p = next_p;
@@ -150,11 +142,7 @@ pub fn word_boundary_left(
 }
 
 /// Walk right from `pos` to the word boundary.
-pub fn word_boundary_right(
-    text: &str,
-    pos: usize,
-    atomic: &[Range<usize>],
-) -> usize {
+pub fn word_boundary_right(text: &str, pos: usize, atomic: &[Range<usize>]) -> usize {
     let len = text.len();
     if pos >= len {
         return len;
@@ -162,9 +150,7 @@ pub fn word_boundary_right(
     let pos = clamp_to_char_boundary(text, pos);
 
     // Atomic: if strictly inside, snap to end.
-    if let Some(r) =
-        atomic.iter().find(|r| r.start < pos && pos < r.end)
-    {
+    if let Some(r) = atomic.iter().find(|r| r.start < pos && pos < r.end) {
         return r.end;
     }
 
@@ -214,9 +200,7 @@ pub fn word_boundary_right(
         }
         p += c.len_utf8();
         // Atomic snap.
-        if let Some(r) =
-            atomic.iter().find(|r| r.start < p && p < r.end)
-        {
+        if let Some(r) = atomic.iter().find(|r| r.start < p && p < r.end) {
             return r.end;
         }
     }
@@ -225,14 +209,9 @@ pub fn word_boundary_right(
 }
 
 /// Word range containing `pos`.
-pub fn word_range_at(
-    text: &str,
-    pos: usize,
-    atomic: &[Range<usize>],
-) -> Range<usize> {
+pub fn word_range_at(text: &str, pos: usize, atomic: &[Range<usize>]) -> Range<usize> {
     let pos = clamp_to_char_boundary(text, pos.min(text.len()));
-    word_boundary_left(text, pos, atomic)
-        ..word_boundary_right(text, pos, atomic)
+    word_boundary_left(text, pos, atomic)..word_boundary_right(text, pos, atomic)
 }
 
 fn clamp_to_char_boundary(text: &str, mut pos: usize) -> usize {

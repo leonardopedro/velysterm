@@ -2,8 +2,7 @@ use convert::*;
 use kanva::imaging::Composite;
 use kanva::imaging::kurbo::{Affine, Shape as _};
 use kanva::imaging::peniko::{
-    Blob, Brush, Fill, ImageAlphaType, ImageBrush, ImageData,
-    ImageFormat,
+    Blob, Brush, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
 };
 use kanva::prelude::*;
 use usvg::Node;
@@ -51,18 +50,10 @@ pub fn render_node(
     warnings: &mut Vec<SvgWarning>,
 ) {
     match node {
-        Node::Group(group) => {
-            render_group(group, sink, transform, warnings)
-        }
-        Node::Path(path) => {
-            render_path(path, sink, transform, warnings)
-        }
-        Node::Image(image) => {
-            render_image(image, sink, transform, warnings)
-        }
-        Node::Text(text) => {
-            render_group(text.flattened(), sink, transform, warnings)
-        }
+        Node::Group(group) => render_group(group, sink, transform, warnings),
+        Node::Path(path) => render_path(path, sink, transform, warnings),
+        Node::Image(image) => render_image(image, sink, transform, warnings),
+        Node::Text(text) => render_group(text.flattened(), sink, transform, warnings),
     }
 }
 
@@ -93,8 +84,7 @@ pub fn render_group(
         convert_blend_mode(group.blend_mode()),
         group.opacity().get(),
     );
-    let clip =
-        merge_clip_chain(group.clip_path(), transform, warnings);
+    let clip = merge_clip_chain(group.clip_path(), transform, warnings);
 
     sink.push_group(Group {
         clip,
@@ -124,8 +114,7 @@ pub fn render_path(
     }
 
     let geometry = convert_path(path.data());
-    let transform =
-        transform * convert_transform(path.abs_transform());
+    let transform = transform * convert_transform(path.abs_transform());
     let fill = convert_fill(path.fill(), warnings);
     let stroke = convert_stroke(path.stroke(), warnings);
     let paint_order = convert_paint_order(path.paint_order());
@@ -152,40 +141,16 @@ pub fn render_image(
             );
         }
         usvg::ImageKind::PNG(data) => {
-            render_raster(
-                data,
-                image::ImageFormat::Png,
-                image,
-                sink,
-                transform,
-            );
+            render_raster(data, image::ImageFormat::Png, image, sink, transform);
         }
         usvg::ImageKind::JPEG(data) => {
-            render_raster(
-                data,
-                image::ImageFormat::Jpeg,
-                image,
-                sink,
-                transform,
-            );
+            render_raster(data, image::ImageFormat::Jpeg, image, sink, transform);
         }
         usvg::ImageKind::GIF(data) => {
-            render_raster(
-                data,
-                image::ImageFormat::Gif,
-                image,
-                sink,
-                transform,
-            );
+            render_raster(data, image::ImageFormat::Gif, image, sink, transform);
         }
         usvg::ImageKind::WEBP(data) => {
-            render_raster(
-                data,
-                image::ImageFormat::WebP,
-                image,
-                sink,
-                transform,
-            );
+            render_raster(data, image::ImageFormat::WebP, image, sink, transform);
         }
     }
 }
@@ -197,9 +162,7 @@ pub fn render_raster(
     sink: &mut impl KanvaSink,
     transform: Affine,
 ) {
-    let Ok(decoded) =
-        image::load_from_memory_with_format(data, format)
-    else {
+    let Ok(decoded) = image::load_from_memory_with_format(data, format) else {
         return;
     };
     let rgba = decoded.into_rgba8();
@@ -218,10 +181,7 @@ pub fn render_raster(
         width: pixel_width,
         height: pixel_height,
     };
-    let image_brush = with_rendering_quality(
-        ImageBrush::new(image_data),
-        image.rendering_mode(),
-    );
+    let image_brush = with_rendering_quality(ImageBrush::new(image_data), image.rendering_mode());
 
     let transform = transform
         * convert_transform(image.abs_transform())
@@ -229,13 +189,8 @@ pub fn render_raster(
             display_width / pixel_width as f64,
             display_height / pixel_height as f64,
         );
-    let rect = kanva::imaging::kurbo::Rect::new(
-        0.0,
-        0.0,
-        pixel_width as f64,
-        pixel_height as f64,
-    )
-    .to_path(0.1);
+    let rect = kanva::imaging::kurbo::Rect::new(0.0, 0.0, pixel_width as f64, pixel_height as f64)
+        .to_path(0.1);
 
     sink.draw_path(
         rect,

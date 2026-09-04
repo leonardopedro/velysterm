@@ -44,10 +44,7 @@ pub struct PopupResult {
 
 /// Pure navigation: Up/Down wrap; Accept returns selected payload +
 /// input and clears state; Cancel clears and returns None.
-pub fn popup_nav(
-    state: &mut PopupState,
-    nav: PopupNav,
-) -> Option<PopupResult> {
+pub fn popup_nav(state: &mut PopupState, nav: PopupNav) -> Option<PopupResult> {
     match nav {
         PopupNav::Up => {
             if !state.items.is_empty() {
@@ -61,17 +58,13 @@ pub fn popup_nav(
         }
         PopupNav::Down => {
             if !state.items.is_empty() {
-                state.selected =
-                    (state.selected + 1) % state.items.len();
+                state.selected = (state.selected + 1) % state.items.len();
             }
             None
         }
         PopupNav::Accept => {
             let result = PopupResult {
-                payload: state
-                    .items
-                    .get(state.selected)
-                    .map(|i| i.payload.clone()),
+                payload: state.items.get(state.selected).map(|i| i.payload.clone()),
                 input: state.input.clone(),
             };
             clear_state(state);
@@ -131,9 +124,7 @@ pub fn sync_popup_ui(
             // Input row for Define/Rename/Search.
             if matches!(
                 kind,
-                PopupKind::Define
-                    | PopupKind::Rename
-                    | PopupKind::Search
+                PopupKind::Define | PopupKind::Rename | PopupKind::Search
             ) {
                 parent.spawn((
                     Text::new(&state.input),
@@ -147,8 +138,7 @@ pub fn sync_popup_ui(
 
             // Item rows.
             for (i, item) in state.items.iter().enumerate() {
-                let row_bg =
-                    if i == state.selected { sel_bg } else { bg };
+                let row_bg = if i == state.selected { sel_bg } else { bg };
                 parent
                     .spawn((
                         Node {
@@ -160,14 +150,8 @@ pub fn sync_popup_ui(
                         BackgroundColor(row_bg),
                     ))
                     .with_children(|row| {
-                        row.spawn((
-                            Text::new(&item.label),
-                            TextColor(Color::WHITE),
-                        ));
-                        row.spawn((
-                            Text::new(&item.detail),
-                            TextColor(dim),
-                        ));
+                        row.spawn((Text::new(&item.label), TextColor(Color::WHITE)));
+                        row.spawn((Text::new(&item.detail), TextColor(dim)));
                     });
             }
         });

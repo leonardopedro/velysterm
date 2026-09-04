@@ -74,8 +74,7 @@ pub fn find_matches(text: &str, query: &str) -> Vec<Range<usize>> {
         return vec![];
     }
 
-    let is_case_insensitive =
-        query.chars().all(|c| !c.is_uppercase());
+    let is_case_insensitive = query.chars().all(|c| !c.is_uppercase());
     let mut matches = Vec::new();
     let mut cursor = 0;
 
@@ -104,10 +103,7 @@ pub fn find_matches(text: &str, query: &str) -> Vec<Range<usize>> {
     matches
 }
 
-fn find_case_insensitive_range(
-    text: &str,
-    query: &str,
-) -> Option<Range<usize>> {
+fn find_case_insensitive_range(text: &str, query: &str) -> Option<Range<usize>> {
     let q_chars: Vec<char> = query.chars().collect();
     if q_chars.is_empty() {
         return None;
@@ -124,9 +120,7 @@ fn find_case_insensitive_range(
         let mut text_iter = current_slice.chars();
         for &q_char in &q_chars {
             if let Some(t_char) = text_iter.next() {
-                if t_char.to_lowercase().next()
-                    != Some(q_char.to_lowercase().next().unwrap())
-                {
+                if t_char.to_lowercase().next() != Some(q_char.to_lowercase().next().unwrap()) {
                     match_found = false;
                     break;
                 }
@@ -222,9 +216,6 @@ mod tests {
         assert_eq!(state.matches.len(), 4);
         // Should still be at 'a' in bnanana
         assert!(state.current.is_some());
-        assert!(
-            state.matches[state.current.unwrap()].start
-                >= state.origin
-        );
+        assert!(state.matches[state.current.unwrap()].start >= state.origin);
     }
 }

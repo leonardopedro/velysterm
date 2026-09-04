@@ -18,9 +18,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use unfer_ffi::durable::{
-    Backend, DurableStatus, consult_status, open_store,
-};
+use unfer_ffi::durable::{Backend, DurableStatus, consult_status, open_store};
 
 /// Consult the durable store at `dir`. `None` = no store (the
 /// RAM-only shape the kernel reports when `UNFER_DURABLE_DIR` is
@@ -33,9 +31,7 @@ use unfer_ffi::durable::{
 /// `snapshot_load_error` channel — the same consult channel the
 /// corrupt- snapshot recovery report uses, so both render identically
 /// and neither can take the dashboard down.
-pub fn open_failure_status(
-    err: impl std::fmt::Display,
-) -> DurableStatus {
+pub fn open_failure_status(err: impl std::fmt::Display) -> DurableStatus {
     DurableStatus {
         backend: "none".to_string(),
         persist_count: 0,
@@ -174,14 +170,10 @@ mod tests {
         let status = consult_from(Some(&scratch.0));
         let doc = render_document(&status);
         assert!(
-            doc.contains("snapshot recovery")
-                && doc.contains("snapshot import failed"),
+            doc.contains("snapshot recovery") && doc.contains("snapshot import failed"),
             "dashboard must surface the corruption: {doc}"
         );
-        assert!(
-            doc.contains("\\cite("),
-            "sections must be citable: {doc}"
-        );
+        assert!(doc.contains("\\cite("), "sections must be citable: {doc}");
     }
 
     /// RAM-only shape: no store configured, stable schema, clean
@@ -212,21 +204,14 @@ mod tests {
             .snapshot_load_error
             .as_deref()
             .expect("error channel");
-        assert!(
-            err.contains("open failed")
-                && err.contains("simulated open error")
-        );
+        assert!(err.contains("open failed") && err.contains("simulated open error"));
 
         let doc = render_document(&status);
         assert!(
-            doc.contains("snapshot recovery")
-                && doc.contains("open failed"),
+            doc.contains("snapshot recovery") && doc.contains("open failed"),
             "open failure must render on the consulted channel: {doc}"
         );
-        assert!(
-            doc.contains("\\cite("),
-            "sections must stay citable: {doc}"
-        );
+        assert!(doc.contains("\\cite("), "sections must stay citable: {doc}");
     }
 
     /// The operator consult must never panic on a corrupt store:
@@ -238,11 +223,7 @@ mod tests {
         // snapshot: Loro moves it aside and reports — no
         // panic, no dead-end.
         let scratch = Scratch::new("unreadable");
-        std::fs::write(
-            scratch.0.join("snapshot.bin"),
-            b"junk not a snapshot",
-        )
-        .unwrap();
+        std::fs::write(scratch.0.join("snapshot.bin"), b"junk not a snapshot").unwrap();
         let status = consult_from(Some(&scratch.0));
         assert!(
             status.snapshot_load_error.is_some(),
@@ -255,13 +236,9 @@ mod tests {
     #[test]
     fn dashboard_document_clean_store_shape() {
         let scratch = Scratch::new("clean");
-        let store = open_store(Some(&scratch.0), Backend::Loro)
-            .expect("open");
+        let store = open_store(Some(&scratch.0), Backend::Loro).expect("open");
         store
-            .append(
-                unfer_protocol::durable::streams::AUDIT,
-                b"{\"n\":1}",
-            )
+            .append(unfer_protocol::durable::streams::AUDIT, b"{\"n\":1}")
             .unwrap();
         store.flush().unwrap();
         drop(store);

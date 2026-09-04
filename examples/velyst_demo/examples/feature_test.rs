@@ -42,10 +42,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 fn pan_zoom_camera(
     primary_window: Query<&Window, With<PrimaryWindow>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut camera_q: Query<
-        (&Camera, &mut Transform, &mut Projection),
-        With<Camera2d>,
-    >,
+    mut camera_q: Query<(&Camera, &mut Transform, &mut Projection), With<Camera2d>>,
     mut scroll: MessageReader<MouseWheel>,
     mut last_pos: Local<Option<Vec2>>,
 ) {
@@ -60,9 +57,7 @@ fn pan_zoom_camera(
     let delta_pixels = current_pos - last_pos.unwrap_or(current_pos);
     *last_pos = Some(current_pos);
 
-    let Ok((camera, mut transform, mut projection)) =
-        camera_q.single_mut()
-    else {
+    let Ok((camera, mut transform, mut projection)) = camera_q.single_mut() else {
         return;
     };
 
@@ -78,11 +73,8 @@ fn pan_zoom_camera(
         ortho.scale = (ortho.scale * (1.0 - delta)).clamp(0.05, 10.0);
     }
 
-    if mouse_buttons.pressed(MouseButton::Left)
-        && delta_pixels != Vec2::ZERO
-    {
-        let viewport_size =
-            camera.logical_viewport_size().unwrap_or(window.size());
+    if mouse_buttons.pressed(MouseButton::Left) && delta_pixels != Vec2::ZERO {
+        let viewport_size = camera.logical_viewport_size().unwrap_or(window.size());
         let world_units_per_pixel = ortho.area.size() / viewport_size;
         let delta = delta_pixels * world_units_per_pixel;
         transform.translation.x -= delta.x;

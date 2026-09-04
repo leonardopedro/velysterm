@@ -1,10 +1,7 @@
 use kanva::imaging::Composite;
-use kanva::imaging::kurbo::{
-    Affine, BezPath, Cap, Join, Point, Stroke,
-};
+use kanva::imaging::kurbo::{Affine, BezPath, Cap, Join, Point, Stroke};
 use kanva::imaging::peniko::{
-    BlendMode, Brush, ColorStop, Extend, Fill, Gradient, ImageBrush,
-    ImageQuality, Mix, Style,
+    BlendMode, Brush, ColorStop, Extend, Fill, Gradient, ImageBrush, ImageQuality, Mix, Style,
 };
 use kanva::prelude::*;
 use usvg::Node;
@@ -19,13 +16,7 @@ pub(crate) fn merge_clip_chain(
     let clip_path = clip_path?;
     let mut merged = BezPath::new();
     let mut fill_rule = Fill::NonZero;
-    collect_clip_chain(
-        clip_path,
-        transform,
-        &mut merged,
-        &mut fill_rule,
-        warnings,
-    );
+    collect_clip_chain(clip_path, transform, &mut merged, &mut fill_rule, warnings);
     if merged.is_empty() {
         return None;
     }
@@ -44,9 +35,7 @@ fn collect_clip_chain(
     warnings: &mut Vec<SvgWarning>,
 ) {
     if let Some(parent) = clip_path.clip_path() {
-        collect_clip_chain(
-            parent, transform, out, fill_rule, warnings,
-        );
+        collect_clip_chain(parent, transform, out, fill_rule, warnings);
     }
     if let Some(clip) = convert_clip(clip_path, transform, warnings) {
         if let Style::Fill(rule) = clip.style {
@@ -64,12 +53,8 @@ fn convert_clip(
     let mut path = BezPath::new();
     let mut fill_rule: Option<Fill> = None;
 
-    if !collect_clip_group(
-        clip_path.root(),
-        transform,
-        &mut path,
-        &mut fill_rule,
-    ) || path.is_empty()
+    if !collect_clip_group(clip_path.root(), transform, &mut path, &mut fill_rule)
+        || path.is_empty()
     {
         warnings.push(SvgWarning::ComplexClipPathSkipped);
         return None;
@@ -88,10 +73,7 @@ fn collect_clip_group(
     out: &mut BezPath,
     fill_rule: &mut Option<Fill>,
 ) -> bool {
-    if group.clip_path().is_some()
-        || group.mask().is_some()
-        || !group.filters().is_empty()
-    {
+    if group.clip_path().is_some() || group.mask().is_some() || !group.filters().is_empty() {
         return false;
     }
     for child in group.children() {
@@ -128,21 +110,12 @@ fn collect_clip_node(
                 *fill_rule = Some(rule);
             }
             let mut clip_path_bez = convert_path(path.data());
-            clip_path_bez.apply_affine(
-                transform * convert_transform(path.abs_transform()),
-            );
+            clip_path_bez.apply_affine(transform * convert_transform(path.abs_transform()));
             out.extend(clip_path_bez.elements().iter().copied());
             true
         }
-        Node::Text(text) => collect_clip_group(
-            text.flattened(),
-            transform,
-            out,
-            fill_rule,
-        ),
-        Node::Group(group) => {
-            collect_clip_group(group, transform, out, fill_rule)
-        }
+        Node::Text(text) => collect_clip_group(text.flattened(), transform, out, fill_rule),
+        Node::Group(group) => collect_clip_group(group, transform, out, fill_rule),
         Node::Image(_) => false,
     }
 }
@@ -152,8 +125,7 @@ pub(crate) fn convert_fill(
     warnings: &mut Vec<SvgWarning>,
 ) -> Option<KanvaFill> {
     let fill = fill?;
-    let (brush, brush_transform) =
-        convert_brush(fill.paint(), fill.opacity().get(), warnings)?;
+    let (brush, brush_transform) = convert_brush(fill.paint(), fill.opacity().get(), warnings)?;
     Some(KanvaFill {
         rule: match fill.rule() {
             usvg::FillRule::NonZero => Fill::NonZero,
@@ -170,11 +142,7 @@ pub(crate) fn convert_stroke(
     warnings: &mut Vec<SvgWarning>,
 ) -> Option<KanvaStroke> {
     let stroke = stroke?;
-    let (brush, brush_transform) = convert_brush(
-        stroke.paint(),
-        stroke.opacity().get(),
-        warnings,
-    )?;
+    let (brush, brush_transform) = convert_brush(stroke.paint(), stroke.opacity().get(), warnings)?;
     Some(KanvaStroke {
         stroke: convert_stroke_style(stroke),
         brush,
@@ -189,19 +157,13 @@ fn convert_brush(
     warnings: &mut Vec<SvgWarning>,
 ) -> Option<(Brush, Option<Affine>)> {
     match paint {
-        usvg::Paint::Color(color) => {
-            Some((convert_color(*color, opacity), None))
-        }
+        usvg::Paint::Color(color) => Some((convert_color(*color, opacity), None)),
         usvg::Paint::LinearGradient(g) => Some((
-            Brush::Gradient(
-                convert_linear_gradient(g).multiply_alpha(opacity),
-            ),
+            Brush::Gradient(convert_linear_gradient(g).multiply_alpha(opacity)),
             affine_if_non_identity(g.transform()),
         )),
         usvg::Paint::RadialGradient(g) => Some((
-            Brush::Gradient(
-                convert_radial_gradient(g).multiply_alpha(opacity),
-            ),
+            Brush::Gradient(convert_radial_gradient(g).multiply_alpha(opacity)),
             affine_if_non_identity(g.transform()),
         )),
         usvg::Paint::Pattern(_) => {
@@ -211,9 +173,7 @@ fn convert_brush(
     }
 }
 
-pub(crate) fn convert_path(
-    path: &usvg::tiny_skia_path::Path,
-) -> BezPath {
+pub(crate) fn convert_path(path: &usvg::tiny_skia_path::Path) -> BezPath {
     let mut bez = BezPath::new();
     for segment in path.segments() {
         match segment {
@@ -229,20 +189,14 @@ pub(crate) fn convert_path(
                     Point::new(p2.x as f64, p2.y as f64),
                 );
             }
-            usvg::tiny_skia_path::PathSegment::CubicTo(
-                p1,
-                p2,
-                p3,
-            ) => {
+            usvg::tiny_skia_path::PathSegment::CubicTo(p1, p2, p3) => {
                 bez.curve_to(
                     Point::new(p1.x as f64, p1.y as f64),
                     Point::new(p2.x as f64, p2.y as f64),
                     Point::new(p3.x as f64, p3.y as f64),
                 );
             }
-            usvg::tiny_skia_path::PathSegment::Close => {
-                bez.close_path()
-            }
+            usvg::tiny_skia_path::PathSegment::Close => bez.close_path(),
         }
     }
     bez
@@ -276,9 +230,7 @@ fn convert_color(color: usvg::Color, opacity: f32) -> Brush {
 fn convert_stroke_style(stroke: &usvg::Stroke) -> Stroke {
     let mut s = Stroke::new(stroke.width().get() as f64)
         .with_join(match stroke.linejoin() {
-            usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => {
-                Join::Miter
-            }
+            usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => Join::Miter,
             usvg::LineJoin::Round => Join::Round,
             usvg::LineJoin::Bevel => Join::Bevel,
         })
@@ -304,14 +256,9 @@ fn convert_linear_gradient(g: &usvg::LinearGradient) -> Gradient {
 }
 
 fn convert_radial_gradient(g: &usvg::RadialGradient) -> Gradient {
-    Gradient::new_two_point_radial(
-        (g.fx(), g.fy()),
-        0.0,
-        (g.cx(), g.cy()),
-        g.r().get(),
-    )
-    .with_extend(convert_extend(g.spread_method()))
-    .with_stops(convert_stops(g.stops()).as_slice())
+    Gradient::new_two_point_radial((g.fx(), g.fy()), 0.0, (g.cx(), g.cy()), g.r().get())
+        .with_extend(convert_extend(g.spread_method()))
+        .with_stops(convert_stops(g.stops()).as_slice())
 }
 
 fn convert_stops(stops: &[usvg::Stop]) -> Vec<ColorStop> {
@@ -347,46 +294,34 @@ pub(crate) fn convert_blend_mode(mode: usvg::BlendMode) -> BlendMode {
         usvg::BlendMode::Overlay => BlendMode::from(Mix::Overlay),
         usvg::BlendMode::Darken => BlendMode::from(Mix::Darken),
         usvg::BlendMode::Lighten => BlendMode::from(Mix::Lighten),
-        usvg::BlendMode::ColorDodge => {
-            BlendMode::from(Mix::ColorDodge)
-        }
+        usvg::BlendMode::ColorDodge => BlendMode::from(Mix::ColorDodge),
         usvg::BlendMode::ColorBurn => BlendMode::from(Mix::ColorBurn),
         usvg::BlendMode::HardLight => BlendMode::from(Mix::HardLight),
         usvg::BlendMode::SoftLight => BlendMode::from(Mix::SoftLight),
-        usvg::BlendMode::Difference => {
-            BlendMode::from(Mix::Difference)
-        }
+        usvg::BlendMode::Difference => BlendMode::from(Mix::Difference),
         usvg::BlendMode::Exclusion => BlendMode::from(Mix::Exclusion),
         usvg::BlendMode::Hue => BlendMode::from(Mix::Hue),
-        usvg::BlendMode::Saturation => {
-            BlendMode::from(Mix::Saturation)
-        }
+        usvg::BlendMode::Saturation => BlendMode::from(Mix::Saturation),
         usvg::BlendMode::Color => BlendMode::from(Mix::Color),
-        usvg::BlendMode::Luminosity => {
-            BlendMode::from(Mix::Luminosity)
-        }
+        usvg::BlendMode::Luminosity => BlendMode::from(Mix::Luminosity),
     }
 }
 
-pub(crate) fn convert_paint_order(
-    order: usvg::PaintOrder,
-) -> PaintOrder {
+pub(crate) fn convert_paint_order(order: usvg::PaintOrder) -> PaintOrder {
     match order {
         usvg::PaintOrder::FillAndStroke => PaintOrder::FillStroke,
         usvg::PaintOrder::StrokeAndFill => PaintOrder::StrokeFill,
     }
 }
 
-pub(crate) fn with_rendering_quality(
-    brush: ImageBrush,
-    mode: usvg::ImageRendering,
-) -> ImageBrush {
+pub(crate) fn with_rendering_quality(brush: ImageBrush, mode: usvg::ImageRendering) -> ImageBrush {
     let quality = match mode {
         usvg::ImageRendering::OptimizeSpeed
         | usvg::ImageRendering::CrispEdges
         | usvg::ImageRendering::Pixelated => ImageQuality::Low,
-        usvg::ImageRendering::OptimizeQuality
-        | usvg::ImageRendering::HighQuality => ImageQuality::High,
+        usvg::ImageRendering::OptimizeQuality | usvg::ImageRendering::HighQuality => {
+            ImageQuality::High
+        }
         usvg::ImageRendering::Smooth => ImageQuality::Medium,
     };
     brush.with_quality(quality)

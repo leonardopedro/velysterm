@@ -63,21 +63,15 @@ pub struct ReferencesPanelData {
 /// Build a fresh panel for the current cursor position. Body
 /// images start empty; they are rendered lazily on the first
 /// frame after opening.
-pub fn open_references_panel(
-    doc_text: &str,
-    cursor_byte: usize,
-) -> ReferencesPanelData {
-    let entries = mathed_core::markers::references_for_cursor(
-        doc_text,
-        &scan(doc_text),
-        cursor_byte,
-    )
-    .into_iter()
-    .map(|core| ReferencesPanelEntry {
-        core,
-        body_image: None,
-    })
-    .collect();
+pub fn open_references_panel(doc_text: &str, cursor_byte: usize) -> ReferencesPanelData {
+    let entries =
+        mathed_core::markers::references_for_cursor(doc_text, &scan(doc_text), cursor_byte)
+            .into_iter()
+            .map(|core| ReferencesPanelEntry {
+                core,
+                body_image: None,
+            })
+            .collect();
     ReferencesPanelData {
         cursor_byte,
         entries,
@@ -93,28 +87,23 @@ pub fn update_references_panel(
     doc_text: &str,
     cursor_byte: usize,
 ) {
-    let old_by_range: HashMap<std::ops::Range<usize>, RgbaImage> =
-        panel
-            .entries
-            .iter()
-            .filter_map(|e| {
-                e.body_image.as_ref().map(|img| {
-                    (e.core.segment_range.clone(), img.clone())
-                })
+    let old_by_range: HashMap<std::ops::Range<usize>, RgbaImage> = panel
+        .entries
+        .iter()
+        .filter_map(|e| {
+            e.body_image
+                .as_ref()
+                .map(|img| (e.core.segment_range.clone(), img.clone()))
+        })
+        .collect();
+    let new_entries =
+        mathed_core::markers::references_for_cursor(doc_text, &scan(doc_text), cursor_byte)
+            .into_iter()
+            .map(|core| {
+                let body_image = old_by_range.get(&core.segment_range).cloned();
+                ReferencesPanelEntry { core, body_image }
             })
             .collect();
-    let new_entries = mathed_core::markers::references_for_cursor(
-        doc_text,
-        &scan(doc_text),
-        cursor_byte,
-    )
-    .into_iter()
-    .map(|core| {
-        let body_image =
-            old_by_range.get(&core.segment_range).cloned();
-        ReferencesPanelEntry { core, body_image }
-    })
-    .collect();
     panel.entries = new_entries;
     panel.cursor_byte = cursor_byte;
 }
@@ -123,10 +112,7 @@ pub fn update_references_panel(
 /// `None` for an empty body. The body is run through the
 /// transform first (markers hidden, cite labels spliced) so the
 /// rendered image matches what the user sees in the doc.
-pub fn render_entry_body(
-    body_text: &str,
-    width_pt: f64,
-) -> Result<RgbaImage, RenderError> {
+pub fn render_entry_body(body_text: &str, width_pt: f64) -> Result<RgbaImage, RenderError> {
     if body_text.trim().is_empty() {
         return Err(RenderError::Eval);
     }
@@ -137,9 +123,7 @@ pub fn render_entry_body(
         references: refs,
         ..Default::default()
     };
-    let render = mathed_core::transform::to_render_text(
-        body_text, &scan, &segments, &opts,
-    );
+    let render = mathed_core::transform::to_render_text(body_text, &scan, &segments, &opts);
     render_markup(&render.text, width_pt)
 }
 
@@ -148,10 +132,7 @@ pub fn render_entry_body(
 /// padding + its body's height (capped at `BODY_MAX_HEIGHT_PX`).
 /// The total is capped at `min(PANEL_MAX_PX, win_h *
 /// PANEL_MAX_FRAC)`.
-pub fn panel_height(
-    panel: &ReferencesPanelData,
-    win_h: usize,
-) -> u32 {
+pub fn panel_height(panel: &ReferencesPanelData, win_h: usize) -> u32 {
     let mut h: u32 = 25; // header
     for entry in &panel.entries {
         h += 5; // top padding
@@ -213,11 +194,9 @@ pub fn draw_references_panel(
     // Lazily render any missing body images.
     for entry in &mut panel.entries {
         if entry.body_image.is_none() {
-            let body_text =
-                doc_text.get(entry.core.segment_range.clone());
+            let body_text = doc_text.get(entry.core.segment_range.clone());
             if let Some(body_text) = body_text
-                && let Ok(img) =
-                    render_entry_body(body_text, BODY_WIDTH_PT)
+                && let Ok(img) = render_entry_body(body_text, BODY_WIDTH_PT)
             {
                 entry.body_image = Some(img);
             }
@@ -282,16 +261,7 @@ pub fn draw_references_panel(
             break;
         }
         // Frame + fill.
-        fill_band(
-            buffer,
-            win_w,
-            x0,
-            y,
-            x1,
-            y + h,
-            ENTRY_BG_RGB,
-            ENTRY_BG_A,
-        );
+        fill_band(buffer, win_w, x0, y, x1, y + h, ENTRY_BG_RGB, ENTRY_BG_A);
         draw_frame(
             buffer,
             win_w,
@@ -306,10 +276,8 @@ pub fn draw_references_panel(
         if let Some(img) = &entry.body_image {
             let ix0 = x0 + 2;
             let iy0 = y + 2;
-            let copy_w =
-                (img.width as usize).min(x1.saturating_sub(ix0));
-            let copy_h =
-                (img.height as usize).min(y_end.saturating_sub(iy0));
+            let copy_w = (img.width as usize).min(x1.saturating_sub(ix0));
+            let copy_h = (img.height as usize).min(y_end.saturating_sub(iy0));
             for yy in 0..copy_h {
                 let src = yy * img.width as usize * 4;
                 let dst = (iy0 + yy) * win_w;
@@ -485,8 +453,7 @@ mod tests {
 
         // Move the caret to the same segment (boundary still
         // contains it).
-        let new_cursor =
-            panel.entries[0].core.segment_range.start + 1;
+        let new_cursor = panel.entries[0].core.segment_range.start + 1;
         update_references_panel(&mut panel, doc, new_cursor);
         assert_eq!(panel.entries.len(), 1);
         assert!(panel.entries[0].body_image.is_some());
@@ -516,8 +483,7 @@ mod tests {
 
     #[test]
     fn render_entry_body_for_simple_text() {
-        let img = render_entry_body("hello", BODY_WIDTH_PT)
-            .expect("render");
+        let img = render_entry_body("hello", BODY_WIDTH_PT).expect("render");
         assert!(img.width > 0 && img.height > 0);
     }
 

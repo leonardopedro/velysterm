@@ -16,10 +16,7 @@
 
 use std::ops::Range;
 
-use loro::{
-    ExpandType, ExportMode, LoroDoc, LoroText, StyleConfig,
-    UndoManager,
-};
+use loro::{ExpandType, ExportMode, LoroDoc, LoroText, StyleConfig, UndoManager};
 
 /// One contiguous text replacement, expressed against the *pre-edit*
 /// text.
@@ -146,8 +143,7 @@ impl MathDoc {
 
     pub fn delete(&mut self, range: Range<usize>) -> ByteDelta {
         assert!(
-            self.mirror.is_char_boundary(range.start)
-                && self.mirror.is_char_boundary(range.end),
+            self.mirror.is_char_boundary(range.start) && self.mirror.is_char_boundary(range.end),
             "delete range {range:?} not on char boundaries"
         );
         if !range.is_empty() {
@@ -163,11 +159,7 @@ impl MathDoc {
         }
     }
 
-    pub fn replace(
-        &mut self,
-        range: Range<usize>,
-        with: &str,
-    ) -> ByteDelta {
+    pub fn replace(&mut self, range: Range<usize>, with: &str) -> ByteDelta {
         self.delete(range.clone());
         self.insert(range.start, with);
         ByteDelta {
@@ -176,10 +168,7 @@ impl MathDoc {
         }
     }
 
-    pub fn replace_many(
-        &mut self,
-        mut ops: Vec<ReplaceOp>,
-    ) -> Vec<ByteDelta> {
+    pub fn replace_many(&mut self, mut ops: Vec<ReplaceOp>) -> Vec<ByteDelta> {
         ops.sort_by_key(|b| std::cmp::Reverse(b.range.start));
         for w in ops.windows(2) {
             assert!(
@@ -236,12 +225,7 @@ impl MathDoc {
         }
     }
 
-    pub fn mark_segment(
-        &mut self,
-        range: Range<usize>,
-        key: &str,
-        value: &str,
-    ) {
+    pub fn mark_segment(&mut self, range: Range<usize>, key: &str, value: &str) {
         if range.is_empty() {
             return;
         }
@@ -306,9 +290,7 @@ impl MathDoc {
             offset += len;
         }
         marks.extend(open);
-        marks.sort_by(|a, b| {
-            (a.0.start, &a.1).cmp(&(b.0.start, &b.1))
-        });
+        marks.sort_by(|a, b| (a.0.start, &a.1).cmp(&(b.0.start, &b.1)));
         marks
     }
 
@@ -356,9 +338,7 @@ fn diff_delta(before: &str, after: &str) -> Option<ByteDelta> {
         .count()
         .min(max_suffix);
     let mut s = suffix;
-    while !(before.is_char_boundary(before.len() - s)
-        && after.is_char_boundary(after.len() - s))
-    {
+    while !(before.is_char_boundary(before.len() - s) && after.is_char_boundary(after.len() - s)) {
         s -= 1;
     }
     Some(ByteDelta {
@@ -367,10 +347,7 @@ fn diff_delta(before: &str, after: &str) -> Option<ByteDelta> {
     })
 }
 
-fn byte_to_unicode_range(
-    text: &str,
-    range: Range<usize>,
-) -> Range<usize> {
+fn byte_to_unicode_range(text: &str, range: Range<usize>) -> Range<usize> {
     let start = text[..range.start].chars().count();
     let len = text[range.clone()].chars().count();
     start..start + len
@@ -432,10 +409,7 @@ mod tests {
         let bytes = d.snapshot();
         let d2 = MathDoc::from_snapshot(&bytes).unwrap();
         assert_eq!(d2.text(), "f(x) is nice");
-        assert_eq!(
-            d2.segment_marks(),
-            vec![(0..4, "prop:function".to_owned())]
-        );
+        assert_eq!(d2.segment_marks(), vec![(0..4, "prop:function".to_owned())]);
     }
 
     #[test]
@@ -443,10 +417,7 @@ mod tests {
         let mut d = MathDoc::with_text("f(x) is nice");
         d.mark_segment(0..4, "prop:function", "seg1");
         d.commit();
-        assert_eq!(
-            d.segment_marks(),
-            vec![(0..4, "prop:function".to_owned())]
-        );
+        assert_eq!(d.segment_marks(), vec![(0..4, "prop:function".to_owned())]);
     }
 
     #[test]

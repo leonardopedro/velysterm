@@ -22,10 +22,7 @@ use crate::types::{HermiteState, OperatorTerm};
 ///
 /// Returns `None` for a "dead" state (annihilation on the vacuum: the
 /// shader zeroes the amplitude and the host filters it out).
-fn apply_term_to_state(
-    state: HermiteState,
-    op: &OperatorTerm,
-) -> Option<HermiteState> {
+fn apply_term_to_state(state: HermiteState, op: &OperatorTerm) -> Option<HermiteState> {
     let mut out = state;
     let dim = op.target_dim as usize;
     if dim >= out.n.len() {
@@ -104,9 +101,7 @@ pub fn apply_operator_reference(
 /// Merge-sort-reduce: sort by quantum numbers, sum identical states,
 /// drop zero-amplitude states. Mirrors
 /// `DeltaAlgebraEngine::aggregate_states`.
-pub fn aggregate_states(
-    mut states: Vec<HermiteState>,
-) -> Vec<HermiteState> {
+pub fn aggregate_states(mut states: Vec<HermiteState>) -> Vec<HermiteState> {
     if states.is_empty() {
         return states;
     }
@@ -119,17 +114,13 @@ pub fn aggregate_states(
             current.coeff_re += next.coeff_re;
             current.coeff_im += next.coeff_im;
         } else {
-            if current.coeff_re.abs() > 1e-12
-                || current.coeff_im.abs() > 1e-12
-            {
+            if current.coeff_re.abs() > 1e-12 || current.coeff_im.abs() > 1e-12 {
                 merged.push(current);
             }
             current = next;
         }
     }
-    if current.coeff_re.abs() > 1e-12
-        || current.coeff_im.abs() > 1e-12
-    {
+    if current.coeff_re.abs() > 1e-12 || current.coeff_im.abs() > 1e-12 {
         merged.push(current);
     }
     merged
@@ -137,10 +128,7 @@ pub fn aggregate_states(
 
 /// Reference inner product `<bra | ket>` (mirrors
 /// `DeltaAlgebraEngine::inner_product`, but on the CPU).
-pub fn inner_product_reference(
-    bra: &[HermiteState],
-    ket: &[HermiteState],
-) -> (f32, f32) {
+pub fn inner_product_reference(bra: &[HermiteState], ket: &[HermiteState]) -> (f32, f32) {
     let mut bra_sorted = bra.to_vec();
     let mut ket_sorted = ket.to_vec();
     bra_sorted.sort_by_key(|s| s.sort_key());
@@ -157,10 +145,8 @@ pub fn inner_product_reference(
         let b_key = b.sort_key();
         let k_key = k.sort_key();
         if b_key == k_key {
-            total_re +=
-                b.coeff_re * k.coeff_re + b.coeff_im * k.coeff_im;
-            total_im +=
-                b.coeff_re * k.coeff_im - b.coeff_im * k.coeff_re;
+            total_re += b.coeff_re * k.coeff_re + b.coeff_im * k.coeff_im;
+            total_im += b.coeff_re * k.coeff_im - b.coeff_im * k.coeff_re;
             b_idx += 1;
             k_idx += 1;
         } else if b_key < k_key {
@@ -180,15 +166,13 @@ mod tests {
     #[test]
     fn reference_creation_annihilation_roundtrip() {
         let vac = vec![HermiteState::vacuum()];
-        let create =
-            [OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0)];
+        let create = [OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0)];
         let one = apply_operator_reference(&vac, &create);
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].n, [1, 0, 0, 0]);
         assert!((one[0].coeff_re - 1.0).abs() < 1e-6);
 
-        let annihilate =
-            [OperatorTerm::new(OpType::Annihilation, 0, 1.0, 0.0)];
+        let annihilate = [OperatorTerm::new(OpType::Annihilation, 0, 1.0, 0.0)];
         let zero = apply_operator_reference(&one, &annihilate);
         assert_eq!(zero.len(), 1);
         assert_eq!(zero[0].n, [0, 0, 0, 0]);
@@ -224,13 +208,11 @@ mod tests {
     fn reference_sqrt_factors_match_boson_ladder() {
         // a† |2> = sqrt(3) |3>; a |2> = sqrt(2) |1>
         let two = vec![HermiteState::new([2, 0, 0, 0], 1.0, 0.0)];
-        let create =
-            [OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0)];
+        let create = [OperatorTerm::new(OpType::Creation, 0, 1.0, 0.0)];
         let three = apply_operator_reference(&two, &create);
         assert!((three[0].coeff_re - 3.0f32.sqrt()).abs() < 1e-6);
 
-        let annihilate =
-            [OperatorTerm::new(OpType::Annihilation, 0, 1.0, 0.0)];
+        let annihilate = [OperatorTerm::new(OpType::Annihilation, 0, 1.0, 0.0)];
         let one = apply_operator_reference(&two, &annihilate);
         assert!((one[0].coeff_re - 2.0f32.sqrt()).abs() < 1e-6);
     }
@@ -239,8 +221,7 @@ mod tests {
     fn reference_complex_prefactor() {
         // (i·a†) |0> = i |1>
         let vac = vec![HermiteState::vacuum()];
-        let terms =
-            [OperatorTerm::new(OpType::Creation, 0, 0.0, 1.0)];
+        let terms = [OperatorTerm::new(OpType::Creation, 0, 0.0, 1.0)];
         let out = apply_operator_reference(&vac, &terms);
         assert!((out[0].coeff_re).abs() < 1e-6);
         assert!((out[0].coeff_im - 1.0).abs() < 1e-6);

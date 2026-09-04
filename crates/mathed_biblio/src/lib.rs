@@ -17,8 +17,7 @@
 use hayagriva::archive::ArchivedStyle;
 use hayagriva::citationberg::{IndependentStyle, Style};
 use hayagriva::{
-    BibliographyDriver, BibliographyRequest, BufWriteFormat,
-    CitationItem, CitationRequest, Library,
+    BibliographyDriver, BibliographyRequest, BufWriteFormat, CitationItem, CitationRequest, Library,
 };
 use mathed_core::markers::PropKind;
 use mathed_core::semantics::BiblioStatement;
@@ -30,15 +29,11 @@ pub enum BiblioError {
     Parse(String),
     #[error("unknown citation style: {0}")]
     UnknownStyle(String),
-    #[error(
-        "style '{0}' is a dependent CSL style; mathed_biblio only supports independent styles"
-    )]
+    #[error("style '{0}' is a dependent CSL style; mathed_biblio only supports independent styles")]
     DependentStyle(String),
     #[error("unknown bibliography entry key: {0}")]
     UnknownKey(String),
-    #[error(
-        "no \\bibliography is bound for this \\cite (bib: \"{0}\")"
-    )]
+    #[error("no \\bibliography is bound for this \\cite (bib: \"{0}\")")]
     UnknownBibliography(String),
     #[error("citation render error: {0}")]
     Render(String),
@@ -50,8 +45,7 @@ pub const DEFAULT_STYLE: &str = "apa";
 
 /// Parse a YAML (Hayagriva-native) bibliography source.
 pub fn load_yaml(s: &str) -> Result<Library, BiblioError> {
-    hayagriva::io::from_yaml_str(s)
-        .map_err(|e| BiblioError::Parse(e.to_string()))
+    hayagriva::io::from_yaml_str(s).map_err(|e| BiblioError::Parse(e.to_string()))
 }
 
 /// Parse a BibTeX/BibLaTeX bibliography source.
@@ -74,15 +68,11 @@ pub struct CitationStyle(IndependentStyle);
 
 impl CitationStyle {
     pub fn by_name(name: &str) -> Result<Self, BiblioError> {
-        let archived =
-            ArchivedStyle::by_name(name).ok_or_else(|| {
-                BiblioError::UnknownStyle(name.to_string())
-            })?;
+        let archived = ArchivedStyle::by_name(name)
+            .ok_or_else(|| BiblioError::UnknownStyle(name.to_string()))?;
         match archived.get() {
             Style::Independent(style) => Ok(Self(style)),
-            Style::Dependent(_) => {
-                Err(BiblioError::DependentStyle(name.to_string()))
-            }
+            Style::Dependent(_) => Err(BiblioError::DependentStyle(name.to_string())),
         }
     }
 }
@@ -105,29 +95,17 @@ impl Bibliography {
     /// Render a single in-text citation covering `keys`, in the order
     /// given (multiple keys produce one grouped citation, e.g.
     /// `(Doe 2020; Roe 2021)`).
-    pub fn cite(
-        &self,
-        keys: &[String],
-    ) -> Result<String, BiblioError> {
+    pub fn cite(&self, keys: &[String]) -> Result<String, BiblioError> {
         let mut entries = Vec::with_capacity(keys.len());
         for k in keys {
             entries.push(
-                self.library.get(k).ok_or_else(|| {
-                    BiblioError::UnknownKey(k.clone())
-                })?,
+                self.library
+                    .get(k)
+                    .ok_or_else(|| BiblioError::UnknownKey(k.clone()))?,
             );
         }
-        let items: Vec<_> = entries
-            .into_iter()
-            .map(CitationItem::with_entry)
-            .collect();
-        let req = CitationRequest::new(
-            items,
-            &self.style.0,
-            None,
-            &[],
-            None,
-        );
+        let items: Vec<_> = entries.into_iter().map(CitationItem::with_entry).collect();
+        let req = CitationRequest::new(items, &self.style.0, None, &[], None);
         let elems = hayagriva::standalone_citation(req);
         let mut out = String::new();
         elems
@@ -138,9 +116,7 @@ impl Bibliography {
 
     /// Render the full reference list, in the citation style's
     /// bibliography order, as `(key, formatted_text)` pairs.
-    pub fn reference_list(
-        &self,
-    ) -> Result<Vec<(String, String)>, BiblioError> {
+    pub fn reference_list(&self) -> Result<Vec<(String, String)>, BiblioError> {
         let mut driver = BibliographyDriver::new();
         for entry in self.library.iter() {
             driver.citation(CitationRequest::new(
@@ -157,10 +133,7 @@ impl Bibliography {
             locale_files: &[],
         });
         let bib = rendered.bibliography.ok_or_else(|| {
-            BiblioError::Render(
-                "this CSL style produces no bibliography section"
-                    .to_string(),
-            )
+            BiblioError::Render("this CSL style produces no bibliography section".to_string())
         })?;
         bib.items
             .into_iter()
@@ -168,9 +141,7 @@ impl Bibliography {
                 let mut out = String::new();
                 item.content
                     .write_buf(&mut out, BufWriteFormat::Plain)
-                    .map_err(|e| {
-                        BiblioError::Render(e.to_string())
-                    })?;
+                    .map_err(|e| BiblioError::Render(e.to_string()))?;
                 Ok((item.key, out))
             })
             .collect()
@@ -190,10 +161,7 @@ impl Bibliography {
 pub fn resolve_citations(
     statements: &[BiblioStatement],
 ) -> HashMap<usize, Result<String, BiblioError>> {
-    let mut bibliographies: HashMap<
-        String,
-        Result<Bibliography, BiblioError>,
-    > = HashMap::new();
+    let mut bibliographies: HashMap<String, Result<Bibliography, BiblioError>> = HashMap::new();
 
     for stmt in statements {
         if stmt.kind != PropKind::Bibliography {
@@ -205,8 +173,7 @@ pub fn resolve_citations(
                 Some("bibtex") => load_bibtex(&stmt.body_text)?,
                 _ => load_yaml(&stmt.body_text)?,
             };
-            let style_name =
-                stmt.style.as_deref().unwrap_or(DEFAULT_STYLE);
+            let style_name = stmt.style.as_deref().unwrap_or(DEFAULT_STYLE);
             let style = CitationStyle::by_name(style_name)?;
             Ok(Bibliography::new(library, style))
         })();
@@ -220,11 +187,7 @@ pub fn resolve_citations(
         }
         let bib_key = stmt.bib_name.clone().unwrap_or_else(|| {
             if bibliographies.len() == 1 {
-                bibliographies
-                    .keys()
-                    .next()
-                    .cloned()
-                    .unwrap_or_default()
+                bibliographies.keys().next().cloned().unwrap_or_default()
             } else {
                 String::new()
             }
@@ -446,16 +409,7 @@ crazy-rich:
                 CRAZY_RICH_YAML,
                 0,
             ),
-            stmt(
-                PropKind::Cite,
-                None,
-                &["nope"],
-                None,
-                None,
-                None,
-                "",
-                500,
-            ),
+            stmt(PropKind::Cite, None, &["nope"], None, None, None, "", 500),
         ];
         let results = resolve_citations(&statements);
         assert!(matches!(

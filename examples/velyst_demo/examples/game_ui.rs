@@ -51,10 +51,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             // Title.
             builder.spawn((
                 debug_bg,
-                VelystFunc::new(
-                    handle.clone(),
-                    LabelFunc::title("Title"),
-                ),
+                VelystFunc::new(handle.clone(), LabelFunc::title("Title")),
                 UiScene,
                 Node {
                     width: auto(),
@@ -81,9 +78,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             };
 
             create_button(ButtonFunc::text("Start").with_fill(green));
-            create_button(
-                ButtonFunc::text("Settings").with_fill(purple),
-            );
+            create_button(ButtonFunc::text("Settings").with_fill(purple));
             create_button(ButtonFunc::text("Exit").with_fill(red));
 
             builder.spawn((
@@ -102,25 +97,17 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         });
 }
 
-fn perf_metrics(
-    time: Res<Time>,
-    mut q_func: Query<&mut VelystFunc<PerfMetricsFunc>>,
-) -> Result {
+fn perf_metrics(time: Res<Time>, mut q_func: Query<&mut VelystFunc<PerfMetricsFunc>>) -> Result {
     let mut func = q_func.single_mut()?;
 
-    func.data.fps =
-        (1.0 / time.delta_secs_f64() * 100.0).round() / 100.0;
-    func.data.elapsed_time =
-        (time.elapsed_secs_f64() * 100.0).round() / 100.0;
+    func.data.fps = (1.0 / time.delta_secs_f64() * 100.0).round() / 100.0;
+    func.data.elapsed_time = (time.elapsed_secs_f64() * 100.0).round() / 100.0;
 
     Ok(())
 }
 
 fn button_interaction(
-    mut q_buttons: Query<
-        (&mut VelystFunc<ButtonFunc>, &Interaction),
-        Changed<Interaction>,
-    >,
+    mut q_buttons: Query<(&mut VelystFunc<ButtonFunc>, &Interaction), Changed<Interaction>>,
 ) {
     for (mut func, interaction) in q_buttons.iter_mut() {
         func.data.interaction_state = match interaction {
@@ -197,8 +184,5 @@ impl ButtonFunc {
 /// construct the elements through the typst facade that `velyst`
 /// re-exports instead.
 fn heading_content(text: &str) -> Content {
-    velyst::typst::model::HeadingElem::new(
-        velyst::typst::text::TextElem::packed(text),
-    )
-    .pack()
+    velyst::typst::model::HeadingElem::new(velyst::typst::text::TextElem::packed(text)).pack()
 }

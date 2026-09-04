@@ -78,12 +78,8 @@ impl KernelRequest {
             | KernelRequest::CloseModel { block_id, .. }
             | KernelRequest::DidCreate { block_id, .. }
             | KernelRequest::ContentPublish { block_id, .. }
-            | KernelRequest::ContentResolve { block_id, .. } => {
-                Some(*block_id)
-            }
-            KernelRequest::CloseModelById { model_id } => {
-                Some(*model_id)
-            }
+            | KernelRequest::ContentResolve { block_id, .. } => Some(*block_id),
+            KernelRequest::CloseModelById { model_id } => Some(*model_id),
             KernelRequest::Shutdown => None,
             #[cfg(test)]
             KernelRequest::PanicTest { block_id } => Some(*block_id),
@@ -157,8 +153,7 @@ mod tests {
         // channel then disconnects, so a later submit must
         // report failure rather than silently dropping the
         // request).
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while client.submit(KernelRequest::Shutdown) {
             assert!(
                 std::time::Instant::now() < deadline,
