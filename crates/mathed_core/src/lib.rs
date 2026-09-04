@@ -19,6 +19,7 @@
 
 pub mod accessibility;
 pub mod blocks;
+pub mod completion;
 pub mod doc;
 pub mod format;
 pub mod glyphs;

@@ -16,6 +16,7 @@ pub mod a11y;
 #[cfg(feature = "gui")]
 pub mod app;
 pub mod cite_popup;
+pub mod completion_ui;
 pub mod dispatch;
 pub mod durable_dashboard;
 pub mod export;

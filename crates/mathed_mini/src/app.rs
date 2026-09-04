@@ -37,6 +37,7 @@ const FAR_LEFT: f32 = -1.0e7;
 const FAR_RIGHT: f32 = 1.0e7;
 
 use crate::a11y::build_tree_update;
+use crate::completion_ui::CompletionUi;
 use crate::kernel_bridge::{KernelBridge, PipelineCache};
 use crate::references_panel::{
     ReferencesPanelData, open_references_panel, panel_height as references_panel_height,
@@ -141,6 +142,10 @@ struct App {
     /// results change, so a region can never outlive the outputs
     /// it renders.
     region_cache: HashMap<BlockId, imaging::RgbaImage>,
+    /// Pending ASCII→Unicode math completion (U-series U2): the
+    /// glyph preview is drawn as an IME-style overlay at the
+    /// caret; commit/cancel never touch the doc until commit.
+    completion: CompletionUi,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -216,6 +221,7 @@ impl App {
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
             region_cache: HashMap::new(),
+            completion: CompletionUi::new(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
             show_marker_overlay: false,
@@ -646,13 +652,39 @@ impl App {
 
     /// Insert text at the caret and advance the caret past it.
     /// Replaces any active selection first.
+    ///
+    /// ASCII→Unicode completion (U-series U2): a delimiter typed
+    /// while a completion is pending commits it first — the ASCII
+    /// run is replaced by the glyph in ONE undo step, then the
+    /// delimiter inserts normally (`-> ` becomes `→ `). A run
+    /// char instead extends the run (the refresh below recomputes
+    /// the pending completion).
     fn insert(&mut self, s: &str) {
         self.delete_selection();
+        // Recompute the pending completion against the CURRENT
+        // doc+caret before deciding: a stale pending (e.g. after a
+        // backspace) must never commit a dead byte range.
+        self.completion.refresh(self.doc.text(), self.caret);
+        let extends = s
+            .chars()
+            .next()
+            .map(CompletionUi::extends_run)
+            .unwrap_or(false);
+        if self.completion.pending.is_some()
+            && !extends
+            && let Some(op) = self.completion.commit(&mut self.doc)
+        {
+            self.caret = op.start + op.with.len();
+            self.sel_anchor = None;
+            self.invalidate_doc();
+            self.refresh_kernel();
+        }
         self.doc.insert(self.caret, s);
         self.caret += s.len();
         self.sel_anchor = None;
         self.invalidate_doc();
         self.refresh_kernel();
+        self.completion.refresh(self.doc.text(), self.caret);
         self.caret_changed();
     }
 
@@ -1188,6 +1220,22 @@ impl App {
             );
             if let Some(preedit) = &self.ime_preedit
                 && let Ok(img) = crate::render::render_preedit(preedit, DEFAULT_WIDTH_PT)
+            {
+                blit_over_bg_clipped(
+                    &mut buffer,
+                    win_w,
+                    doc_h,
+                    x.round() as usize,
+                    top.round() as usize,
+                    &img,
+                );
+            }
+            // ASCII→Unicode completion preview (U-series U2): the
+            // proposed glyph drawn as an IME-style underlined
+            // overlay at the caret; the document is untouched until
+            // commit (Escape cancels, like IME).
+            if let Some(pending) = &self.completion.pending
+                && let Ok(img) = crate::render::render_preedit(&pending.preview, DEFAULT_WIDTH_PT)
             {
                 blit_over_bg_clipped(
                     &mut buffer,
@@ -1772,11 +1820,15 @@ impl ApplicationHandler<UserEvent> for App {
                 let shift = self.mods.shift_key();
                 match logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        // ESC: if a cite popup is open, pop the
-                        // topmost; otherwise fall through to the
-                        // event-loop exit (cite_popup_boxes plan,
-                        // Stage 4).
-                        if self.popup_stack.is_empty() {
+                        // ESC: a pending completion cancels with zero
+                        // doc mutation (IME precedent, U-series U2);
+                        // otherwise a cite popup pops; otherwise
+                        // fall through to the event-loop exit
+                        // (cite_popup_boxes plan, Stage 4).
+                        if self.completion.pending.is_some() {
+                            self.completion.cancel();
+                            self.request_redraw();
+                        } else if self.popup_stack.is_empty() {
                             event_loop.exit();
                         } else {
                             self.pop_cite_popup(None);

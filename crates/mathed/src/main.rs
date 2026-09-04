@@ -38,9 +38,12 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_vello::prelude::*;
 use keymap::{EditorCmd, Mods, Motion};
 use mathed_core::{
-    MathDoc, TransformOptions, auto_marker_id, auto_marker_token, lowest_free_marker_numbers,
-    resolve_segments, scan, semantics::SemanticIndex, sync::PresenceStore, to_render_text,
-    to_render_text_range,
+    MathDoc, TransformOptions, auto_marker_id, auto_marker_token,
+    completion::{Completion, completion_at},
+    lowest_free_marker_numbers, resolve_segments, scan,
+    semantics::SemanticIndex,
+    sync::PresenceStore,
+    to_render_text, to_render_text_range,
 };
 use velyst::prelude::*;
 use velyst::typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
@@ -285,6 +288,10 @@ struct EditorState {
     show_hidden: bool,
     /// Index of the definition being renamed via popup.
     rename_def_idx: Option<usize>,
+    /// Pending ASCII→Unicode math completion (U-series U2), shared
+    /// hook with the winit frontend: preview overlay at the caret;
+    /// commit/cancel never touch the doc until commit.
+    pending_completion: Option<Completion>,
 }
 
 impl EditorState {
@@ -1001,9 +1008,32 @@ fn insert_text(
         state.anchor = None;
         editor.doc.delete(sel);
     }
+    // ASCII→Unicode math completion (U-series U2), mirroring the
+    // winit frontend: recompute against the CURRENT doc+caret (a
+    // stale pending must never commit a dead range), then a
+    // delimiter typed while a completion is pending commits the
+    // glyph first — one undo step — before inserting the
+    // delimiter. A run char extends the run instead.
+    state.pending_completion = completion_at(editor.doc.text(), state.cursor);
+    let extends = s
+        .chars()
+        .next()
+        .map(mathed_core::completion::is_run_char)
+        .unwrap_or(false);
+    if !extends && let Some(c) = state.pending_completion.take() {
+        let new_cursor = c.replace.start + c.with.len();
+        editor.doc.replace_many(vec![mathed_core::doc::ReplaceOp {
+            range: c.replace,
+            with: c.with,
+        }]);
+        editor.doc.commit();
+        state.cursor = new_cursor;
+        notify_doc_changed(scheduler, now);
+    }
     editor.doc.insert(state.cursor, s);
     editor.doc.commit();
     state.cursor += s.len();
+    state.pending_completion = completion_at(editor.doc.text(), state.cursor);
     notify_doc_changed(scheduler, now);
 }
 
