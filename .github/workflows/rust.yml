@@ -33,18 +33,18 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
-      # NOTE: rust-toolchain.toml pins 1.97.1 as the active toolchain in this
-      # dir, so a bare `rustup component add rustfmt` would install onto 1.97.1
-      # while the step below runs nightly — hence the components on the
-      # dtolnay action, which target the chosen toolchain explicitly.
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
+      # Single stable toolchain across the project: rust-toolchain.toml pins
+      # 1.97.1 as the active toolchain here, so the rustfmt component added
+      # below (and the rustfmt run) resolve to 1.97.1 — same rustfmt as the
+      # unfer/dynamic-arctic/australVM format gates. rustfmt.toml holds only
+      # stable options (no nightly-only wrap_comments etc.).
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # cargo +nightly fmt --all also formats path-dependency sources (the
-      # sibling unfer/dynamic-arctic repos), so scope to this repo's own
-      # files with rustfmt directly (rustfmt.toml is read from the cwd).
-      - run: rustup run nightly rustfmt --edition 2024 --check $(git ls-files '*.rs')
+      - run: rustup component add rustfmt
+      # cargo fmt --all also formats path-dependency sources (the sibling
+      # unfer/dynamic-arctic repos), so scope to this repo's own files with
+      # rustfmt directly (rustfmt.toml is read from the cwd).
+      - run: rustfmt --edition 2024 --check $(git ls-files '*.rs')
 
   check:
     runs-on: ubuntu-latest

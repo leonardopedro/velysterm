@@ -122,7 +122,7 @@ impl OperatorTerm {
         let f = scale / std::f32::consts::SQRT_2;
         [
             Self::new(OpType::Annihilation, dim, 0.0, -f), //  -i * a
-            Self::new(OpType::Creation, dim, 0.0, f), //  +i * a†
+            Self::new(OpType::Creation, dim, 0.0, f),      //  +i * a†
             // padding duplicates (identity, zero weight) to keep
             // array len = 4
             Self::new(OpType::Identity, dim, 0.0, 0.0),
