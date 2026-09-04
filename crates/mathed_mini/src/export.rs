@@ -314,6 +314,70 @@ pub fn export_tex(doc_text: &str) -> String {
 /// module has `encode` but no `decode`), so strings stay `Str` and
 /// templates build markup strings directly, e.g.
 /// `#let render(ctx) = "#strong[" + ctx.at("blocks").at(0).at("heading") + "]"`.
+/// T5: apply the authoring-time egison rules binary to a template
+/// body. Reads `MATHED_RULES_BIN` (dev-machine only); the binary
+/// consumes `{op, body}` JSON on stdin and writes `{markup}` JSON on
+/// stdout (see `tools/mathed_rules/README.md`). Returns `None` when
+/// the binary is absent, fails, or times out — the caller keeps the
+/// body (identity path), so `--render-typst` works with and without
+/// it.
+pub fn apply_mathed_rules(body: &str, op: &str) -> Option<String> {
+    let bin = std::env::var("MATHED_RULES_BIN").ok()?;
+    apply_mathed_rules_with_bin(&bin, body, op)
+}
+
+/// The env-free core of [`apply_mathed_rules`] — testable without
+/// touching process env. Bounded at 5 s so a hung rules binary can
+/// never block an export indefinitely.
+pub fn apply_mathed_rules_with_bin(bin: &str, body: &str, op: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let input = serde_json::json!({ "op": op, "body": body }).to_string();
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdin = child.stdin.take()?;
+    // Write stdin on a thread so a full pipe cannot deadlock.
+    let writer = std::thread::spawn(move || {
+        let mut stdin = stdin;
+        let _ = stdin.write_all(input.as_bytes());
+    });
+    // Drain stdout on a thread; wait for exit with a deadline.
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut stdout = stdout;
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(s) = child.try_wait().ok()? {
+            break s;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let _ = writer.join();
+    let out_buf = reader.join().ok()?;
+    if !status.success() {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(&out_buf)
+        .ok()?
+        .get("markup")?
+        .as_str()
+        .map(str::to_string)
+}
+
 pub fn export_typst_template(
     doc_text: &str,
     extra_ctx_json: Option<&str>,
@@ -344,7 +408,13 @@ pub fn export_typst_template(
     let mut splices = std::collections::HashMap::new();
     let mut engine = crate::translate::Translator::new();
     for (name, def) in &idx.templates {
-        match engine.run_template(&def.body_text, &ctx_literal) {
+        // T5: when the authoring-time egison rules binary is present
+        // (MATHED_RULES_BIN), the body may be notation-rewritten
+        // first; absent or failing, the body runs unchanged
+        // (identity path).
+        let body =
+            apply_mathed_rules(&def.body_text, "rewrite").unwrap_or_else(|| def.body_text.clone());
+        match engine.run_template(&body, &ctx_literal) {
             Ok(markup) => {
                 splices.insert(def.span.start, markup);
             }
@@ -562,6 +632,53 @@ mod tests {
             out2.contains("\\alpha"),
             "still math after escaped $: {out2}"
         );
+    }
+
+    // ── T5: egison rules binary seam ────────────────────────────
+
+    /// A stub rules binary that answers the golden rewrite contract.
+    fn stub_rules_bin(script: &str) -> std::path::PathBuf {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "mathed_rules_stub_{}_{}.sh",
+            std::process::id(),
+            script.len()
+        ));
+        let mut f = std::fs::File::create(&path).expect("create stub");
+        f.write_all(script.as_bytes()).expect("write stub");
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        path
+    }
+
+    #[test]
+    fn rules_binary_json_contract_roundtrips() {
+        // The stub answers with the golden rewrite output; the seam
+        // must parse the `{markup: …}` JSON and return the string.
+        let stub = stub_rules_bin("#!/bin/sh\ncat\n");
+        // `cat` echoes the input — make the stub emit the contract
+        // output directly instead.
+        let stub2 =
+            stub_rules_bin("#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"⟨a⟩ b\"}'\n");
+        let got = apply_mathed_rules_with_bin(stub2.to_str().unwrap(), "a†, a, b", "rewrite");
+        assert_eq!(got.as_deref(), Some("⟨a⟩ b"));
+        let _ = std::fs::remove_file(&stub);
+        let _ = std::fs::remove_file(&stub2);
+    }
+
+    #[test]
+    fn rules_binary_failure_degrades_to_identity() {
+        // Missing binary: None (caller keeps the body).
+        assert!(apply_mathed_rules_with_bin("/nonexistent/mathed_rules", "x", "rewrite").is_none());
+        // Non-zero exit: None.
+        let stub = stub_rules_bin("#!/bin/sh\nexit 1\n");
+        assert!(apply_mathed_rules_with_bin(stub.to_str().unwrap(), "x", "rewrite").is_none());
+        let _ = std::fs::remove_file(&stub);
+        // Malformed stdout: None.
+        let stub2 = stub_rules_bin("#!/bin/sh\nprintf '%s' 'not json'\n");
+        assert!(apply_mathed_rules_with_bin(stub2.to_str().unwrap(), "x", "rewrite").is_none());
+        let _ = std::fs::remove_file(&stub2);
     }
 
     #[test]

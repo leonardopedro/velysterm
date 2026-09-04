@@ -1,0 +1,6 @@
+{
+  "name": "contraction-summary rewrite",
+  "op": "rewrite",
+  "input": "{\"op\":\"rewrite\",\"body\":\"a†, a, b\"}",
+  "expected": "{\"markup\":\"⟨a⟩ b\"}"
+}

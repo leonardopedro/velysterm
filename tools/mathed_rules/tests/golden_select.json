@@ -1,0 +1,6 @@
+{
+  "name": "Eql-bound fragment selection",
+  "op": "select",
+  "input": "{\"op\":\"select\",\"body\":\"a:self(a);b:other;c:self(c)\"}",
+  "expected": "{\"markup\":\"a;c\"}"
+}
