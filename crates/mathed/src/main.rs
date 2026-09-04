@@ -732,7 +732,10 @@ fn handle_keyboard(
                     last_change.0 = Some(now);
                 } else if state.cursor > 0 {
                     let text = editor.doc.text().to_owned();
-                    let start = prev_boundary(&text, state.cursor);
+                    // Delete a whole grapheme cluster, never half a
+                    // composed char (U-series U3); delete_range
+                    // commits as one undo step.
+                    let start = mathed_core::wordnav::prev_cluster_boundary(&text, state.cursor);
                     let range = start..state.cursor;
                     delete_range(&mut editor, &mut state, range, &mut scheduler, now);
                     last_change.0 = Some(now);

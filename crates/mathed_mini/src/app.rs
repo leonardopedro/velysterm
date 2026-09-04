@@ -779,8 +779,12 @@ impl App {
         if self.caret == 0 {
             return;
         }
-        let prev = prev_char_boundary(self.doc.text(), self.caret);
+        // Delete a whole grapheme cluster (never half a composed
+        // char — U-series U3) as ONE undo step (explicit `commit`,
+        // the U1 finding: UndoManager merges ops within 400 ms).
+        let prev = mathed_core::wordnav::prev_cluster_boundary(self.doc.text(), self.caret);
         self.doc.delete(prev..self.caret);
+        self.doc.commit();
         self.caret = prev;
         self.invalidate_doc();
         self.refresh_kernel();
@@ -799,6 +803,9 @@ impl App {
         }
         let next = next_char_boundary(text, self.caret);
         self.doc.delete(self.caret..next);
+        // One undo step per delete (U1 finding: UndoManager merges
+        // ops within its 400 ms window).
+        self.doc.commit();
         self.invalidate_doc();
         self.refresh_kernel();
         self.caret_changed();
