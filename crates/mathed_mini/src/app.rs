@@ -347,22 +347,51 @@ impl App {
     /// for blocks whose outputs are not cached. Runs once per
     /// redraw, before the surface borrow; the compositing loop only
     /// reads `region_cache`. Blocks with no results stay uncached
-    /// (cheap map lookups per redraw, no stale images possible).
+    /// (cheap map lookups per redraw, no stale images possible). A
+    /// stale block (N-series N2) gets the "stale — run to update"
+    /// banner prepended to its region.
     fn refresh_region_cache(&mut self, width_pt: f64) {
         let blocks = self.block_index.blocks.clone();
+        let stale = self.bridge.stale_blocks();
         for (idx, block) in blocks.iter().enumerate() {
             if self.region_cache.contains_key(&block.id) {
                 continue;
             }
             let outputs = self.bridge.block_outputs(idx);
-            if outputs.is_empty() {
+            if outputs.is_empty() && !stale.contains(&idx) {
                 continue;
             }
-            let markup = crate::output_region::region_markup(&outputs);
+            let mut markup = String::new();
+            if stale.contains(&idx) {
+                markup.push_str(&crate::output_region::stale_banner());
+                markup.push('\n');
+            }
+            markup.push_str(&crate::output_region::region_markup(&outputs));
             if let Some(img) = crate::output_region::region_image(&markup, width_pt) {
                 self.region_cache.insert(block.id, img);
             }
         }
+    }
+
+    /// Run the block containing the caret (Ctrl+Enter, N-series
+    /// N2): the notebook "run cell" affordance — re-issues the
+    /// block's kernel requests even when nothing changed, then
+    /// opens the polling window so the fresh results land.
+    fn run_current_block(&mut self) {
+        let text = self.doc.text();
+        let Some(block_idx) = self
+            .block_index
+            .blocks
+            .iter()
+            .position(|b| b.range.start <= self.caret && self.caret <= b.range.end)
+        else {
+            return;
+        };
+        if self.bridge.run_block(text, block_idx) {
+            self.invalidate_annotations();
+        }
+        self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
+        self.request_redraw();
     }
 
     /// Draw the cite popup stack (cite_popup_boxes plan, Stage 5).
@@ -1765,9 +1794,14 @@ impl ApplicationHandler<UserEvent> for App {
                         self.push_a11y_update();
                     }
                     Key::Named(NamedKey::Enter) => {
-                        self.insert("\n");
-                        self.request_redraw();
-                        self.push_a11y_update();
+                        if self.mods.control_key() {
+                            // Run the caret's block (N-series N2).
+                            self.run_current_block();
+                        } else {
+                            self.insert("\n");
+                            self.request_redraw();
+                            self.push_a11y_update();
+                        }
                     }
                     Key::Named(NamedKey::Space) => {
                         self.insert(" ");

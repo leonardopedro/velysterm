@@ -19,6 +19,15 @@ use imaging::RgbaImage;
 use crate::kernel_bridge::KernelResult;
 use crate::render::{RenderError, render_markup};
 
+/// Markup for the "stale — run to update" banner a block shows
+/// while any of its outputs does not reflect the document's current
+/// inputs (N-series N2: staleness is derived from the bridge's
+/// dispatch/response hashes; the banner is prepended to the region
+/// by the frontend).
+pub fn stale_banner() -> String {
+    "#text(rgb(\"#b06000\"))[stale — run to update]".to_string()
+}
+
 /// Typst markup for a block's output region: one line per result, in
 /// document order. Computed values and string results are green (the
 /// same tint the inline annotations use); errors show the UK-####
@@ -96,6 +105,13 @@ mod tests {
                 )]
             },
         }
+    }
+
+    #[test]
+    fn stale_banner_is_distinct_markup() {
+        let b = stale_banner();
+        assert!(b.contains("stale — run to update"));
+        assert!(b.contains("#text(rgb(\"#b06000\"))"));
     }
 
     #[test]

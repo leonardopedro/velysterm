@@ -71,6 +71,18 @@ pub struct KernelBridge {
     /// ([`block_outputs`](Self::block_outputs)) can group results
     /// without re-scanning the document.
     stmt_blocks: HashMap<usize, usize>,
+    /// result-bearing statement offset → hash of its CURRENT inputs
+    /// (recomputed every refresh). Staleness compares this against
+    /// [`last_result_hashes`](Self::last_result_hashes): a block is
+    /// stale while its displayed output does not yet reflect the
+    /// document's current inputs (N-series N2).
+    cur_hashes: HashMap<usize, u64>,
+    /// result-bearing statement offset → hash of the inputs whose
+    /// result is CURRENTLY displayed. Updated when a worker response
+    /// lands (the response is the last run's output) and when a
+    /// synchronous error is inserted (the error reflects the current
+    /// inputs, so it is never stale).
+    last_result_hashes: HashMap<usize, u64>,
     /// model offset → hash of the last-dispatched body.
     model_hashes: HashMap<usize, u64>,
     /// prob offset → hash of the last-dispatched (prob body, model
@@ -111,6 +123,8 @@ impl KernelBridge {
             results: HashMap::new(),
             prob_names: HashMap::new(),
             stmt_blocks: HashMap::new(),
+            cur_hashes: HashMap::new(),
+            last_result_hashes: HashMap::new(),
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
             translator_errors: HashMap::new(),
@@ -489,6 +503,9 @@ impl KernelBridge {
                     changed = true;
                 }
                 self.prob_hashes.remove(&stmt.span.start);
+                // The (error) result reflects the current inputs.
+                self.cur_hashes.insert(stmt.span.start, 0);
+                self.last_result_hashes.insert(stmt.span.start, 0);
                 continue;
             };
 
@@ -510,6 +527,11 @@ impl KernelBridge {
                 model_trans_src,
                 stmt.condition_event.as_deref().unwrap_or(""),
             ]);
+            // Current-inputs hash for staleness — recorded even when
+            // the recorded dispatch hash is unchanged, so the "cell"
+            // view can tell a result computed under the current
+            // inputs from one computed under older inputs.
+            self.cur_hashes.insert(stmt.span.start, key);
             if self.prob_hashes.get(&stmt.span.start) == Some(&key) {
                 continue;
             }
@@ -545,6 +567,8 @@ impl KernelBridge {
                     }
                     self.results
                         .insert(stmt.span.start, dispatch_error_result(e));
+                    // The sync error reflects the current inputs.
+                    self.last_result_hashes.insert(stmt.span.start, key);
                     changed = true;
                 }
                 Err(e) => {
@@ -553,6 +577,8 @@ impl KernelBridge {
                     }
                     self.results
                         .insert(stmt.span.start, dispatch_error_result(&e));
+                    // The sync error reflects the current inputs.
+                    self.last_result_hashes.insert(stmt.span.start, key);
                     changed = true;
                 }
             }
@@ -568,6 +594,10 @@ impl KernelBridge {
             .filter(|s| s.kind == PropKind::Layout)
         {
             let result = layout_verdict(&stmt.body_text);
+            // Synchronous verdict — always reflects current inputs.
+            let h = hash_many(&[&stmt.body_text]);
+            self.cur_hashes.insert(stmt.span.start, h);
+            self.last_result_hashes.insert(stmt.span.start, h);
             if self.results.get(&stmt.span.start) != Some(&result) {
                 self.results.insert(stmt.span.start, result);
                 changed = true;
@@ -583,8 +613,251 @@ impl KernelBridge {
         self.model_hashes.retain(|k, _| self.live.contains(k));
         self.prob_names.retain(|k, _| self.live.contains(k));
         self.stmt_blocks.retain(|k, _| self.live.contains(k));
+        self.cur_hashes.retain(|k, _| self.live.contains(k));
+        self.last_result_hashes.retain(|k, _| self.live.contains(k));
         self.pending.retain(|k, _| self.live.contains(k));
         changed
+    }
+
+    /// Re-run the live kernel statements in `block` (index into
+    /// `split_blocks` order) — the notebook "run cell" affordance
+    /// (N-series N2). Unlike [`refresh_with_index`], requests are
+    /// re-issued even when the recorded input hashes are unchanged,
+    /// and bridge-wide bookkeeping (live set, scratch pruning) is
+    /// left to the next full refresh. Statements outside the block
+    /// are never re-dispatched; priors/solvers bound to an in-block
+    /// model are re-folded into its definition exactly as refresh
+    /// folds them.
+    pub fn run_block(&mut self, doc_text: &str, block: usize) -> bool {
+        let idx = build_index(doc_text);
+        let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+        let block_of = |pos: usize| {
+            block_ranges
+                .iter()
+                .rposition(|r| r.start <= pos)
+                .unwrap_or(0)
+        };
+        let in_block = |s: &KernelStatement| block_of(s.span.start) == block;
+
+        let mut changed = false;
+
+        // All models in document order (global — probs outside the
+        // block can bind to them).
+        let mut models: Vec<&KernelStatement> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Model)
+            .collect();
+        models.sort_by_key(|s| s.span.start);
+
+        // Priors/solvers, resolved against the global model list
+        // exactly as refresh resolves them.
+        let mut priors: HashMap<usize, (PriorSpec, String)> = HashMap::new();
+        let mut solvers: HashMap<usize, (SolverSpec, String)> = HashMap::new();
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| matches!(s.kind, PropKind::Prior | PropKind::Solver))
+        {
+            let Some(model) = resolve_model(&models, stmt, &mut self.results) else {
+                continue;
+            };
+            match stmt.kind {
+                PropKind::Prior => match parse_prior(&stmt.body_text) {
+                    Ok(p) => {
+                        priors.insert(model.span.start, (p, stmt.body_text.clone()));
+                    }
+                    Err(e) => {
+                        self.results
+                            .insert(stmt.span.start, dispatch_error_result(&e));
+                        changed = true;
+                    }
+                },
+                PropKind::Solver => match parse_solver(&stmt.body_text) {
+                    Ok(s) => {
+                        solvers.insert(model.span.start, (s, stmt.body_text.clone()));
+                    }
+                    Err(e) => {
+                        self.results
+                            .insert(stmt.span.start, dispatch_error_result(&e));
+                        changed = true;
+                    }
+                },
+                _ => unreachable!("filtered to Prior|Solver"),
+            }
+        }
+
+        // Re-define every in-block model (forced: no hash check).
+        for m in models.iter().filter(|m| in_block(m)) {
+            let trans_src = resolve_translator_src(
+                &idx.translators,
+                m.translator.as_deref(),
+                crate::translate::BUILTIN_TRANSLATOR,
+            );
+            let prior_src = priors
+                .get(&m.span.start)
+                .map(|(_, s)| s.as_str())
+                .unwrap_or("");
+            let solver_src = solvers
+                .get(&m.span.start)
+                .map(|(_, s)| s.as_str())
+                .unwrap_or("");
+            let h = hash_many(&[&m.body_text, trans_src, prior_src, solver_src]);
+            let prior = priors.get(&m.span.start).map(|(p, _)| p.clone());
+            let solver = solvers.get(&m.span.start).map(|(s, _)| s.clone());
+            let trans_off = translator_offset(&idx.translators, m.translator.as_deref());
+            match statement_to_model_spec(&mut self.engine, &idx.translators, m, prior, solver) {
+                Ok(spec) => {
+                    if let Some(off) = trans_off {
+                        self.translator_errors.remove(&off);
+                    }
+                    self.submit_or_error(
+                        m.span.start as u64,
+                        KernelRequest::DefineModel {
+                            block_id: m.span.start as u64,
+                            spec,
+                        },
+                    );
+                    self.model_hashes.insert(m.span.start, h);
+                }
+                Err(ref e) if matches!(e, DispatchError::Translate(_) | DispatchError::Json(_)) => {
+                    if let Some(off) = trans_off {
+                        self.translator_errors.insert(off, e.to_string());
+                    }
+                    self.results.insert(m.span.start, dispatch_error_result(e));
+                    changed = true;
+                }
+                Err(e) => {
+                    if let Some(off) = trans_off {
+                        self.translator_errors.remove(&off);
+                    }
+                    self.results.insert(m.span.start, dispatch_error_result(&e));
+                    changed = true;
+                }
+            }
+        }
+
+        // Re-run every in-block prob/event against its bound model.
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| matches!(s.kind, PropKind::Prob | PropKind::Event) && in_block(s))
+        {
+            self.prob_names.insert(stmt.span.start, stmt.name.clone());
+            let Some(model) = resolve_model(&models, stmt, &mut self.results) else {
+                self.cur_hashes.insert(stmt.span.start, 0);
+                self.last_result_hashes.insert(stmt.span.start, 0);
+                continue;
+            };
+            let prob_trans_src = resolve_translator_src(
+                &idx.translators,
+                stmt.translator.as_deref(),
+                crate::translate::BUILTIN_EVENT_TRANSLATOR,
+            );
+            let model_trans_src = resolve_translator_src(
+                &idx.translators,
+                model.translator.as_deref(),
+                crate::translate::BUILTIN_TRANSLATOR,
+            );
+            let key = hash_many(&[
+                &stmt.body_text,
+                prob_trans_src,
+                &model.body_text,
+                model_trans_src,
+                stmt.condition_event.as_deref().unwrap_or(""),
+            ]);
+            self.cur_hashes.insert(stmt.span.start, key);
+            let event_trans_off = translator_offset(&idx.translators, stmt.translator.as_deref());
+            match statement_to_event_json(&mut self.engine, &idx.translators, stmt) {
+                Ok(event_json) => {
+                    if let Some(off) = event_trans_off {
+                        self.translator_errors.remove(&off);
+                    }
+                    if let Some(cond_json) = &stmt.condition_event {
+                        self.submit_or_error(
+                            stmt.span.start as u64,
+                            KernelRequest::Condition {
+                                model_id: model.span.start as u64,
+                                block_id: stmt.span.start as u64,
+                                event_json: cond_json.clone(),
+                            },
+                        );
+                    }
+                    self.submit_or_error(
+                        stmt.span.start as u64,
+                        KernelRequest::Probability {
+                            model_id: model.span.start as u64,
+                            block_id: stmt.span.start as u64,
+                            event_json,
+                        },
+                    );
+                    self.prob_hashes.insert(stmt.span.start, key);
+                }
+                Err(ref e) if matches!(e, DispatchError::Translate(_) | DispatchError::Json(_)) => {
+                    if let Some(off) = event_trans_off {
+                        self.translator_errors.insert(off, e.to_string());
+                    }
+                    self.results
+                        .insert(stmt.span.start, dispatch_error_result(e));
+                    self.last_result_hashes.insert(stmt.span.start, key);
+                    changed = true;
+                }
+                Err(e) => {
+                    if let Some(off) = event_trans_off {
+                        self.translator_errors.remove(&off);
+                    }
+                    self.results
+                        .insert(stmt.span.start, dispatch_error_result(&e));
+                    self.last_result_hashes.insert(stmt.span.start, key);
+                    changed = true;
+                }
+            }
+        }
+
+        // Layout claims in the block re-verify synchronously.
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Layout && in_block(s))
+        {
+            let result = layout_verdict(&stmt.body_text);
+            let h = hash_many(&[&stmt.body_text]);
+            self.cur_hashes.insert(stmt.span.start, h);
+            self.last_result_hashes.insert(stmt.span.start, h);
+            if self.results.get(&stmt.span.start) != Some(&result) {
+                self.results.insert(stmt.span.start, result);
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    /// The inputs whose result is currently displayed just became
+    /// the current inputs: a response landed for a statement, or a
+    /// synchronous error was inserted.
+    fn record_fresh(&mut self, off: &usize) {
+        if let Some(&h) = self.cur_hashes.get(off) {
+            self.last_result_hashes.insert(*off, h);
+        }
+    }
+
+    /// Blocks (indices into `split_blocks` order) with at least one
+    /// stale result-bearing statement: its displayed output does not
+    /// reflect the document's current inputs — either a kernel
+    /// request is in flight, or the inputs changed since the result
+    /// was computed. The region view shows these blocks with a
+    /// "stale — run to update" marker; running the block clears it.
+    pub fn stale_blocks(&self) -> Vec<usize> {
+        let mut stale = std::collections::BTreeSet::new();
+        for (&off, &block) in &self.stmt_blocks {
+            let is_stale = self.pending.contains_key(&off)
+                || self.cur_hashes.get(&off) != self.last_result_hashes.get(&off);
+            if is_stale {
+                stale.insert(block);
+            }
+        }
+        stale.into_iter().collect()
     }
 
     /// Outputs grouped to a block (the notebook "cell" view of
@@ -644,6 +917,7 @@ impl KernelBridge {
             match resp {
                 BlockResponse::Value(id, v) => {
                     self.results.insert(id as usize, KernelResult::Value(v));
+                    self.record_fresh(&(id as usize));
                     changed = true;
                 }
                 // A model session was (re)defined: no displayed
@@ -652,6 +926,7 @@ impl KernelBridge {
                 BlockResponse::StringValue(id, s) => {
                     self.results
                         .insert(id as usize, KernelResult::StringValue(s));
+                    self.record_fresh(&(id as usize));
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
@@ -663,6 +938,7 @@ impl KernelBridge {
                             hints: diag.hints,
                         },
                     );
+                    self.record_fresh(&(id as usize));
                     changed = true;
                 }
             }
@@ -997,6 +1273,24 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// Poll until every submitted request has been answered
+    /// (bounded). Models answer with `Success` (no displayed
+    /// result), so `wait_for` alone cannot settle them — this is
+    /// the "everything drained" predicate.
+    fn settle(bridge: &mut KernelBridge, timeout: Duration) {
+        let start = Instant::now();
+        while !bridge.pending.is_empty() {
+            bridge.poll();
+            if start.elapsed() > timeout {
+                panic!(
+                    "pending requests never settled: {:?}",
+                    bridge.pending.keys()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Poll the bridge until `key` has a result or `timeout` elapses.
     fn wait_for(bridge: &mut KernelBridge, key: usize, timeout: Duration) -> Option<KernelResult> {
         let start = Instant::now();
@@ -1020,6 +1314,120 @@ mod tests {
             .expect("a prob statement")
             .span
             .start
+    }
+
+    /// `run_block` re-issues requests for exactly the statements of
+    /// one block (N-series N2): after an initial settled refresh,
+    /// running block 0 leaves only block-0 statements in flight,
+    /// and the block is stale until their responses land.
+    #[test]
+    fn run_block_dispatches_exactly_the_blocks_statements() {
+        let doc = "= Block one\n\
+                   #1 a #2 \\model(#1,#2)\n\
+                   #3 vac #4 \\prob(#3,#4)\n\n\
+                   = Block two\n\
+                   #5 b #6 \\model(#5,#6)\n\
+                   #7 v #8 \\prob(#7,#8)";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+
+        let block_ranges = mathed_core::blocks::split_blocks(doc);
+        let block_of = |pos: usize| {
+            block_ranges
+                .iter()
+                .rposition(|r| r.start <= pos)
+                .unwrap_or(0)
+        };
+        let idx = build_index(doc);
+        let mut block0: Vec<usize> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| block_of(s.span.start) == 0)
+            .map(|s| s.span.start)
+            .collect();
+        let block1: Vec<usize> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| block_of(s.span.start) == 1)
+            .map(|s| s.span.start)
+            .collect();
+        block0.sort_unstable();
+        assert_eq!(block0.len(), 2, "model + prob in block 0");
+        let probs: Vec<usize> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Prob)
+            .map(|s| s.span.start)
+            .collect();
+
+        // Settle the initial refresh (models answer `Success` — no
+        // displayed result — so `wait_for` alone cannot drain them).
+        settle(&mut bridge, Duration::from_secs(15));
+        assert!(bridge.stale_blocks().is_empty(), "fresh after settle");
+
+        bridge.run_block(doc, 0);
+        let mut pending: Vec<usize> = bridge.pending.keys().copied().collect();
+        pending.sort_unstable();
+        assert_eq!(pending, block0, "only block-0 statements in flight");
+        // In flight = stale.
+        assert_eq!(bridge.stale_blocks(), vec![0]);
+
+        // Responses land → fresh again, block 1 never touched.
+        settle(&mut bridge, Duration::from_secs(15));
+        assert!(bridge.stale_blocks().is_empty());
+    }
+
+    /// Editing a model body re-dispatches its dependent prob; the
+    /// block is stale while the new result is in flight, and running
+    /// the block (then settling) clears it (N-series N2).
+    #[test]
+    fn editing_a_model_body_marks_dependent_blocks_stale() {
+        let doc1 = "= Cell\n\
+                    #1 a #2 \\model(#1,#2)\n\
+                    #3 vac #4 \\prob(#3,#4)";
+        // Same markers/offsets, model body a → b.
+        let doc2 = "= Cell\n\
+                    #1 b #2 \\model(#1,#2)\n\
+                    #3 vac #4 \\prob(#3,#4)";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc1);
+        let p = prob_offset(doc1);
+        settle(&mut bridge, Duration::from_secs(15));
+        assert!(bridge.stale_blocks().is_empty());
+
+        bridge.refresh(doc2);
+        assert_eq!(bridge.stale_blocks(), vec![0], "edit → stale (in flight)");
+
+        // "Running" the block clears staleness once responses land.
+        bridge.run_block(doc2, 0);
+        settle(&mut bridge, Duration::from_secs(15));
+        assert!(bridge.stale_blocks().is_empty(), "run cleared stale");
+    }
+
+    /// A dispatch error result reflects the current inputs: it is
+    /// never stale, and deleting the offending statement prunes it.
+    #[test]
+    fn dispatch_error_results_are_never_stale() {
+        let doc = "= Cell\n\
+                   #1 a #2 \\model(#1,#2)\n\
+                   #5 #let translate(b) = { \"[]\" } #6 \\translator(#5,#6, name: \"bad\")\n\
+                   #3 vac #4 \\prob(#3,#4, translator: \"bad\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        // Sync dispatch error inserted during refresh.
+        assert!(matches!(
+            bridge.results().get(&prob_offset(doc)),
+            Some(KernelResult::Error { .. })
+        ));
+        // The model still has a request in flight — settle it, then
+        // the sync error (which reflects current inputs) is fresh.
+        settle(&mut bridge, Duration::from_secs(15));
+        assert!(bridge.stale_blocks().is_empty(), "error reflects inputs");
+
+        let clean = "= Cell\n#1 a #2 \\model(#1,#2)";
+        bridge.refresh(clean);
+        assert!(bridge.results().is_empty());
+        assert!(bridge.stale_blocks().is_empty());
     }
 
     /// Two-block document with a `\prob` in each block: the
