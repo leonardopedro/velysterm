@@ -16,6 +16,70 @@ pub fn export_typst(doc_text: &str) -> String {
     format!("// Exported from mathed_mini\n{}", render.text)
 }
 
+/// ASCII interchange projection (U-series U4): render the document's
+/// Typst markup, then map every non-ASCII code point to ASCII:
+/// inside math, glyphs with a `\name` form in the U2 completion
+/// table become that backslash-name (`α` → `\alpha`, valid Typst
+/// math); everything else becomes an explicit `\u{HEX}` literal
+/// (valid in markup and math — never a silent drop, never a mangled
+/// glyph). The source (ASCII syntax + Unicode glyphs) stays
+/// canonical; this export is a lossy-by-design but always-total
+/// projection for ASCII-only pipelines.
+pub fn export_ascii(doc_text: &str) -> String {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
+
+    let mut out = String::with_capacity(render.text.len());
+    let mut in_math = false;
+    let mut escaped = false;
+    for c in render.text.chars() {
+        if escaped {
+            // The char escaped by `\` is emitted verbatim — an
+            // escaped `$` must not toggle math.
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            out.push(c);
+            escaped = true;
+            continue;
+        }
+        if c == '$' {
+            in_math = !in_math;
+            out.push(c);
+            continue;
+        }
+        if c.is_ascii() {
+            out.push(c);
+            continue;
+        }
+        if in_math && let Some(name) = ascii_math_name(c) {
+            out.push_str(name);
+        } else {
+            // Explicit, round-trippable flag — never a silent drop.
+            out.push_str(&format!("\\u{{{:X}}}", c as u32));
+        }
+    }
+    out
+}
+
+/// Inverted U2 table: glyph → ASCII backslash-name, restricted to
+/// entries whose ASCII form is a valid Typst math escape (starts
+/// with `\`). Operator forms (`->` for `→`) are NOT valid Typst
+/// math, so those glyphs fall back to `\u{...}`. A glyph with
+/// several names maps to the longest (the table is currently
+/// injective, so this is the single entry).
+fn ascii_math_name(glyph: char) -> Option<&'static str> {
+    mathed_core::completion::COMPLETIONS
+        .iter()
+        .filter(|e| e.ascii.starts_with('\\') && e.glyph.chars().count() == 1)
+        .filter(|e| e.glyph.chars().next() == Some(glyph))
+        .max_by_key(|e| e.ascii.len())
+        .map(|e| e.ascii)
+}
+
 pub fn export_json(doc_text: &str) -> String {
     export_json_with_runs(doc_text, &[])
 }
@@ -469,6 +533,47 @@ mod tests {
             export_json_with_runs(doc, &runs),
             export_json_with_runs(doc, &runs)
         );
+    }
+
+    // ── U4: --export-ascii interchange projection ──────────────
+
+    #[test]
+    fn ascii_export_is_total_and_ascii_only() {
+        // Math glyphs, CJK prose, emoji: everything must project to
+        // ASCII bytes and the projection must be deterministic.
+        let doc = "= 数学\n\n$ αβ + π ≤ 1 $\n\nA crab 🦀 and an arrow →";
+        let out = export_ascii(doc);
+        assert!(out.is_ascii(), "output must be ASCII-only: {out}");
+        // Total + deterministic: same input → same output.
+        assert_eq!(out, export_ascii(doc));
+    }
+
+    #[test]
+    fn ascii_export_uses_math_names_inside_math() {
+        let doc = "$ αβ $ and plain text";
+        let out = export_ascii(doc);
+        assert!(out.contains("$ \\alpha\\beta $"), "math names: {out}");
+        // Idempotent: already-ASCII input round-trips unchanged.
+        let again = export_ascii(&out);
+        assert_eq!(out, again);
+        // An escaped `$` must not close the math fence.
+        let out2 = export_ascii("$ a \\$ α $");
+        assert!(
+            out2.contains("\\alpha"),
+            "still math after escaped $: {out2}"
+        );
+    }
+
+    #[test]
+    fn ascii_export_flags_exotic_glyphs() {
+        // Arrow has no `\name` form (only `->`, not valid Typst):
+        // explicit `\u{...}`. Exotic chars outside math: `\u{...}`.
+        let out = export_ascii("$ → $ 🦀");
+        assert!(out.contains("\\u{2192}"), "arrow flagged: {out}");
+        assert!(out.contains("\\u{1F980}"), "crab flagged: {out}");
+        assert!(out.is_ascii());
+        assert!(!out.contains('→'));
+        assert!(!out.contains('🦀'));
     }
 
     #[test]

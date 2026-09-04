@@ -69,6 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Exported Markdown to {path}");
                 return Ok(());
             }
+            "--export-ascii" => {
+                let path = rest.first().ok_or("--export-ascii requires a file path")?;
+                let out = mathed_mini::export::export_ascii(initial);
+                std::fs::write(path, out)?;
+                eprintln!("Exported ASCII-only Typst to {path}");
+                return Ok(());
+            }
             "--render-typst" => {
                 let path = rest
                     .first()
