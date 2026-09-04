@@ -128,6 +128,84 @@ pub fn export_tex(doc_text: &str) -> String {
     )
 }
 
+/// Render the document as a Typst template (stage T4 of
+/// PLAN_mathed_template_language.md): every `\template` segment's
+/// `render(ctx)` body is evaluated against the document's
+/// [`mathed_core::DocumentContext`] JSON (overlaid with
+/// `extra_ctx_json`, if any — the "template arguments" seam), and
+/// the returned markup is spliced after the segment's body via the
+/// T3 `TransformOptions::template_splices` seam. Template bodies
+/// collapse to `▸ template: name` like translator code. A
+/// document without `\template` segments renders byte-identically
+/// to [`export_typst`] (same transform, no splices).
+pub fn export_typst_template(
+    doc_text: &str,
+    extra_ctx_json: Option<&str>,
+) -> Result<String, String> {
+    let (scan, segments, _, idx) = crate::kernel_bridge::scan_pipeline(doc_text);
+
+    // DocumentContext → JSON, with the caller's overlay merged at
+    // the top level (overlay keys win over derived keys).
+    let ctx = mathed_core::DocumentContext::from_index(
+        doc_text,
+        &scan,
+        &idx,
+        &std::collections::HashMap::new(),
+    );
+    let mut ctx_value =
+        serde_json::to_value(&ctx).map_err(|e| format!("serialize context: {e}"))?;
+    if let Some(extra) = extra_ctx_json {
+        let extra: serde_json::Value =
+            serde_json::from_str(extra).map_err(|e| format!("--ctx is not valid JSON: {e}"))?;
+        merge_overlay(&mut ctx_value, extra);
+    }
+    let ctx_json =
+        serde_json::to_string(&ctx_value).map_err(|e| format!("serialize context: {e}"))?;
+
+    // Evaluate each template against the shared context; a failing
+    // template fails the export loudly (never a silent partial
+    // render).
+    let mut splices = std::collections::HashMap::new();
+    let mut engine = crate::translate::Translator::new();
+    for (name, def) in &idx.templates {
+        match engine.run_template(&def.body_text, &ctx_json) {
+            Ok(markup) => {
+                splices.insert(def.span.start, markup);
+            }
+            Err(e) => {
+                return Err(format!("\\template `{name}` failed to render: {e}"));
+            }
+        }
+    }
+
+    let render = to_render_text(
+        doc_text,
+        &scan,
+        &segments,
+        &TransformOptions {
+            template_splices: splices,
+            ..Default::default()
+        },
+    );
+    Ok(format!(
+        "// Exported from mathed_mini (rendered template)\n{}",
+        render.text
+    ))
+}
+
+/// Merge `extra` into `base` (both JSON objects merge key-wise,
+/// overlay wins; a non-object overlay replaces the whole context).
+fn merge_overlay(base: &mut serde_json::Value, extra: serde_json::Value) {
+    match (base, extra) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(x)) => {
+            for (k, v) in x {
+                b.insert(k, v);
+            }
+        }
+        (b, x) => *b = x,
+    }
+}
+
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -186,5 +264,53 @@ mod tests {
         assert!(out.contains("\\begin{document}"), "begin: {out}");
         assert!(out.contains("\\end{document}"), "end: {out}");
         assert!(out.contains("$"), "math mode: {out}");
+    }
+
+    // ── T4: --render-typst (template rendering) ───────────────
+
+    #[test]
+    fn template_render_splices_markup_and_hides_code() {
+        let doc = concat!(
+            "= Report\n\n",
+            "#1 #let render(ctx) = \"#emph[expanded]\" #2 ",
+            "\\template(#1,#2, name: rep)\n\n",
+            "Body text.\n",
+        );
+        let out = export_typst_template(doc, None).expect("template export");
+        assert!(out.contains("#emph[expanded]"), "spliced markup: {out}");
+        assert!(out.contains("Body text."), "body preserved: {out}");
+        assert!(out.contains("template: rep"), "collapsed title: {out}");
+        assert!(
+            !out.contains("#let render"),
+            "template code body must be hidden (collapsed): {out}"
+        );
+    }
+
+    #[test]
+    fn template_free_doc_renders_byte_identical_to_plain_export() {
+        let doc = "= Title\n\n#1 a #2 \\model(#1,#2)\n\nPlain $E=mc^2$ text.\n";
+        let plain = export_typst(doc);
+        let templated = export_typst_template(doc, None).expect("no-template export");
+        let expected = plain.replace(
+            "// Exported from mathed_mini",
+            "// Exported from mathed_mini (rendered template)",
+        );
+        assert_eq!(templated, expected, "template-free export must not change");
+    }
+
+    #[test]
+    fn template_failure_is_loud_and_named() {
+        let doc = concat!("#1 not valid typst code #2 \\template(#1,#2, name: bad)");
+        let err = export_typst_template(doc, None).unwrap_err();
+        assert!(err.contains("bad"), "names the failing template: {err}");
+    }
+
+    #[test]
+    fn template_ctx_overlay_reaches_render() {
+        // The echo template returns the ctx JSON it received, so the
+        // export output proves --ctx flowed through the overlay.
+        let doc = concat!("#1 #let render(ctx) = ctx #2 \\template(#1,#2, name: echo)");
+        let out = export_typst_template(doc, Some(r#"{"title": "hello"}"#)).expect("echo export");
+        assert!(out.contains("hello"), "overlay value spliced: {out}");
     }
 }

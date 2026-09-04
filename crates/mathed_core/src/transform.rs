@@ -293,10 +293,11 @@ pub fn to_render_text_range(
         }
     }
 
-    // Translator segments (P3 #10): the body is Typst *code*, not
-    // document content — but it participates in the exact same
-    // hidden/shown/`revealed()` machinery as every other segment kind
-    // (markers, `\cite` statements) rather than a bespoke mechanism.
+    // Code segments: `\translator` (P3 #10) and `\template` (T2)
+    // bodies are Typst *code*, not document content — but they
+    // participate in the exact same hidden/shown/`revealed()`
+    // machinery as every other segment kind (markers, `\cite`
+    // statements) rather than a bespoke mechanism.
     // Hidden (collapsed): the span is added to `hidden` like any
     // other token, and a one-line title is spliced at its start —
     // `translator_title_points` below, the same splice-at-position
@@ -308,7 +309,7 @@ pub fn to_render_text_range(
     // *mechanism* as everything else.
     let translator_spans: Vec<(Range<usize>, &Segment)> = segments
         .iter()
-        .filter(|seg| seg.kind == PropKind::Translator)
+        .filter(|seg| seg.kind == PropKind::Translator || seg.kind == PropKind::Template)
         .filter_map(|seg| {
             let span = seg.span.clone()?;
             if span.start >= range.end || span.end <= range.start {
@@ -827,6 +828,11 @@ fn translator_title_markup(seg: &Segment, opts: &TransformOptions) -> String {
     let error = span_start
         .and_then(|s| opts.translator_errors.get(&s))
         .is_some();
+    let label = if seg.kind == PropKind::Template {
+        "template"
+    } else {
+        "translator"
+    };
     match translator_name(seg) {
         Some(n) => {
             let mut s = String::new();
@@ -835,11 +841,12 @@ fn translator_title_markup(seg: &Segment, opts: &TransformOptions) -> String {
             } else {
                 s.push_str("▸ ");
             }
-            s.push_str("translator: ");
+            s.push_str(label);
+            s.push_str(": ");
             s.push_str(&n);
             s
         }
-        None => "▸ translator".to_string(),
+        None => format!("▸ {label}"),
     }
 }
 

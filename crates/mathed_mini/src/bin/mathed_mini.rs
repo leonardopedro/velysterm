@@ -8,6 +8,12 @@
 //!   mathed_mini --export-json <file>    Export SemanticIndex as JSON
 //!   mathed_mini --export-md <file>      Export as plain Markdown
 //!
+//! Template rendering (T4):
+//!   mathed_mini --render-typst <doc> [--ctx <ctx.json>] [--out <out.typ>]
+//!     Renders the doc's \\template segments against the document
+//!     context (overlaid with --ctx) and writes the resulting .typ
+//!     to --out or stdout.
+//!
 //! Durable dashboard (TUI):
 //!   mathed_mini --dashboard             Open the durable-store
 //! status                                       dashboard (Typst
@@ -61,6 +67,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let out = mathed_mini::export::export_markdown(initial);
                 std::fs::write(path, out)?;
                 eprintln!("Exported Markdown to {path}");
+                return Ok(());
+            }
+            "--render-typst" => {
+                let path = rest
+                    .first()
+                    .ok_or("--render-typst requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let mut ctx_json: Option<String> = None;
+                let mut out_path: Option<String> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--ctx" => {
+                            i += 1;
+                            let p = rest.get(i).ok_or("--ctx requires a JSON file path")?;
+                            ctx_json = Some(std::fs::read_to_string(p)?);
+                        }
+                        "--out" => {
+                            i += 1;
+                            let p = rest.get(i).ok_or("--out requires an output file path")?;
+                            out_path = Some(p.clone());
+                        }
+                        other => {
+                            return Err(
+                                format!("unexpected --render-typst argument: {other}").into()
+                            );
+                        }
+                    }
+                    i += 1;
+                }
+                let out = mathed_mini::export::export_typst_template(&doc, ctx_json.as_deref())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                match out_path {
+                    Some(p) => {
+                        std::fs::write(&p, &out)?;
+                        eprintln!("Rendered Typst to {p}");
+                    }
+                    None => {
+                        print!("{out}");
+                    }
+                }
                 return Ok(());
             }
             _ => {
