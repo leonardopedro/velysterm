@@ -57,6 +57,31 @@ pub enum KernelResult {
     },
 }
 
+/// One completed kernel run, appended to the bridge's run log when a
+/// response lands (N-series N3). The log is the reproducibility
+/// record: which block the statement lives in, the doc offset and
+/// input hash it was computed under, the op that produced it, the
+/// client-observed round-trip time, and the result itself. Exported
+/// through `export_json`'s `"blocks"` array; never persisted into
+/// the doc text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunEntry {
+    /// `split_blocks` index of the statement's block.
+    pub block: usize,
+    /// Doc byte offset of the result-bearing statement.
+    pub offset: usize,
+    /// Hash of the inputs (model/prob bodies + translators) the
+    /// request was submitted under.
+    pub input_hash: u64,
+    /// The op that produced this run (`probability`, `federation`, or
+    /// `error:<code>`).
+    pub op: String,
+    /// Client-observed round-trip time for the request, in ms.
+    pub timing_ms: u64,
+    /// The result (value / string / error).
+    pub result: KernelResult,
+}
+
 /// Drives the probability kernel from document text.
 pub struct KernelBridge {
     client: KernelClient,
@@ -83,6 +108,12 @@ pub struct KernelBridge {
     /// synchronous error is inserted (the error reflects the current
     /// inputs, so it is never stale).
     last_result_hashes: HashMap<usize, u64>,
+    /// The reproducibility record (N-series N3): one [`RunEntry`] per
+    /// completed run, in response order, oldest-first. Bounded by
+    /// [`Self::MAX_RUN_LOG`] so a long session cannot grow without
+    /// bound; the doc + this log is the notebook record exported via
+    /// `export_json`'s `"blocks"` array.
+    run_log: Vec<RunEntry>,
     /// model offset → hash of the last-dispatched body.
     model_hashes: HashMap<usize, u64>,
     /// prob offset → hash of the last-dispatched (prob body, model
@@ -125,6 +156,7 @@ impl KernelBridge {
             stmt_blocks: HashMap::new(),
             cur_hashes: HashMap::new(),
             last_result_hashes: HashMap::new(),
+            run_log: Vec::new(),
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
             translator_errors: HashMap::new(),
@@ -619,6 +651,11 @@ impl KernelBridge {
         changed
     }
 
+    /// Maximum size of the run log: a long session cannot grow the
+    /// reproducibility record without bound; the newest entries are
+    /// kept (oldest drained).
+    const MAX_RUN_LOG: usize = 4096;
+
     /// Re-run the live kernel statements in `block` (index into
     /// `split_blocks` order) — the notebook "run cell" affordance
     /// (N-series N2). Unlike [`refresh_with_index`], requests are
@@ -848,6 +885,40 @@ impl KernelBridge {
     /// request is in flight, or the inputs changed since the result
     /// was computed. The region view shows these blocks with a
     /// "stale — run to update" marker; running the block clears it.
+    /// The reproducibility record: completed runs, in response
+    /// order, oldest-first (N-series N3).
+    pub fn run_log(&self) -> &[RunEntry] {
+        &self.run_log
+    }
+
+    /// Append one completed run to the notebook record. Skipped for
+    /// responses without a displayed result (model `Success`), and
+    /// bounded by [`Self::MAX_RUN_LOG`].
+    fn log_run(&mut self, off: &usize, op: &str, timing_ms: Option<u64>, result: KernelResult) {
+        let Some(block) = self.stmt_blocks.get(off).copied() else {
+            return;
+        };
+        let input_hash = self.cur_hashes.get(off).copied().unwrap_or(0);
+        self.run_log.push(RunEntry {
+            block,
+            offset: *off,
+            input_hash,
+            op: op.to_string(),
+            timing_ms: timing_ms.unwrap_or(0),
+            result,
+        });
+        if self.run_log.len() > Self::MAX_RUN_LOG {
+            let excess = self.run_log.len() - Self::MAX_RUN_LOG;
+            self.run_log.drain(..excess);
+        }
+    }
+
+    /// Blocks (indices into `split_blocks` order) with at least one
+    /// stale result-bearing statement: its displayed output does not
+    /// reflect the document's current inputs — either a kernel
+    /// request is in flight, or the inputs changed since the result
+    /// was computed. The region view shows these blocks with a
+    /// "stale — run to update" marker; running the block clears it.
     pub fn stale_blocks(&self) -> Vec<usize> {
         let mut stale = std::collections::BTreeSet::new();
         for (&off, &block) in &self.stmt_blocks {
@@ -893,14 +964,16 @@ impl KernelBridge {
             // statement that has since been deleted
             // (dropped by the live filter
             // below). A settled key must not be declared lost later.
-            match &resp {
+            // The client-observed round-trip feeds the run log.
+            let elapsed_ms = match &resp {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
                 | BlockResponse::Error(id, _)
-                | BlockResponse::Success(id) => {
-                    self.pending.remove(&(*id as usize));
-                }
-            }
+                | BlockResponse::Success(id) => self
+                    .pending
+                    .remove(&(*id as usize))
+                    .map(|t| t.elapsed().as_millis() as u64),
+            };
             // A late response for a statement that has since been
             // deleted must not resurrect its stale
             // annotation: the key is not live anymore.
@@ -916,29 +989,32 @@ impl KernelBridge {
             }
             match resp {
                 BlockResponse::Value(id, v) => {
-                    self.results.insert(id as usize, KernelResult::Value(v));
+                    let r = KernelResult::Value(v);
+                    self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
+                    self.log_run(&(id as usize), "probability", elapsed_ms, r);
                     changed = true;
                 }
                 // A model session was (re)defined: no displayed
                 // result.
                 BlockResponse::Success(_) => {}
                 BlockResponse::StringValue(id, s) => {
-                    self.results
-                        .insert(id as usize, KernelResult::StringValue(s));
+                    let r = KernelResult::StringValue(s);
+                    self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
+                    self.log_run(&(id as usize), "federation", elapsed_ms, r);
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
-                    self.results.insert(
-                        id as usize,
-                        KernelResult::Error {
-                            code_name: diag.name,
-                            message: diag.message,
-                            hints: diag.hints,
-                        },
-                    );
+                    let code_name = diag.name;
+                    let r = KernelResult::Error {
+                        code_name: code_name.clone(),
+                        message: diag.message,
+                        hints: diag.hints,
+                    };
+                    self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
+                    self.log_run(&(id as usize), &format!("error:{code_name}"), elapsed_ms, r);
                     changed = true;
                 }
             }
@@ -1314,6 +1390,42 @@ mod tests {
             .expect("a prob statement")
             .span
             .start
+    }
+
+    /// Completed runs land in the log in response order, carrying
+    /// block/offset/input-hash/op/timing/result (N-series N3);
+    /// model `Success` responses record nothing (no displayed
+    /// result).
+    #[test]
+    fn run_log_records_completed_runs_in_response_order() {
+        let doc = "= Cell\n\
+                   #1 a #2 \\model(#1,#2)\n\
+                   #3 vac #4 \\prob(#3,#4)";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        let p = prob_offset(doc);
+        wait_for(&mut bridge, p, Duration::from_secs(15));
+
+        let log = bridge.run_log();
+        assert_eq!(log.len(), 1, "only the prob records a run: {log:?}");
+        let e = &log[0];
+        assert_eq!(e.offset, p);
+        assert_eq!(e.block, 0);
+        assert_eq!(e.op, "probability");
+        assert!(matches!(e.result, KernelResult::Value(_)));
+        // The recorded input hash is the current-inputs hash.
+        assert_eq!(bridge.cur_hashes.get(&p), Some(&e.input_hash));
+
+        // Rerunning the block appends a second entry, in order.
+        // (The old result is still displayed, so `wait_for` would
+        // return without draining — settle on the pending map
+        // instead.)
+        bridge.run_block(doc, 0);
+        settle(&mut bridge, Duration::from_secs(15));
+        let log = bridge.run_log();
+        assert_eq!(log.len(), 2, "second run appended: {log:?}");
+        assert_eq!(log[0].offset, p);
+        assert_eq!(log[1].offset, p);
     }
 
     /// `run_block` re-issues requests for exactly the statements of

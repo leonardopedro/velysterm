@@ -17,11 +17,90 @@ pub fn export_typst(doc_text: &str) -> String {
 }
 
 pub fn export_json(doc_text: &str) -> String {
+    export_json_with_runs(doc_text, &[])
+}
+
+/// JSON export including the notebook record: `export_json`'s shape
+/// plus a `"blocks"` array — per blank-line block: index, range,
+/// heading, its kernel statements (offset, kind, body hash), and the
+/// run-log slice for its result-bearing statements (N-series N3).
+/// The document + its log *is* the reproducibility record;
+/// everything here is derived from the doc and the bridge's in-memory
+/// log — nothing is persisted into the doc text.
+pub fn export_json_with_runs(doc_text: &str, runs: &[crate::kernel_bridge::RunEntry]) -> String {
+    use std::hash::{Hash, Hasher};
+
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
     let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
     let mut idx = SemanticIndex::default();
     idx.build_index(doc_text, &segments, &[&render]);
+
+    let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+    let block_of = |pos: usize| {
+        block_ranges
+            .iter()
+            .rposition(|r| r.start <= pos)
+            .unwrap_or(0)
+    };
+    let heading_of = |r: &std::ops::Range<usize>| {
+        doc_text[r.clone()]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('=')
+            .trim()
+            .chars()
+            .take(40)
+            .collect::<String>()
+    };
+    let body_hash = |s: &str| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
+    };
+
+    let blocks: Vec<serde_json::Value> = block_ranges
+        .iter()
+        .enumerate()
+        .map(|(bi, r)| {
+            let statements: Vec<serde_json::Value> = idx
+                .kernel_statements
+                .iter()
+                .filter(|s| block_of(s.span.start) == bi)
+                .map(|s| {
+                    serde_json::json!({
+                        "offset": s.span.start,
+                        "kind": format!("{:?}", s.kind),
+                        "body_hash": body_hash(&s.body_text),
+                    })
+                })
+                .collect();
+            let block_runs: Vec<serde_json::Value> = runs
+                .iter()
+                .filter(|e| e.block == bi)
+                .map(|e| {
+                    serde_json::json!({
+                        "offset": e.offset,
+                        "input_hash": e.input_hash,
+                        "op": e.op,
+                        "timing_ms": e.timing_ms,
+                        "result": result_json(&e.result),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "index": bi,
+                "start": r.start,
+                "len": r.end - r.start,
+                "heading": heading_of(r),
+                "statements": statements,
+                "runs": block_runs,
+            })
+        })
+        .collect();
+
     serde_json::json!({
         "kernel_statements": idx.kernel_statements.iter().map(|s| {
             serde_json::json!({
@@ -33,8 +112,36 @@ pub fn export_json(doc_text: &str) -> String {
         }).collect::<Vec<_>>(),
         "translators": idx.translators.keys().collect::<Vec<_>>(),
         "biblio_statements": idx.biblio_statements.len(),
+        "blocks": blocks,
     })
     .to_string()
+}
+
+/// Serialize a kernel result into the notebook record.
+fn result_json(result: &crate::kernel_bridge::KernelResult) -> serde_json::Value {
+    match result {
+        crate::kernel_bridge::KernelResult::Value(p) => serde_json::json!({ "value": p }),
+        crate::kernel_bridge::KernelResult::StringValue(s) => {
+            serde_json::json!({ "string": s })
+        }
+        crate::kernel_bridge::KernelResult::Error {
+            code_name,
+            message,
+            hints,
+        } => serde_json::json!({
+            "error": {
+                "code_name": code_name,
+                "message": message,
+                "hints": hints.iter().map(|h| {
+                    serde_json::json!({
+                        "kind": format!("{:?}", h.kind),
+                        "target": h.target,
+                        "suggestion": h.suggestion,
+                    })
+                }).collect::<Vec<_>>(),
+            }
+        }),
+    }
 }
 
 pub fn export_markdown(doc_text: &str) -> String {
@@ -287,6 +394,80 @@ mod tests {
             stmts.len() >= 2,
             "expected 2+ statements, got {}",
             stmts.len()
+        );
+    }
+
+    // ── N3: --export-json gains the notebook record ────────────
+
+    #[test]
+    fn json_export_record_includes_blocks_and_runs() {
+        use crate::kernel_bridge::{KernelResult, RunEntry};
+        let doc = "= Cell\n\
+                   #1 a #2 \\model(#1,#2)\n\n\
+                   #3 vac #4 \\prob(#3,#4)";
+        let runs = vec![RunEntry {
+            block: 1,
+            offset: 99,
+            input_hash: 7,
+            op: "probability".to_string(),
+            timing_ms: 12,
+            result: KernelResult::Value(0.5),
+        }];
+        let out = export_json_with_runs(doc, &runs);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let blocks = parsed["blocks"].as_array().expect("blocks array");
+        assert_eq!(blocks.len(), 2, "two blank-line blocks");
+        // Block 1 owns the prob statement and its run.
+        let b1 = &blocks[1];
+        assert_eq!(b1["index"], 1);
+        let stmts = b1["statements"].as_array().unwrap();
+        assert_eq!(stmts.len(), 1, "prob statement");
+        assert!(stmts[0]["offset"].as_u64().is_some());
+        assert!(stmts[0]["body_hash"].as_u64().is_some());
+        let block_runs = b1["runs"].as_array().unwrap();
+        assert_eq!(block_runs.len(), 1);
+        assert_eq!(block_runs[0]["op"], "probability");
+        assert_eq!(block_runs[0]["timing_ms"], 12);
+        assert_eq!(block_runs[0]["input_hash"], 7);
+        assert_eq!(block_runs[0]["result"]["value"], 0.5);
+    }
+
+    #[test]
+    fn json_export_without_runs_keeps_shape_with_empty_runs() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\n#3 vac #4 \\prob(#3,#4)";
+        let out = export_json(doc);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert!(
+            parsed.get("kernel_statements").is_some(),
+            "existing keys kept"
+        );
+        let blocks = parsed["blocks"].as_array().expect("blocks array");
+        assert_eq!(blocks.len(), 2);
+        for b in blocks {
+            assert!(b["runs"].as_array().unwrap().is_empty());
+            assert!(b["statements"].as_array().is_some());
+        }
+    }
+
+    #[test]
+    fn json_export_record_is_stable_for_fixed_trace() {
+        use crate::kernel_bridge::{KernelResult, RunEntry};
+        let doc = "= Cell\n\
+                   #1 a #2 \\model(#1,#2)\n\n\
+                   #3 vac #4 \\prob(#3,#4)";
+        let runs = vec![RunEntry {
+            block: 1,
+            offset: 99,
+            input_hash: 7,
+            op: "probability".to_string(),
+            timing_ms: 12,
+            result: KernelResult::Value(0.5),
+        }];
+        // The same document + log must export to the same bytes
+        // (deterministic record — reproducibility needs it).
+        assert_eq!(
+            export_json_with_runs(doc, &runs),
+            export_json_with_runs(doc, &runs)
         );
     }
 
