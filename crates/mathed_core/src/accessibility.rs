@@ -165,6 +165,7 @@ pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
             (AccessRole::Math, format!("skill: {n}"))
         }
         PropKind::Layout => (AccessRole::Math, format!("layout claim: {content}")),
+        PropKind::Template => (AccessRole::Math, format!("template: {content}")),
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }

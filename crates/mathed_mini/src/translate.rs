@@ -102,14 +102,42 @@ impl Translator {
     /// Run `translator_src` against `body`, returning the JSON string
     /// the translator's `translate(body)` function produced.
     pub fn run(&mut self, translator_src: &str, body: &str) -> Result<String, TranslateError> {
+        self.run_entry("translate", translator_src, body)
+    }
+
+    /// Evaluate a `\template` body (stage T2 of
+    /// PLAN_mathed_template_language.md) against the
+    /// `DocumentContext` JSON: the body must define
+    /// `#let render(ctx) = …` returning a Typst-markup string. Same
+    /// let-binding call path, eval cache and error surface as
+    /// translators; only the entry function name and the meaning of
+    /// the returned string (markup vs. kernel JSON) differ.
+    pub fn run_template(
+        &mut self,
+        template_src: &str,
+        ctx_json: &str,
+    ) -> Result<String, TranslateError> {
+        self.run_entry("render", template_src, ctx_json)
+    }
+
+    /// Run the built-in default translator against `body`.
+    pub fn run_builtin(&mut self, body: &str) -> Result<String, TranslateError> {
+        self.run(BUILTIN_TRANSLATOR, body)
+    }
+
+    /// Shared implementation: append `#let {RESULT_BINDING} =
+    /// {fn_name}(<arg>)` to the user source so Typst invokes the
+    /// function during module evaluation, then read the binding
+    /// back.
+    fn run_entry(&mut self, fn_name: &str, src: &str, arg: &str) -> Result<String, TranslateError> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        translator_src.hash(&mut h);
+        src.hash(&mut h);
         self.last_src_hash = Some(h.finish());
 
         let src = format!(
-            "{translator_src}\n#let {RESULT_BINDING} = translate({})\n",
-            typst_str_lit(body),
+            "{src}\n#let {RESULT_BINDING} = {fn_name}({})\n",
+            typst_str_lit(arg),
         );
         self.world.set_markup(src);
         match self
@@ -128,11 +156,6 @@ impl Translator {
             }
             Some(_) => Err(TranslateError::NotString),
         }
-    }
-
-    /// Run the built-in default translator against `body`.
-    pub fn run_builtin(&mut self, body: &str) -> Result<String, TranslateError> {
-        self.run(BUILTIN_TRANSLATOR, body)
     }
 }
 
@@ -291,5 +314,37 @@ mod tests {
         assert_eq!(typst_str_lit("a\\b"), "\"a\\\\b\"");
         assert_eq!(typst_str_lit("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(typst_str_lit("l1\nl2"), "\"l1\\nl2\"");
+    }
+
+    // ── T2: \template render(ctx) ─────────────────────────────
+
+    #[test]
+    fn template_render_returns_markup() {
+        let mut t = Translator::new();
+        let src = "#let render(ctx) = \"#emph[hi]\"";
+        let out = t.run_template(src, "{}").expect("trivial render");
+        assert_eq!(out, "#emph[hi]");
+    }
+
+    #[test]
+    fn template_render_receives_ctx_json() {
+        // The engine threads the ctx JSON through as the `ctx`
+        // argument (mirroring `translate_receives_body`).
+        let mut t = Translator::new();
+        let out = t
+            .run_template("#let render(ctx) = ctx", "{\"title\":\"hello\"}")
+            .expect("echo render");
+        assert_eq!(out, "{\"title\":\"hello\"}");
+    }
+
+    #[test]
+    fn template_without_render_is_eval_error() {
+        let mut t = Translator::new();
+        // Defining only `translate` cannot satisfy the appended
+        // `render(ctx)` call — evaluation errors.
+        let err = t
+            .run_template("#let translate(body) = body", "{}")
+            .unwrap_err();
+        assert!(matches!(err, TranslateError::Eval(_)), "got: {err:?}");
     }
 }

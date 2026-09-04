@@ -139,6 +139,11 @@ pub enum PropKind {
     Layout,
     /// Unknown property: kept, semantically inert in v1.
     Other,
+    /// T2: a `\template(#s,#f, name: "…")` segment whose body is
+    /// Typst code defining `#let render(ctx) = …`; the returned
+    /// markup is spliced after the body (T3 seam). See
+    /// [`PropKind::is_template`].
+    Template,
 }
 
 impl PropKind {
@@ -165,6 +170,8 @@ impl PropKind {
             "resolve" => Self::Resolve,
             "skill" => Self::Skill,
             "layout" => Self::Layout,
+            // T2: `\template` / `\tpl` (see [`PropKind::Template`]).
+            "template" | "tpl" => Self::Template,
             _ => Self::Other,
         }
     }
@@ -230,6 +237,14 @@ impl PropKind {
     /// module path).
     pub fn is_skill(self) -> bool {
         matches!(self, Self::Skill)
+    }
+
+    /// T2: `\template` segments — their body is Typst code (like a
+    /// translator's) whose `render(ctx)` output is Typst markup
+    /// spliced at the T3 seam. Templates are content, not kernel
+    /// ops, so this is deliberately separate from `is_kernel`.
+    pub fn is_template(self) -> bool {
+        matches!(self, Self::Template)
     }
 }
 

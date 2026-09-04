@@ -17,6 +17,11 @@ pub struct SemanticIndex {
     /// later `\translator` shadows an earlier one with the same
     /// name).
     pub translators: HashMap<String, TranslatorDef>,
+    /// `\template` segments (T2) keyed by name — same shape as
+    /// translators (their body is also Typst code), collected
+    /// separately because template output is content (spliced
+    /// markup), not a kernel payload.
+    pub templates: HashMap<String, TranslatorDef>,
     /// `\bibliography`/`\cite` statements (P11.21) collected for the
     /// `mathed_biblio` citation bridge, mirroring
     /// `kernel_statements` but routed to the bibliography
@@ -286,6 +291,30 @@ impl SemanticIndex {
             });
         }
 
+        // --- Collect template segments (\template, T2). ---
+        let mut templates: HashMap<String, TranslatorDef> = HashMap::new();
+        for seg in segments {
+            if !seg.kind.is_template() {
+                continue;
+            }
+            let span = match seg.span.clone() {
+                Some(s) => s,
+                None => continue,
+            };
+            let body_text = doc_text[span.clone()].trim().to_string();
+            let block = find_block_for_doc_pos(per_block_renders, span.start);
+            let name = extract_named_string(&seg.extra_args, "name").unwrap_or_default();
+            templates.insert(
+                name.clone(),
+                TranslatorDef {
+                    name,
+                    body_text,
+                    span,
+                    block,
+                },
+            );
+        }
+
         // --- Collect bibliography statements (Bibliography/Cite,
         // P11.21). ---
         let mut biblio_statements = Vec::new();
@@ -351,6 +380,7 @@ impl SemanticIndex {
         self.occurrences = occurrences;
         self.kernel_statements = kernel_statements;
         self.translators = translators;
+        self.templates = templates;
         self.biblio_statements = biblio_statements;
     }
 
@@ -1161,5 +1191,28 @@ mod tests {
         assert_eq!(back, ctx);
         // The def entry keeps export_json's `name`/`body` keys.
         assert!(json.contains("\"name\":\"h\""), "json: {json}");
+    }
+
+    #[test]
+    fn index_collects_template_segments() {
+        // T2: a `\template` segment is collected like a translator,
+        // but into its own map (template output is content).
+        let doc = concat!(
+            "#1 ",
+            "#let render(ctx) = \"#emph[hi]\"",
+            " #2 \\template(#1,#2, name: rep)",
+        );
+        let s = scan(doc);
+        let segs = resolve_segments(&s);
+        let render = to_render_text(doc, &s, &segs, &TransformOptions::default());
+        let mut idx = SemanticIndex::default();
+        idx.build_index(doc, &segs, &[&render]);
+
+        assert_eq!(idx.templates.len(), 1);
+        let tpl = idx.templates.get("rep").expect("named template");
+        assert_eq!(tpl.body_text, "#let render(ctx) = \"#emph[hi]\"");
+        assert!(tpl.span.start > 0);
+        // Translators stay separate: no translator was collected.
+        assert!(idx.translators.is_empty());
     }
 }
