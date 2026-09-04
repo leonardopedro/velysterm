@@ -2160,6 +2160,18 @@ mod tests {
         let token = prop_oneof![
             // Plain prose chunks.
             string_regex("[a-zA-Z]{1,6}").unwrap(),
+            // U1: multibyte prose/math chunks. Unicode must never
+            // open a token and must round-trip verbatim through the
+            // OffsetMap (combining marks, math alphanumerics, CJK,
+            // symbols).
+            prop_oneof![
+                Just("αβγ".into()),
+                Just("𝐴𝑖𝛽".into()),
+                Just("e\u{301}".into()),
+                Just("𝑥²".into()),
+                Just("日本語".into()),
+                Just("∫ f d𝑥".into()),
+            ],
             // Markers.
             string_regex("#[a-zA-Z0-9]{1,4}").unwrap(),
             // Escaped chars.
@@ -2247,7 +2259,27 @@ mod tests {
                     prop_assert_eq!(d_rt, d_mid,
                         "midpoint render_to_doc {}", r_mid);
                 }
+
+                // U1: a copied span's doc boundaries always sit on
+                // code-point boundaries — a verbatim copy can never
+                // start or end mid-character.
+                prop_assert!(doc_text.is_char_boundary(span.doc_start),
+                    "span doc_start {} splits a code point", span.doc_start);
+                prop_assert!(doc_text.is_char_boundary(span.doc_start + span.len),
+                    "span doc_end {} splits a code point", span.doc_start + span.len);
             }
+
+            // U1: every segment span the scanner derives must be
+            // sliceable (on code-point boundaries), and the render
+            // text stays valid UTF-8 throughout.
+            for seg in &segs {
+                if let Some(sp) = &seg.span {
+                    prop_assert!(doc_text.is_char_boundary(sp.start)
+                        && doc_text.is_char_boundary(sp.end),
+                        "segment span {:?} splits a code point", sp);
+                }
+            }
+            prop_assert!(std::str::from_utf8(out.text.as_bytes()).is_ok());
         }
     }
 }

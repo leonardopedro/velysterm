@@ -676,6 +676,7 @@ fn utf8_len(first_byte: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn scans_markers_and_statement() {
@@ -1020,5 +1021,99 @@ mod tests {
             .find(|e| e.segment_range.start == 2 && e.segment_range.end == 8)
             .expect("outer segment present");
         assert_eq!(outer.tag, "x");
+    }
+
+    // ── U1: Unicode collision & boundary pins ──────────────────
+    //
+    // The marker/statement grammar is ASCII-only (`is_ascii_*` in
+    // `try_parse_marker`/`try_parse_stmt`), so Unicode text can
+    // neither open a token nor extend an id. These tests pin that
+    // property so it can never silently widen.
+
+    #[test]
+    fn unicode_glyphs_never_open_or_extend_tokens() {
+        // (doc, expected marker ids in scan order, expected stmt count)
+        //
+        // Markers referenced *inside* a parsed statement's parens are
+        // statement args, not scanned markers — only standalone `#id`
+        // tokens appear in `MarkerScan.markers`.
+        let cases: &[(&str, &[&str], usize)] = &[
+            ("𝛼#1 𝛽#2 ok", &["1", "2"], 0),
+            ("é\\bold(#1,#2)𝑥", &[], 1),
+            // `#` followed by a non-ASCII char is not a marker.
+            ("#α #β", &[], 0),
+            // A multibyte char cannot extend an id (`#3fx` stops
+            // before `𝛾`).
+            ("e\u{301}#3fx𝛾", &["3fx"], 0),
+            ("日本語 #12 ok", &["12"], 0),
+            // `\böld(...)` is not a statement: the name scan is
+            // ASCII, so it stops at `ö` and there is no `(` — the
+            // `#1 #2` after it are standalone markers.
+            ("\\böld(#1,#2)", &["1", "2"], 0),
+        ];
+        for (doc, ids, stmts) in cases {
+            let s = scan(doc);
+            let got: Vec<&str> = s.markers.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(got, *ids, "markers in {doc:?}");
+            assert_eq!(s.stmts.len(), *stmts, "statements in {doc:?}");
+            for m in &s.markers {
+                assert!(doc.is_char_boundary(m.range.start) && doc.is_char_boundary(m.range.end));
+                assert!(m.id.chars().all(|c| c.is_ascii_alphanumeric()));
+            }
+        }
+    }
+
+    fn unicode_run() -> impl Strategy<Value = String> {
+        // A spread of Unicode: Latin+combining, Greek, math
+        // alphanumerics, CJK, math symbols. Deliberately excludes
+        // the ASCII syntax bytes `#` and `\` so generated docs only
+        // contain the tokens we place explicitly.
+        proptest::collection::vec(
+            prop_oneof![
+                Just("α".to_string()),
+                Just("e\u{301}".to_string()),
+                Just("𝐴".to_string()),
+                Just("𝛽".to_string()),
+                Just("𝑥".to_string()),
+                Just("∑".to_string()),
+                Just("日".to_string()),
+                Just("本".to_string()),
+                Just("∫".to_string()),
+                Just("²".to_string()),
+                Just(" ".to_string()),
+            ],
+            0..25,
+        )
+        .prop_map(|v| v.concat())
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn unicode_text_keeps_token_ranges_on_char_boundaries(
+            unicode in unicode_run(),
+        ) {
+            // `#1`/`#2` stand outside the statement (the segment
+            // delimiters); the refs inside `\bold(...)` are args.
+            let doc = format!("{unicode}#1 {unicode}#2 {unicode}\\bold(#1,#2) {unicode}");
+            let s = scan(&doc);
+            for m in &s.markers {
+                prop_assert!(doc.is_char_boundary(m.range.start));
+                prop_assert!(doc.is_char_boundary(m.range.end));
+                prop_assert!(m.id.chars().all(|c| c.is_ascii_alphanumeric()));
+            }
+            for st in &s.stmts {
+                prop_assert!(doc.is_char_boundary(st.range.start));
+                prop_assert!(doc.is_char_boundary(st.range.end));
+            }
+            for seg in resolve_segments(&s) {
+                if let Some(sp) = &seg.span {
+                    prop_assert!(doc.is_char_boundary(sp.start));
+                    prop_assert!(doc.is_char_boundary(sp.end));
+                }
+            }
+            // The only tokens are the ones we placed.
+            prop_assert_eq!(s.markers.len(), 2);
+            prop_assert_eq!(s.stmts.len(), 1);
+        }
     }
 }

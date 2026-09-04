@@ -356,6 +356,7 @@ fn byte_to_unicode_range(text: &str, range: Range<usize>) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn insert_delete_roundtrip() {
@@ -363,6 +364,76 @@ mod tests {
         d.insert(0, "hello world");
         d.insert(5, ", α∑");
         assert_eq!(d.text(), "hello, α∑ world");
+    }
+
+    // ── U1: multibyte edit round-trips ─────────────────────────
+
+    fn multibyte_corpus() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop_oneof![
+                Just("x".to_string()),
+                Just("α".to_string()),
+                Just("e\u{301}".to_string()),
+                Just("𝐴𝑖".to_string()),
+                Just("𝛽".to_string()),
+                Just("𝑥²".to_string()),
+                Just("∑∫".to_string()),
+                Just("日本語".to_string()),
+                Just("#1".to_string()),
+                Just("\\bold(#1,#2)".to_string()),
+                Just("$x$".to_string()),
+                Just(" ok ".to_string()),
+            ],
+            0..30,
+        )
+        .prop_map(|v| v.concat())
+    }
+
+    fn char_boundaries(s: &str) -> Vec<usize> {
+        std::iter::once(0)
+            .chain(s.char_indices().map(|(i, _)| i))
+            .chain(std::iter::once(s.len()))
+            .collect()
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn multibyte_insert_delete_roundtrips_through_undo_redo(
+            base in multibyte_corpus(),
+            pick in 0usize..64,
+            s in multibyte_corpus(),
+        ) {
+            // All edits land on code-point boundaries only — the
+            // frontends never hand the doc a mid-character offset.
+            let mut d = MathDoc::with_text(&base);
+            let bounds = char_boundaries(&base);
+            let at = bounds[pick % bounds.len()];
+            let before = d.text().to_string();
+
+            d.insert(at, &s);
+            d.commit();
+            let mid = d.text().to_string();
+            prop_assert!(d.text().is_char_boundary(at));
+
+            d.undo();
+            prop_assert!(d.text() == before, "undo after insert");
+            d.redo();
+            prop_assert!(d.text() == mid, "redo after insert");
+
+            // Delete on a fresh doc (discrete edit): undo restores
+            // the pre-delete text. (Consecutive ops on one doc merge
+            // into a single undo step by design — MathDoc's
+            // UndoManager merge interval — so the delete's undo is
+            // tested on its own doc.)
+            let end = at + s.len();
+            let mut d2 = MathDoc::with_text(&mid);
+            d2.commit();
+            d2.delete(at..end);
+            d2.commit();
+            prop_assert!(d2.text() == before, "delete inserted run");
+            d2.undo();
+            prop_assert!(d2.text() == mid, "undo after delete");
+        }
     }
 
     #[test]
