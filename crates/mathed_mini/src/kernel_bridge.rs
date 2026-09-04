@@ -65,6 +65,12 @@ pub struct KernelBridge {
     results: HashMap<usize, KernelResult>,
     /// prob offset → display label (the `\prob` name arg, if any).
     prob_names: HashMap<usize, Option<String>>,
+    /// statement offset → block index (into `split_blocks` order —
+    /// the same indexing `SemanticIndex` uses). Kept in lockstep
+    /// with `live` so the notebook "cell" view
+    /// ([`block_outputs`](Self::block_outputs)) can group results
+    /// without re-scanning the document.
+    stmt_blocks: HashMap<usize, usize>,
     /// model offset → hash of the last-dispatched body.
     model_hashes: HashMap<usize, u64>,
     /// prob offset → hash of the last-dispatched (prob body, model
@@ -104,6 +110,7 @@ impl KernelBridge {
             engine: Translator::new(),
             results: HashMap::new(),
             prob_names: HashMap::new(),
+            stmt_blocks: HashMap::new(),
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
             translator_errors: HashMap::new(),
@@ -301,7 +308,7 @@ impl KernelBridge {
     }
 
     pub fn refresh(&mut self, doc_text: &str) -> bool {
-        self.refresh_with_index(&build_index(doc_text))
+        self.refresh_with_index(doc_text, &build_index(doc_text))
     }
 
     /// Re-dispatch kernel statements from an already-built index. The
@@ -310,7 +317,7 @@ impl KernelBridge {
     /// tree, so a keystroke scans the document a single time
     /// instead of once per consumer (openclaw doctrine: latency
     /// is work, not round-trips).
-    pub fn refresh_with_index(&mut self, idx: &SemanticIndex) -> bool {
+    pub fn refresh_with_index(&mut self, doc_text: &str, idx: &SemanticIndex) -> bool {
         let mut changed = false;
 
         // Clear stale translator errors from the previous scan (P5
@@ -324,6 +331,24 @@ impl KernelBridge {
         // annotation) and by `poll` to drop late responses
         // for statements that no longer exist.
         self.live = idx.kernel_statements.iter().map(|s| s.span.start).collect();
+        // Block membership for the notebook "cell" view is derived
+        // from `split_blocks(doc_text)` (blank-line blocks — the
+        // same list the frontends' `BlockIndex` walks), NOT from
+        // `KernelStatement.block`, which is the per-block-render
+        // index and is 0 for every statement in the single-render
+        // pipeline.
+        let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+        self.stmt_blocks = idx
+            .kernel_statements
+            .iter()
+            .map(|s| {
+                let block = block_ranges
+                    .iter()
+                    .rposition(|r| r.start <= s.span.start)
+                    .unwrap_or(0);
+                (s.span.start, block)
+            })
+            .collect();
 
         // Models in document order.
         let mut models: Vec<&KernelStatement> = idx
@@ -557,8 +582,26 @@ impl KernelBridge {
         self.prob_hashes.retain(|k, _| self.live.contains(k));
         self.model_hashes.retain(|k, _| self.live.contains(k));
         self.prob_names.retain(|k, _| self.live.contains(k));
+        self.stmt_blocks.retain(|k, _| self.live.contains(k));
         self.pending.retain(|k, _| self.live.contains(k));
         changed
+    }
+
+    /// Outputs grouped to a block (the notebook "cell" view of
+    /// [`results`](Self::results)): every `\prob`/`\event` whose
+    /// statement lives in block `block` (index into `split_blocks`
+    /// order), in document order. The inline-annotation view stays
+    /// untouched — both coexist; only the block's damaged cells
+    /// re-render their region.
+    pub fn block_outputs(&self, block: usize) -> Vec<(usize, KernelResult)> {
+        let mut out: Vec<(usize, KernelResult)> = self
+            .results
+            .iter()
+            .filter(|(off, _)| self.stmt_blocks.get(off) == Some(&block))
+            .map(|(&k, r)| (k, r.clone()))
+            .collect();
+        out.sort_by_key(|(k, _)| *k);
+        out
     }
 
     /// Drain completed worker responses into
@@ -979,6 +1022,89 @@ mod tests {
             .start
     }
 
+    /// Two-block document with a `\prob` in each block: the
+    /// notebook "cell" view must group each result under its own
+    /// block (N-series N1), in document order, while the
+    /// inline-annotation view stays untouched.
+    #[test]
+    fn block_outputs_groups_results_by_block() {
+        let doc = "= Block one\n\
+                   #1 a #2 \\model(#1,#2)\n\
+                   #3 vac #4 \\prob(#3,#4)\n\n\
+                   = Block two\n\
+                   #5 b #6 \\model(#5,#6)\n\
+                   #7 v #8 \\prob(#7,#8)";
+        // Block membership derives from `split_blocks` (blank-line
+        // blocks), the same derivation the bridge uses — the
+        // `KernelStatement.block` field is the render-derived index
+        // (0 in the single-render pipeline) and is NOT usable for
+        // cell grouping.
+        let idx = build_index(doc);
+        let block_ranges = mathed_core::blocks::split_blocks(doc);
+        assert_eq!(block_ranges.len(), 2, "expected two blank-line blocks");
+        let probs: Vec<(usize, usize)> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Prob)
+            .map(|s| {
+                let block = block_ranges
+                    .iter()
+                    .rposition(|r| r.start <= s.span.start)
+                    .unwrap_or(0);
+                (s.span.start, block)
+            })
+            .collect();
+        assert_eq!(probs.len(), 2);
+        assert_ne!(probs[0].1, probs[1].1, "probs must be in different blocks");
+        let (p1, b1) = probs[0];
+        let (p2, b2) = probs[1];
+
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        wait_for(&mut bridge, p1, Duration::from_secs(15));
+        wait_for(&mut bridge, p2, Duration::from_secs(15));
+
+        let out1 = bridge.block_outputs(b1);
+        let out2 = bridge.block_outputs(b2);
+        assert_eq!(out1.len(), 1, "block {b1} outputs: {out1:?}");
+        assert_eq!(out2.len(), 1, "block {b2} outputs: {out2:?}");
+        assert_eq!(out1[0].0, p1);
+        assert_eq!(out2[0].0, p2);
+        assert!(matches!(out1[0].1, KernelResult::Value(_)));
+        assert!(matches!(out2[0].1, KernelResult::Value(_)));
+        // The inline-annotation view still carries both.
+        assert_eq!(bridge.results().len(), 2);
+    }
+
+    /// Deleting a statement must prune its block's region (the
+    /// live-set rule): a stale cell output must not persist under
+    /// a block after the `\prob` is removed.
+    #[test]
+    fn deleted_statement_prunes_its_block_region() {
+        let with_prob = "= Block one\n\
+                         #1 a #2 \\model(#1,#2)\n\
+                         #3 vac #4 \\prob(#3,#4)";
+        let without_prob = "= Block one\n#1 a #2 \\model(#1,#2)";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(with_prob);
+        let p = prob_offset(with_prob);
+        wait_for(&mut bridge, p, Duration::from_secs(15));
+        let block = build_index(with_prob)
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Prob)
+            .unwrap()
+            .block;
+        assert_eq!(bridge.block_outputs(block).len(), 1);
+
+        bridge.refresh(without_prob);
+        assert!(
+            bridge.block_outputs(block).is_empty(),
+            "stale region survived the deletion"
+        );
+        assert!(bridge.results().is_empty());
+    }
+
     #[test]
     fn prob_computes_real_probability_end_to_end() {
         // Model: builtin translator (mode-0 number operator, vacuum
@@ -1072,8 +1198,8 @@ mod tests {
         );
 
         let mut via_index = KernelBridge::new();
-        via_index.refresh_with_index(&build_index(doc));
-        via_index.refresh_with_index(&build_index(clean));
+        via_index.refresh_with_index(doc, &build_index(doc));
+        via_index.refresh_with_index(clean, &build_index(clean));
 
         assert_eq!(via_index.model_hashes, via_text.model_hashes);
         assert_eq!(via_index.live, via_text.live);

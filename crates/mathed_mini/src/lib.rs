@@ -21,6 +21,7 @@ pub mod durable_dashboard;
 pub mod export;
 pub mod kernel_bridge;
 pub mod marker_overlay;
+pub mod output_region;
 pub mod references_panel;
 pub mod render;
 pub mod translate;

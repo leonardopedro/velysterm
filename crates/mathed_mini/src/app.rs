@@ -135,6 +135,12 @@ struct App {
     /// the accessibility tree (a keystroke scans the document
     /// once, not twice).
     pipeline: PipelineCache,
+    /// Cached block output-region images (N-series N1), keyed by
+    /// block id. Regions are derived state over the bridge's live
+    /// results; the cache is dropped whenever the doc or the
+    /// results change, so a region can never outlive the outputs
+    /// it renders.
+    region_cache: HashMap<BlockId, imaging::RgbaImage>,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -209,6 +215,7 @@ impl App {
             pref_x: None,
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
+            region_cache: HashMap::new(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
             show_marker_overlay: false,
@@ -321,6 +328,9 @@ impl App {
         for id in damage.removed.iter().chain(damage.dirty.iter()) {
             self.block_layouts.remove(id);
         }
+        // Block ids/indices may have shifted — regions are derived
+        // from the current statement→block mapping.
+        self.region_cache.clear();
     }
 
     /// Called when kernel results change (annotations / translator
@@ -329,6 +339,30 @@ impl App {
     /// occasions it matters).
     fn invalidate_annotations(&mut self) {
         self.block_layouts.clear();
+        // Kernel results changed — every block region is re-derived.
+        self.region_cache.clear();
+    }
+
+    /// (Re)render cached block output-region images (N-series N1)
+    /// for blocks whose outputs are not cached. Runs once per
+    /// redraw, before the surface borrow; the compositing loop only
+    /// reads `region_cache`. Blocks with no results stay uncached
+    /// (cheap map lookups per redraw, no stale images possible).
+    fn refresh_region_cache(&mut self, width_pt: f64) {
+        let blocks = self.block_index.blocks.clone();
+        for (idx, block) in blocks.iter().enumerate() {
+            if self.region_cache.contains_key(&block.id) {
+                continue;
+            }
+            let outputs = self.bridge.block_outputs(idx);
+            if outputs.is_empty() {
+                continue;
+            }
+            let markup = crate::output_region::region_markup(&outputs);
+            if let Some(img) = crate::output_region::region_image(&markup, width_pt) {
+                self.region_cache.insert(block.id, img);
+            }
+        }
     }
 
     /// Draw the cite popup stack (cite_popup_boxes plan, Stage 5).
@@ -425,7 +459,7 @@ impl App {
         // for the accessibility tree. One scan per keystroke.
         let text = self.doc.text();
         let cached = self.pipeline.for_text(text);
-        self.bridge.refresh_with_index(cached.idx());
+        self.bridge.refresh_with_index(text, cached.idx());
         self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
     }
 
@@ -1012,6 +1046,13 @@ impl App {
             self.footer_markup_cache = footer_markup;
         }
 
+        // Block output regions (N-series N1): refresh any block
+        // whose region is not cached yet (results changed since the
+        // last redraw — invalidations cleared the cache). Rendered
+        // before the surface borrow so the compositing loop below
+        // only reads the cache.
+        self.refresh_region_cache(size.width as f64);
+
         // Compute the selection up-front (owned) so it doesn't alias
         // the mutable `surface` borrow below.
         let sel = self.selection();
@@ -1081,7 +1122,24 @@ impl App {
                 }
             }
 
-            y_cursor += layout.height as f32 + BLOCK_GAP_PX;
+            y_cursor += layout.height as f32;
+
+            // Block output region (N-series N1): the notebook-cell
+            // view of this block's kernel results, blitted below
+            // the block like the references panel below the doc —
+            // no relayout of the base document. Images were
+            // refreshed into `region_cache` before the surface
+            // borrow (see `refresh_region_cache`); invalidations
+            // drop the cache when results change.
+            if let Some(region_img) = self.region_cache.get(&block.id) {
+                let rtop = y_cursor.round() as usize;
+                if rtop < doc_h {
+                    blit_over_bg_at(&mut buffer, win_w, doc_h, rtop, region_img);
+                    y_cursor += region_img.height as f32;
+                }
+            }
+
+            y_cursor += BLOCK_GAP_PX;
         }
 
         // Caret: draw at the pre-computed position.
