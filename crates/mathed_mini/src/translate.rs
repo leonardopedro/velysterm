@@ -106,18 +106,22 @@ impl Translator {
     }
 
     /// Evaluate a `\template` body (stage T2 of
-    /// PLAN_mathed_template_language.md) against the
-    /// `DocumentContext` JSON: the body must define
-    /// `#let render(ctx) = …` returning a Typst-markup string. Same
-    /// let-binding call path, eval cache and error surface as
-    /// translators; only the entry function name and the meaning of
-    /// the returned string (markup vs. kernel JSON) differ.
+    /// PLAN_mathed_template_language.md) against the document
+    /// context: the body must define `#let render(ctx) = …`
+    /// returning a Typst-markup string. `ctx_literal` is a **Typst
+    /// expression** (a dictionary literal produced from the
+    /// `DocumentContext` by the exporter — `(defs: (...), blocks:
+    /// (...))`) that is injected verbatim as the `ctx` argument, so
+    /// template code reads `ctx.at("defs")` etc. without needing a
+    /// JSON decoder (typst 0.15's `json` module has `encode` but no
+    /// `decode`). Same let-binding call path, eval cache and error
+    /// surface as translators.
     pub fn run_template(
         &mut self,
         template_src: &str,
-        ctx_json: &str,
+        ctx_literal: &str,
     ) -> Result<String, TranslateError> {
-        self.run_entry("render", template_src, ctx_json)
+        self.run_entry_expr("render", template_src, ctx_literal)
     }
 
     /// Run the built-in default translator against `body`.
@@ -128,17 +132,21 @@ impl Translator {
     /// Shared implementation: append `#let {RESULT_BINDING} =
     /// {fn_name}(<arg>)` to the user source so Typst invokes the
     /// function during module evaluation, then read the binding
-    /// back.
-    fn run_entry(&mut self, fn_name: &str, src: &str, arg: &str) -> Result<String, TranslateError> {
+    /// back. `arg_expr` is injected **verbatim** (a string literal
+    /// for translators — see [`typst_str_lit`] — or a dictionary
+    /// expression for templates).
+    fn run_entry_expr(
+        &mut self,
+        fn_name: &str,
+        src: &str,
+        arg_expr: &str,
+    ) -> Result<String, TranslateError> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         src.hash(&mut h);
         self.last_src_hash = Some(h.finish());
 
-        let src = format!(
-            "{src}\n#let {RESULT_BINDING} = {fn_name}({})\n",
-            typst_str_lit(arg),
-        );
+        let src = format!("{src}\n#let {RESULT_BINDING} = {fn_name}({arg_expr})\n");
         self.world.set_markup(src);
         match self
             .world
@@ -156,6 +164,13 @@ impl Translator {
             }
             Some(_) => Err(TranslateError::NotString),
         }
+    }
+
+    /// [`run_entry_expr`] with the argument quoted as a Typst
+    /// string literal — the translator contract.
+    fn run_entry(&mut self, fn_name: &str, src: &str, arg: &str) -> Result<String, TranslateError> {
+        let lit = typst_str_lit(arg);
+        self.run_entry_expr(fn_name, src, &lit)
     }
 }
 
@@ -316,25 +331,28 @@ mod tests {
         assert_eq!(typst_str_lit("l1\nl2"), "\"l1\\nl2\"");
     }
 
-    // ── T2: \template render(ctx) ─────────────────────────────
-
-    #[test]
+    // ── T2: \template render(ctx) ─────────────────────────────    #[test]
     fn template_render_returns_markup() {
         let mut t = Translator::new();
         let src = "#let render(ctx) = \"#emph[hi]\"";
-        let out = t.run_template(src, "{}").expect("trivial render");
+        let out = t.run_template(src, "()").expect("trivial render");
         assert_eq!(out, "#emph[hi]");
     }
 
     #[test]
-    fn template_render_receives_ctx_json() {
-        // The engine threads the ctx JSON through as the `ctx`
-        // argument (mirroring `translate_receives_body`).
+    fn template_render_receives_ctx_literal() {
+        // The engine injects the ctx Typst expression (a dict
+        // literal, since typst 0.15's json module cannot decode)
+        // as the `ctx` argument; strings stay `Str` so markup
+        // strings build directly.
         let mut t = Translator::new();
         let out = t
-            .run_template("#let render(ctx) = ctx", "{\"title\":\"hello\"}")
-            .expect("echo render");
-        assert_eq!(out, "{\"title\":\"hello\"}");
+            .run_template(
+                "#let render(ctx) = \"t: \" + ctx.at(\"title\")",
+                "(title: \"hello\")",
+            )
+            .expect("ctx render");
+        assert_eq!(out, "t: hello");
     }
 
     #[test]
@@ -343,7 +361,7 @@ mod tests {
         // Defining only `translate` cannot satisfy the appended
         // `render(ctx)` call — evaluation errors.
         let err = t
-            .run_template("#let translate(body) = body", "{}")
+            .run_template("#let translate(body) = body", "()")
             .unwrap_err();
         assert!(matches!(err, TranslateError::Eval(_)), "got: {err:?}");
     }

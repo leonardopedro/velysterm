@@ -127,25 +127,31 @@ pub fn export_tex(doc_text: &str) -> String {
         "\\documentclass{{article}}\n\\usepackage{{amsmath}}\n\\begin{{document}}\n{out}\n\\end{{document}}"
     )
 }
-
 /// Render the document as a Typst template (stage T4 of
 /// PLAN_mathed_template_language.md): every `\template` segment's
 /// `render(ctx)` body is evaluated against the document's
-/// [`mathed_core::DocumentContext`] JSON (overlaid with
-/// `extra_ctx_json`, if any — the "template arguments" seam), and
-/// the returned markup is spliced after the segment's body via the
-/// T3 `TransformOptions::template_splices` seam. Template bodies
+/// [`mathed_core::DocumentContext`] (overlaid with `extra_ctx_json`,
+/// if any — the "template arguments" seam), and the returned markup
+/// is spliced after the segment's body via the T3
+/// `TransformOptions::template_splices` seam. Template bodies
 /// collapse to `▸ template: name` like translator code. A
 /// document without `\template` segments renders byte-identically
 /// to [`export_typst`] (same transform, no splices).
+///
+/// The context reaches template code as a **Typst dictionary
+/// literal** (not a JSON string to decode — typst 0.15's `json`
+/// module has `encode` but no `decode`), so strings stay `Str` and
+/// templates build markup strings directly, e.g.
+/// `#let render(ctx) = "#strong[" + ctx.at("blocks").at(0).at("heading") + "]"`.
 pub fn export_typst_template(
     doc_text: &str,
     extra_ctx_json: Option<&str>,
 ) -> Result<String, String> {
     let (scan, segments, _, idx) = crate::kernel_bridge::scan_pipeline(doc_text);
 
-    // DocumentContext → JSON, with the caller's overlay merged at
-    // the top level (overlay keys win over derived keys).
+    // DocumentContext → value, with the caller's overlay merged at
+    // the top level (overlay keys win over derived keys), then
+    // lowered to a Typst literal expression.
     let ctx = mathed_core::DocumentContext::from_index(
         doc_text,
         &scan,
@@ -159,8 +165,7 @@ pub fn export_typst_template(
             serde_json::from_str(extra).map_err(|e| format!("--ctx is not valid JSON: {e}"))?;
         merge_overlay(&mut ctx_value, extra);
     }
-    let ctx_json =
-        serde_json::to_string(&ctx_value).map_err(|e| format!("serialize context: {e}"))?;
+    let ctx_literal = ctx_to_typst_literal(&ctx_value)?;
 
     // Evaluate each template against the shared context; a failing
     // template fails the export loudly (never a silent partial
@@ -168,7 +173,7 @@ pub fn export_typst_template(
     let mut splices = std::collections::HashMap::new();
     let mut engine = crate::translate::Translator::new();
     for (name, def) in &idx.templates {
-        match engine.run_template(&def.body_text, &ctx_json) {
+        match engine.run_template(&def.body_text, &ctx_literal) {
             Ok(markup) => {
                 splices.insert(def.span.start, markup);
             }
@@ -204,6 +209,53 @@ fn merge_overlay(base: &mut serde_json::Value, extra: serde_json::Value) {
         }
         (b, x) => *b = x,
     }
+}
+
+/// Lower a JSON value to a Typst expression: objects become
+/// `(key: value, …)` dictionaries, arrays `(value, …)`, strings
+/// quoted (so they stay `Str`), numbers/bools literal, null `none`.
+/// Object keys must be Typst identifiers (the DocumentContext keys
+/// are; the `--ctx` overlay is validated here).
+fn ctx_to_typst_literal(v: &serde_json::Value) -> Result<String, String> {
+    fn ident_ok(k: &str) -> bool {
+        let mut cs = k.chars();
+        matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+    fn go(v: &serde_json::Value) -> Result<String, String> {
+        Ok(match v {
+            serde_json::Value::Null => "none".to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => crate::translate::typst_str_lit(s),
+            serde_json::Value::Array(items) => {
+                let inner: Result<Vec<String>, String> = items.iter().map(go).collect();
+                match inner?.as_slice() {
+                    [] => "()".to_string(),
+                    // A single element needs the trailing comma,
+                    // otherwise `(x)` parses as a grouped value,
+                    // not a one-element array.
+                    [one] => format!("({one},)"),
+                    many => format!("({})", many.join(", ")),
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let mut parts = Vec::new();
+                for (k, val) in map {
+                    if !ident_ok(k) {
+                        return Err(format!("ctx key `{k}` is not a valid Typst identifier"));
+                    }
+                    parts.push(format!("{k}: {}", go(val)?));
+                }
+                if parts.is_empty() {
+                    "()".to_string()
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            }
+        })
+    }
+    go(v)
 }
 
 fn escape_html(s: &str) -> String {
@@ -304,13 +356,37 @@ mod tests {
         let err = export_typst_template(doc, None).unwrap_err();
         assert!(err.contains("bad"), "names the failing template: {err}");
     }
-
     #[test]
     fn template_ctx_overlay_reaches_render() {
-        // The echo template returns the ctx JSON it received, so the
-        // export output proves --ctx flowed through the overlay.
-        let doc = concat!("#1 #let render(ctx) = ctx #2 \\template(#1,#2, name: echo)");
-        let out = export_typst_template(doc, Some(r#"{"title": "hello"}"#)).expect("echo export");
-        assert!(out.contains("hello"), "overlay value spliced: {out}");
+        // The template reads an overlaid key out of the ctx literal,
+        // proving --ctx flowed through the overlay merge.
+        let doc = concat!(
+            "#1 #let render(ctx) = \"author: \" + ctx.at(\"author\") ",
+            "#2 \\template(#1,#2, name: byline)",
+        );
+        let out = export_typst_template(doc, Some(r#"{"author": "leo"}"#)).expect("byline export");
+        assert!(out.contains("author: leo"), "overlay value spliced: {out}");
+    }
+
+    #[test]
+    fn ctx_literal_lowers_typed_context_fields() {
+        // Strings stay Str (so markup strings build directly), ints
+        // stay literal, arrays become (...) with trailing commas for
+        // single elements.
+        assert_eq!(
+            ctx_to_typst_literal(&serde_json::json!({
+                "title": "hello",
+                "n": 2,
+                "list": ["a", "b"],
+                "one": ["x"],
+                "empty": []
+            }))
+            .unwrap(),
+            // serde_json maps sort keys (no preserve_order feature),
+            // so the literal is emitted in sorted key order.
+            "(empty: (), list: (\"a\", \"b\"), n: 2, one: (\"x\",), title: \"hello\")"
+        );
+        // Overlay keys that are not Typst identifiers are rejected.
+        assert!(ctx_to_typst_literal(&serde_json::json!({ "my key": 1 })).is_err());
     }
 }
