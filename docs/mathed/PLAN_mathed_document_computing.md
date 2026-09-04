@@ -1,7 +1,8 @@
 # mathed as a bash/Jupyter-class document-computing environment — implementation plan (N-series)
 
-> **Status:** PLAN ONLY (2026-09-04). No code changed. Arc 3 of the mathed
-> language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
+> **Status:** PLANNED (2026-09-04; baselines refreshed after velysterm
+> phase 1 — mathed_mini 141 tests). No N-stage code changed yet. Arc 3 of
+> the mathed language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
 > and the roadmap section): a document whose **blocks are cells**, whose
 > semantic segments are **live computations with inline outputs**, and
 > whose whole history is a **reproducible record** — the Jupyter-notebook
@@ -17,9 +18,11 @@
 >   stale entries against a live-offset set, and surfaces translator
 >   errors. `SemanticIndex` statements already carry a `block` index;
 >   `blocks.rs` provides `BlockId`-stable per-block damage.
-> - Inline values are spliced through `TransformOptions.annotations`
->   (T-series T3 turns this into typed `Splices` — N-series builds on
->   that seam).
+> - Inline values are spliced through `TransformOptions.annotations`;
+>   the T-series T3 (as built) added the sibling `template_splices`
+>   seam — an additive map beside `annotations` with the same
+>   hide/reveal semantics, spliced first at a shared point. N-series
+>   output regions build on that same transform seam.
 > - `kernel_client` drives the `unfer_agent` worker over NDJSON with the
 >   frozen `unfer_protocol` contract; op names live in
 >   `unfer_protocol::ops::AGENT_OPS` (24 ops: kernel, federation, logos,
@@ -178,7 +181,8 @@ removed.
    convention).
 2. Report export: `--export-typst` gains an optional `--with-outputs`
    that renders each block's region (values/errors) beneath its content
-   in the T-series splice stream — a printable notebook page.
+   in the same transform splice stream (`annotations`/`template_splices`,
+   T3 as built) — a printable notebook page.
 3. Keyboard/docs: document the run/stale/clear model in
    `crates/mathed_mini/README.md`.
 4. Tests (+2): with-outputs render includes regions; without it output
@@ -202,9 +206,13 @@ test, smoke) green.
 
 ### Test-count trajectory
 
-mathed_mini 116 → 132 (+16: N1 +4, N2 +3, N3 +2, N4 +5, N5 +2);
-kernel_client +N4's client tests. Bevy `mathed` unchanged (bridge and
-regions are mathed_mini surfaces both frontends share).
+Planned deltas (kept for the record): mathed_mini 116 → 132 (+16: N1 +4,
+N2 +3, N3 +2, N4 +5, N5 +2); kernel_client +N4's client tests. Bevy
+`mathed` unchanged (bridge and regions are mathed_mini surfaces both
+frontends share).
+
+**As built / remaining baseline:** phase 1 (U1 + T1–T4) raised mathed_mini
+to **141**, so the N-series lands at 141 → 157 (+16, deltas unchanged).
 
 ## 3. Non-goals and risks
 

@@ -1,7 +1,10 @@
 # mathed as a UTF-8 extension of ASCII — implementation plan (U-series)
 
-> **Status:** PLAN ONLY (2026-09-04). No code changed. Arc 2 of the mathed
-> language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
+> **Status:** U1 EXECUTED (2026-09-04, `885a411` on velysterm main) — the
+> Unicode boundary fuzz is done and green (as-built note in the stage).
+> U2–U5 remain planned; remaining baselines are mathed_core 164 /
+> mathed_mini 141 tests (phase 1 of the T-series raised them). Arc 2 of
+> the mathed language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
 > and the roadmap section): the mathed text format is **UTF-8 — a strict
 > superset of ASCII** — in which mathematics is first-class: the ASCII
 > subset (keystrokes, code, the marker/statement syntax) and the Unicode
@@ -65,7 +68,17 @@ make UTF-8 an *extension* rather than a competitor:
 
 ## 3. Stages
 
-### Stage U1 — Unicode boundary audit + fuzz (mathed_core)
+### Stage U1 — Unicode boundary audit + fuzz (mathed_core) ✅ DONE (`885a411`)
+
+> **As built:** multibyte corpus proptests + token-collision regression pins
+> in `markers.rs`, `transform.rs`, `doc.rs` (mathed_core 158 at stage end).
+> Two findings that the remaining stages must encode:
+> (1) markers *inside* a statement's parens are **args, not scanned
+> tokens** — collision tests must assert on `scan`/segment results, not on
+> raw marker lists; (2) `UndoManager` merges ops within its 400 ms window,
+> so consecutive doc ops in one test share an undo step — tests model
+> discrete edits (fresh doc or explicit `commit()`), and frontend hooks must
+> call `commit()` per user edit to keep undo granular.
 
 Prove property 2 across every byte-slicing site. Expect mostly tests and
 zero-to-few fixes (the scanner is already char-safe).
@@ -125,7 +138,10 @@ frontends are thin hooks — exactly the `auto_marker_token` architecture
    the caret's visible context is a `Completion`, show the `preview`
    glyph with the IME-style underline **overlay only**; commit on the
    next non-extension keystroke via one `replace_many` (a single undo
-   step) + caret advance by `with.len()`; Escape or edit cancels with
+   step) + caret advance by `with.len()`; **call `commit()` right after
+   the `replace_many`** (U1 finding: UndoManager merges ops within its
+   400 ms window, so without an explicit commit the completion shares an
+   undo step with the delimiter keystroke) ; Escape or edit cancels with
    zero doc mutation (IME precedent).
 4. Tests (+6 in mathed_core: table totality, longest-prefix match,
    math-context gating — completion never fires outside `$..$` — ,
@@ -154,7 +170,8 @@ Close the remaining Unicode gaps in the interaction model.
    implement cluster-aware deletion using `glyphs.rs` data where the
    caret has a glyph index, else code-point deletion; single undo step
    via `doc.rs` (extend `delete` call sites in `app.rs`; Bevy frontend
-   same call).
+   same call) — followed by an explicit `commit()` per the U1 finding,
+   so the cluster delete undoes as exactly one step.
 4. Tests (+3): wordnav multibyte boundaries; cluster backspace over a
    combining sequence; caret invariant fuzz (fold into U1's proptest).
 
@@ -196,8 +213,14 @@ test, smoke) green.
 
 ### Test-count trajectory
 
-mathed_core 146 → 158 (+12: U1 +5, U2 +4 core, U3 +3); mathed_mini 116 →
-121 (+5: U2 +2, U4 +3). Bevy `mathed` unchanged (thin hook only, U2).
+Planned deltas (kept for the record): mathed_core 146 → 158 (+12: U1 +5,
+U2 +4 core, U3 +3); mathed_mini 116 → 121 (+5: U2 +2, U4 +3). Bevy
+`mathed` unchanged (thin hook only, U2).
+
+**As built / remaining baselines:** U1 shipped at mathed_core 158; the
+T-series phase 1 raised the baseline to **core 164 / mini 141**. The
+remaining U stages therefore land at core 164 → 171 (U2 +4, U3 +3) and
+mini 141 → 146 (U2 +2, U4 +3).
 
 ## 4. Non-goals and risks
 

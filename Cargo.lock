@@ -5822,6 +5822,8 @@ version = "0.1.0"
 dependencies = [
  "loro",
  "proptest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "typst",
  "unicode-math-class",

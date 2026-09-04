@@ -1,12 +1,16 @@
 # mathed as a template language — implementation plan
 
-> **Status:** PLAN ONLY (2026-09-04). No code changed. This document is the
-> **master entry point** for the full mathed language vision and the
+> **Status:** Phase 1 EXECUTED (2026-09-04): U1 + T1–T4 shipped and green —
+> mathed_core 164 / mathed_mini 141 tests, Bevy `mathed` checks clean,
+> `verify-invariants` 9/9 (commits in the as-built log, §6). This document
+> is the **master entry point** for the full mathed language vision and the
 > authoritative plan for its starter scope: evolving the *existing* mathed
-> document pipeline (`mathed_core` + `mathed_mini`, Plan C C1–C16, 348 tests
-> green) into a **Typst template language** (Jinja/ERB/XSLT class). The full
-> plan — all three arcs, stage by stage — is §6 (roadmap) plus the sibling
-> plans `PLAN_mathed_utf8_ascii.md` (U-series) and
+> document pipeline (`mathed_core` + `mathed_mini`, Plan C C1–C16 green)
+> into a **Typst template language** (Jinja/ERB/XSLT class). Stages T1–T4
+> below are marked ✅ DONE and describe what shipped (as built, with
+> deviations called out); T5–T6 are the remaining starter work. The full
+> plan — all three arcs — is §6 (roadmap) plus the sibling plans
+> `PLAN_mathed_utf8_ascii.md` (U-series) and
 > `PLAN_mathed_document_computing.md` (N-series).
 >
 > Constraint honored throughout: **improve, don't build new.** Every stage
@@ -64,8 +68,8 @@ machine semantics.
 ## 2. What exists today (ground truth)
 
 All references are to this repo (`velysterm`); Plan C (C1–C16) is complete
-and green. Test counts: mathed_core 146 / mathed_mini 116 / mathed 39 /
-kernel_client 36 / mathed_biblio 11.
+and green. Test counts (current, after phase 1): mathed_core 164 /
+mathed_mini 141 / mathed 39 / kernel_client 36 / mathed_biblio 11.
 
 | Surface | Where | What it gives the template story |
 |---|---|---|
@@ -155,7 +159,11 @@ Valid Typst markup ──► existing Typst world (mathed_mini render /
 Stages are ordered small → large; each has an acceptance command and ends in
 a commit. Test-count deltas follow the C-series convention.
 
-### Stage T1 — `DocumentContext`: the document as data (mathed_core)
+### Stage T1 — `DocumentContext`: the document as data (mathed_core) ✅ DONE (`c17c004`)
+
+> As built: `from_index(doc, scan, idx, annotations)`; per-block indices
+> recomputed from `split_blocks` (build_index's block field stays
+> render-derived for the bridge).
 
 Extend `crates/mathed_core/src/semantics.rs` with a serde-serializable
 context derived from the existing index — **no new parsing**:
@@ -181,7 +189,11 @@ context derived from the existing index — **no new parsing**:
 **Acceptance:** `cargo test -p mathed_core` (146 → 149); `cargo check -p
 mathed_mini`.
 
-### Stage T2 — `\template` segments + `render(ctx)` contract (mathed_core + mathed_mini)
+### Stage T2 — `\template` segments + `render(ctx)` contract (mathed_core + mathed_mini) ✅ DONE (`0bd9814`)
+
+> As built: `Translator::run` refactored to a shared `run_entry_expr`;
+> `run_template` added. The context reaches `render(ctx)` as a lowered
+> **Typst dict literal**, not JSON (see the T4 as-built note for why).
 
 The translator generalization. A `\template(#s,#f, name: "…")` segment is a
 new `PropKind::Template` with its body Typst source — the exact shape of a
@@ -218,7 +230,14 @@ new `PropKind::Template` with its body Typst source — the exact shape of a
 doc with a `\template` that reads `ctx.defs` renders through
 `doc_to_render`.
 
-### Stage T3 — typed splices at the seam (mathed_core transform)
+### Stage T3 — typed splices at the seam (mathed_core transform) ✅ DONE (`a3b3101`)
+
+> **As-built deviation:** shipped as an additive
+> `TransformOptions.template_splices` map *beside* `annotations` (same
+> hide/reveal semantics, spliced first at a shared point) instead of the
+> unified `SpliceKind` structure below — this kept every existing render
+> byte-identical with zero call-site churn. The typed-`Splices`/`SpliceKind`
+> unification stays open if a third splice family appears.
 
 Generalize the annotation mechanism without changing its behavior.
 
@@ -244,7 +263,17 @@ Generalize the annotation mechanism without changing its behavior.
 tests — incl. the pinned ` = 0.4231` annotation tests — stay green
 byte-for-byte); `cargo check -p mathed -p mathed_mini`.
 
-### Stage T4 — end-to-end render: CLI + example + round-trip (mathed_mini)
+### Stage T4 — end-to-end render: CLI + example + round-trip (mathed_mini) ✅ DONE (`c6a144a` + `c08918c`)
+
+> As built: `export_typst_template` + `--render-typst <doc> [--ctx <json>]
+> [--out <out.typ>]`; template bodies collapse to `▸ template: name` like
+> translator code; template-free exports pinned byte-identical to
+> `--export-typst`. **Context contract:** typst 0.15's `json` module has
+> `encode` but **no `decode`**, so `render(ctx)` receives a lowered Typst
+> dict literal `(defs: (…), blocks: (…))` with strings staying `Str`;
+> single-element arrays need trailing commas; overlay keys must be Typst
+> identifiers. Verified end-to-end: a cover `\template` renders doc
+> heading/def/overlay-author markup into the `.typ`.
 
 1. `bin/mathed_mini.rs` + `export.rs`: new mode `--render-typst <file>
    [--ctx extra.json]` — loads the doc, derives `DocumentContext` (T1),
@@ -296,9 +325,13 @@ Template-Haskell matchers already staged — not a new matcher:
   implementer prefers, its own repo dir under the existing nix Haskell env)
   with a `main` that reads `{ctx, body}` JSON on stdin and writes
   `{markup}` JSON on stdout — the same worker conventions as
-  `kernel_client`. Invoked by `--render-typst` when present, else skipped
-  (Rust side degrades gracefully: template helper bodies without the rules
-  binary run through the identity/plain path).
+  `kernel_client`. The `ctx` here is the **serde JSON form of
+  `DocumentContext` (T1's `Serialize` derive)** — the out-of-band binary
+  never touches the lowered Typst dict literal that `render(ctx)` receives
+  in-process, so the two contract forms coexist without coupling. Invoked
+  by `--render-typst` when present, else skipped (Rust side degrades
+  gracefully: template helper bodies without the rules binary run through
+  the identity/plain path).
 - Do **not** wire GHC into the editor or CI hot paths in this stage; the
   stage's acceptance is *dev-machine*: `nix develop ../unfer` (read-only
   use) + build `mathed-rules` + a golden JSON test of one rewrite + one
@@ -323,9 +356,14 @@ that touch mathed (check, test, smoke) stay green.
 
 ### Test-count trajectory
 
-mathed_core 146 → 149 (T1) → 151 (T3); mathed_mini 116 → 120 (T2) → 123
-(T4); T5's tests live in the Haskell binary; T6 adds no unit tests. Total
-≈ 274 core+mini tests (+9), consistent with the C-series increments.
+Planned deltas (kept for the record): mathed_core 146 → 149 (T1) → 151
+(T3); mathed_mini 116 → 120 (T2) → 123 (T4); T5's tests live in the
+Haskell binary; T6 adds no unit tests.
+
+**As built (actual, phase 1): mathed_core 164, mathed_mini 141** — each
+stage shipped with richer coverage than the deltas above (T1 +3, T3 +2,
+T2 +1 core / +4 mini, T4 +3 mini + round-trip pins). Baselines for the
+remaining stages: **core 164, mini 141**.
 
 ## 6. The full plan: arcs, dependencies, execution order
 
@@ -356,9 +394,9 @@ All three share the same surfaces — they are three views of one model:
 
 | Phase | Stages | Depends on | Why this order |
 |---|---|---|---|
-| 1 — template foundation | T1 → T4 | — | Self-contained; establishes `DocumentContext` + `Splices`, the two seams the other arcs reuse; ends in a working `--render-typst` fixture |
-| 2 — notebook cells | N1 → N3 | T3 (`Splices`), existing `KernelBridge` | Block output regions and the run log need only the T3 seam; no new worker ops |
-| 2 — Unicode surface | U1 → U4 | — (independent) | Pure mathed_core/input work; parallel-safe with N1–N3 |
+| 1 — template foundation | T1 → T4 | — | ✅ EXECUTED (commits in the as-built log below); established `DocumentContext` + the `template_splices` seam, the two seams the other arcs reuse; ends in a working `--render-typst` fixture |
+| 2 — notebook cells | N1 → N3 | T3 seam, existing `KernelBridge` | Block output regions and the run log need only the T3 seam; no new worker ops |
+| 2 — Unicode surface | U2 → U4 | — (independent) | Pure mathed_core/input work; parallel-safe with N1–N3. U1 (boundary fuzz) was pulled forward into phase 1 and is ✅ DONE |
 | 3 — egison rules | T5 | T4 (fixture), existing nix Haskell env | Authoring-time binary; dev-machine only; improves translators the T-series already ships |
 | 4 — scripted execution | N4 | N1–N3 | The `[SYNC]` `exec` op (unfer) is additive to a *proven* dispatch path; needs the owner's cross-repo sign-off |
 | 5 — docs & invariants | T6, U5, N5–N6 | everything above | Each sweeps its arc's DESIGN.md subsection + `verify-invariants` greps |
@@ -411,9 +449,11 @@ never persist in the doc text; no editor-side process execution.
   heading/def/overlay-author markup into the `.typ`.
 
 Totals after phase 1: mathed_core 164 tests, mathed_mini 141, Bevy
-`mathed` checks clean, `verify-invariants` 9/9. Test-count deltas vs the
-T-series table above: U1 was pulled forward into phase 1 (roadmap phase
-2 lists it again — it is done; remove when phase 2 runs).
+`mathed` checks clean, `verify-invariants` 9/9 — these are the baselines
+for every remaining stage (trajectory recalibrated in §5; U1's original
+planned deltas are kept for the record in the U plan). U1 was pulled
+forward into phase 1 and is marked ✅ DONE there; the roadmap's phase 2
+starts at U2.
 
 ## 7. Non-goals and risks
 
