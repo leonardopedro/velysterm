@@ -109,6 +109,13 @@ pub struct TransformOptions {
     /// next to it (P3 #11). The transform stays kernel- agnostic
     /// — it just splices whatever markup the caller supplies.
     pub annotations: HashMap<usize, String>,
+    /// Template splices (T-series): Typst markup produced by
+    /// `\template` expansion, keyed by the target segment body's
+    /// **start** offset and spliced after that body exactly like
+    /// `annotations` (raw markup, suppressed while the segment is
+    /// revealed). At a shared insertion point template output
+    /// (content) is spliced *before* kernel annotations (results).
+    pub template_splices: HashMap<usize, String>,
     /// Translator error messages keyed by the translator segment's
     /// body **start** offset (P5 #28). When present, the
     /// expanded translator panel shows the error message in red
@@ -354,6 +361,30 @@ pub fn to_render_text_range(
         }
     }
 
+    // Template splices (T-series): markup produced by `\template`
+    // expansion, spliced in just after a segment's body — same
+    // rule as the inline annotations below (keyed by body start,
+    // insertion at `span.end`, suppressed while revealed).
+    let template_points: Vec<(usize, &str)> = if opts.template_splices.is_empty() {
+        Vec::new()
+    } else {
+        segments
+            .iter()
+            .filter_map(|seg| {
+                let span = seg.span.as_ref()?;
+                if span.start < range.start || span.end > range.end {
+                    return None;
+                }
+                if expanded(span) {
+                    return None;
+                }
+                let markup = opts.template_splices.get(&span.start)?;
+                bounds.push(span.end);
+                Some((span.end, markup.as_str()))
+            })
+            .collect()
+    };
+
     // Inline annotations (P3 #11): markup spliced in just after a
     // segment's body, keyed by the body start offset. Insertion
     // point is `span.end`. Don't splice while the segment is
@@ -493,6 +524,14 @@ pub fn to_render_text_range(
         // landing the caret on the title could never actually trigger
         // the expand (observed: Down arrow skipping straight over a
         // collapsed translator instead of entering it).
+        // Template output first, then kernel annotations, at a
+        // shared insertion point (content before results).
+        for (pos, markup) in &template_points {
+            if *pos == start {
+                pin_splice_point(start, &mut out, &mut map);
+                out.push_str(markup);
+            }
+        }
         for (pos, markup) in &annotation_points {
             if *pos == start {
                 pin_splice_point(start, &mut out, &mut map);
@@ -643,6 +682,15 @@ pub fn to_render_text_range(
             for _ in 0..v.closer_count() {
                 out.push(']');
             }
+        }
+    }
+    // A template splice whose insertion point is the very end of
+    // the range has no window starting there; splice it now
+    // (before annotations, matching the in-window order).
+    for (pos, markup) in &template_points {
+        if *pos == range.end {
+            pin_splice_point(range.end, &mut out, &mut map);
+            out.push_str(markup);
         }
     }
     // An annotation whose insertion point is the very end of the
@@ -2281,5 +2329,59 @@ mod tests {
             }
             prop_assert!(std::str::from_utf8(out.text.as_bytes()).is_ok());
         }
+    }
+
+    // ── T3: template splices at the seam ────────────────────────
+
+    #[test]
+    fn template_splice_precedes_annotation_at_same_point() {
+        let text = "#1 vacuum #2 \\prob(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let key = segs[0].span.clone().expect("prob span").start;
+        let mut annotations = HashMap::new();
+        annotations.insert(key, " = 1.0000".to_string());
+        let mut templates = HashMap::new();
+        templates.insert(key, "#small[res]".to_string());
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                annotations,
+                template_splices: templates,
+                ..Default::default()
+            },
+        );
+        // Both splice after the prob body — template (content)
+        // before annotation (result).
+        let ti = out.text.find("#small[res]").expect("template spliced");
+        let ai = out.text.find(" = 1.0000").expect("annotation spliced");
+        assert!(ti < ai, "template must precede annotation: {}", out.text);
+    }
+
+    #[test]
+    fn template_splice_suppressed_while_segment_revealed() {
+        let text = "#1 vacuum #2 \\prob(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let span = segs[0].span.clone().expect("prob span");
+        let mut templates = HashMap::new();
+        templates.insert(span.start, "#small[res]".to_string());
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                template_splices: templates,
+                expand: vec![span],
+                ..Default::default()
+            },
+        );
+        assert!(
+            !out.text.contains("#small[res]"),
+            "revealed segment must show raw source, not the splice: {}",
+            out.text
+        );
     }
 }
