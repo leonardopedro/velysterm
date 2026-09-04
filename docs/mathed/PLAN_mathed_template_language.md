@@ -384,6 +384,37 @@ code + the marker language only); no runtime Haskell in the editor
 through the australVM module path as a granted capability); outputs
 never persist in the doc text; no editor-side process execution.
 
+### As-built log (phase 1 executed 2026-09-04, commits on velysterm main)
+
+- `885a411` **U1** (done with phase 1): multibyte corpus regression tests
+  (mathed_core 158).
+- `c17c004` **T1** DocumentContext (164 tests) — `from_index(doc, scan,
+  idx, annotations)`; per-block indices recomputed from `split_blocks`
+  (build_index's block field stays render-derived for the bridge).
+- `a3b3101` **T3** additive `TransformOptions.template_splices` beside
+  `annotations` (same hide/reveal semantics, spliced first at a shared
+  point). Deviation from the doc's typed-`Splices` sketch: additive map
+  keeps every existing render byte-identical with zero call-site churn;
+  a unified `SpliceKind` remains open if a third splice family appears.
+- `0bd9814` **T2** `PropKind::Template` + `SemanticIndex.templates`;
+  `Translator::run` refactored to `run_entry_expr`; `run_template` added.
+- `c6a144a` **T4** `export_typst_template` + `--render-typst <doc>
+  [--ctx <json>] [--out <out.typ>]`; template bodies collapse to
+  `▸ template: name` like translator code (shared code-span machinery).
+  Template-free exports pinned byte-identical to `--export-typst`.
+- `c08918c` **T4 fix — ctx contract**: typst 0.15's `json` module has
+  `encode` but **no `decode`**, so the context reaches `render(ctx)` as a
+  lowered **Typst dict literal** (`(defs: (...), blocks: (...))`),
+  strings staying `Str` so markup strings compose directly;
+  single-element arrays get trailing commas; overlay keys must be Typst
+  identifiers. Verified end-to-end: a cover template renders doc
+  heading/def/overlay-author markup into the `.typ`.
+
+Totals after phase 1: mathed_core 164 tests, mathed_mini 141, Bevy
+`mathed` checks clean, `verify-invariants` 9/9. Test-count deltas vs the
+T-series table above: U1 was pulled forward into phase 1 (roadmap phase
+2 lists it again — it is done; remove when phase 2 runs).
+
 ## 7. Non-goals and risks
 
 - **No second template dialect.** Template code is Typst; mathed supplies
