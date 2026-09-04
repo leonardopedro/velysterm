@@ -1,11 +1,13 @@
 # mathed as a template language — implementation plan
 
-> **Status:** PLAN ONLY (2026-09-04). No code changed. This is the
-> authoritative plan for evolving the *existing* mathed document pipeline
-> (`mathed_core` + `mathed_mini`, Plan C C1–C16, 348 tests green) into a
-> **Typst template language** (Jinja/ERB/XSLT class) — the starter scope —
-> with the two longer arcs (UTF-8 as an extension of ASCII; bash/Jupyter-class
-> document computing) defined but out of current scope.
+> **Status:** PLAN ONLY (2026-09-04). No code changed. This document is the
+> **master entry point** for the full mathed language vision and the
+> authoritative plan for its starter scope: evolving the *existing* mathed
+> document pipeline (`mathed_core` + `mathed_mini`, Plan C C1–C16, 348 tests
+> green) into a **Typst template language** (Jinja/ERB/XSLT class). The full
+> plan — all three arcs, stage by stage — is §6 (roadmap) plus the sibling
+> plans `PLAN_mathed_utf8_ascii.md` (U-series) and
+> `PLAN_mathed_document_computing.md` (N-series).
 >
 > Constraint honored throughout: **improve, don't build new.** Every stage
 > below extends a named existing surface (marker grammar, `SemanticIndex`,
@@ -16,7 +18,9 @@
 >
 > Companion reading: `docs/mathed/DESIGN.md` (document model),
 > `docs/mathed/TRANSLATOR_DESIGN.md` (the translator pipeline this plan
-> generalizes), `PLAN_parallel_velysterm.md` (C-series, complete).
+> generalizes), `PLAN_parallel_velysterm.md` (C-series, complete). The T-
+> series stages T1–T6 below; the roadmap §6; and the U/N sibling plans are
+> the whole of the current planning work.
 
 ## 1. Vision & positioning
 
@@ -44,13 +48,14 @@ format/medium replacements:
    UTF-8 — a strict superset of ASCII in which mathematics is a first-class
    citizen: source *is* the final typography. The ASCII subset (keystrokes,
    code) and the Unicode surface (math glyphs, script, spacing classes)
-   share one scanner, one caret model, one semantics layer. (Later arc;
-   §6.1.)
+   share one scanner, one caret model, one semantics layer. (Planned in
+   full: `PLAN_mathed_utf8_ascii.md`, U1–U5.)
 3. **An alternative to bash and Jupyter notebooks (later arc).** A document
    whose blocks are cells, whose `\prob`/`\event` segments are live
    computations with inline outputs (already true for the probability
    kernel), generalized to arbitrary scripted/notebook workloads through the
-   existing dispatcher + worker, not a new runtime. (Later arc; §6.2.)
+   existing dispatcher + worker, not a new runtime. (Planned in full:
+   `PLAN_mathed_document_computing.md`, N1–N6.)
 
 The three arcs are one artifact: a **document that is its own program**, in
 the tradition of literate programming, with the *notation itself* carrying
@@ -322,46 +327,62 @@ mathed_core 146 → 149 (T1) → 151 (T3); mathed_mini 116 → 120 (T2) → 123
 (T4); T5's tests live in the Haskell binary; T6 adds no unit tests. Total
 ≈ 274 core+mini tests (+9), consistent with the C-series increments.
 
-## 6. Later arcs (defined, out of current scope)
+## 6. The full plan: arcs, dependencies, execution order
 
-### 6.1 UTF-8 as an extension of ASCII
+One goal unites the three arcs — **mathed text**: a document that is its
+own program. Each arc is planned to the same stage depth in its own file:
 
-Positioning: mathed text is UTF-8, a strict superset of ASCII; ASCII
-keystrokes and Unicode math share one model. Planned improvements (each a
-future plan doc, improving existing modules — `unicode-math-class` is
-already a mathed_core dep and `glyphs.rs` already uses math classes):
+| Arc | Plan file | Series | Replaces |
+|---|---|---|---|
+| Typst template language (starter) | this file | T1–T6 | Jinja/ERB/XSLT template engines for Typst output |
+| UTF-8 as an extension of ASCII | `PLAN_mathed_utf8_ascii.md` | U1–U5 | ASCII-only interchange; lossless Unicode authoring |
+| Document computing | `PLAN_mathed_document_computing.md` | N1–N6 | Jupyter notebooks and bash scripts |
 
-1. **Scanner/Unicode audit**: property-statement and marker scanning is
-   byte-based; verify + property-test UTF-8 boundary safety (the scanner
-   must never split a code point; surrogate-free).
-2. **Word/`wordnav.rs` on Unicode**: caret word-jumps follow Unicode
-   classes (math letters vs. operators vs. punctuation) using the existing
-   `unicode-math-class` data.
-3. **ASCII → Unicode math completion**: extend the auto-insert machinery
-   (which today owns the `#` key) with a completion table (`` `->` → `→`,
-   `\alpha` → α, `<=` → `≤` …) as *an extension of ASCII typing*, so the
-   ASCII subset remains a valid, lossless way to author the full UTF-8
-   surface (the inverse of export/ASCII-safe interchange for downstream
-   ASCII-only tools).
+All three share the same surfaces — they are three views of one model:
 
-### 6.2 Document computing: bash/Jupyter-class replacement
+- **Source of truth**: the Loro `LoroText` doc (Typst markup + markers +
+  statements) — never outputs, never derived state.
+- **Data**: `SemanticIndex` → `DocumentContext` (T1) — the document as
+  JSON — consumed by templates (T2/T4), the run log (N3), and the
+  ASCII/Unicode tables (U2/U4).
+- **Output**: the typed `Splices` seam (T3) — template expansion (T),
+  block output regions (N1), and nothing on the typing path (U) all
+  splice at the same transform stage.
+- **Computing**: the `KernelBridge` → `kernel_client` → worker path,
+  UK-coded and grant-gated — kernel statements (today), scripted `\exec`
+  segments (N4), and the egison rule binary out-of-band (T5).
 
-Positioning: blocks are cells; segments are live computations with inline
-output (true today for `\prob` → ` = 0.4231`). Planned improvements over
-the existing dispatcher/worker (`kernel_bridge`, `kernel_client`, the
-24-op `unfer_agent` protocol, UK-coded failures):
+### Execution order and dependencies
 
-1. **Output regions per block**: generalize the results-panel/annotation
-   flow into a per-block output gutter (T3's `Splices` + C7's per-block
-   cache already provide the seams); notebook-style "run block" replay of
-   kernel statements.
-2. **Scripted segments**: route `\run`-style statement bodies through the
-   existing worker op surface (additive ops, next free UK codes per the
-   frozen-contract rule) rather than shelling out in the editor; the
-   document stays the reproducible record (inputs, code, outputs, hashes)
-   — the literate-repro story replaces ad-hoc bash notebooks.
-3. **Lifecycle**: block-level dirty tracking already exists (C7/C14);
-   extend to "stale output" markers when a dependency segment edits.
+| Phase | Stages | Depends on | Why this order |
+|---|---|---|---|
+| 1 — template foundation | T1 → T4 | — | Self-contained; establishes `DocumentContext` + `Splices`, the two seams the other arcs reuse; ends in a working `--render-typst` fixture |
+| 2 — notebook cells | N1 → N3 | T3 (`Splices`), existing `KernelBridge` | Block output regions and the run log need only the T3 seam; no new worker ops |
+| 2 — Unicode surface | U1 → U4 | — (independent) | Pure mathed_core/input work; parallel-safe with N1–N3 |
+| 3 — egison rules | T5 | T4 (fixture), existing nix Haskell env | Authoring-time binary; dev-machine only; improves translators the T-series already ships |
+| 4 — scripted execution | N4 | N1–N3 | The `[SYNC]` `exec` op (unfer) is additive to a *proven* dispatch path; needs the owner's cross-repo sign-off |
+| 5 — docs & invariants | T6, U5, N5–N6 | everything above | Each sweeps its arc's DESIGN.md subsection + `verify-invariants` greps |
+
+Rules that hold for every stage (Plan C parallel-execution rules):
+
+1. Stages modify **only velysterm files**, except steps explicitly
+   marked `[SYNC]` (only N4-1). Cross-repo reads are fine (`../unfer`
+   protocol, `../australVM` fock_match).
+2. **Frozen contract** (additive-only): NDJSON ops, UK-#### codes,
+   `unfer_protocol` types. N4 takes the next free codes.
+3. Every stage ends in a commit with a passing acceptance command; the
+   repo CI (check, test, smoke, verify-invariants) stays green.
+4. Perf budget (C14: single-block edit < 16 ms on a 100-block doc)
+   applies to every stage — nothing new runs on the keystroke path.
+5. Golden outputs are frozen: no stage may change the render of a doc
+   that does not use its feature (T3's byte-identical annotation tests,
+   T4/N5's export stability tests, U1's round-trips).
+
+Non-goals that span arcs: no second template dialect (arcs use Typst
+code + the marker language only); no runtime Haskell in the editor
+(egison stays out-of-band — a hosted matcher, if ever wanted, goes
+through the australVM module path as a granted capability); outputs
+never persist in the doc text; no editor-side process execution.
 
 ## 7. Non-goals and risks
 
