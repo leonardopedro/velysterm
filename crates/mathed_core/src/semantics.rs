@@ -1,4 +1,5 @@
 use crate::markers::{Arg, PropKind};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
 use typst::syntax::{LinkedNode, SyntaxKind, parse};
@@ -459,6 +460,249 @@ impl SemanticIndex {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// DocumentContext — the document as data (stage T1 of
+// PLAN_mathed_template_language.md).
+//
+// A serde-JSON view of the document that serves as the template
+// *context*: everything a `\template` segment (T2/T4) can read about
+// the document. Derived purely from the doc text + scan +
+// [`SemanticIndex`] — no new parsing. Key names deliberately match
+// the `export_json` shape (`kind`/`name`/`body`/`model_name`) so
+// existing consumers don't churn.
+
+/// The document as data. Serialized to JSON for `\template`
+/// segments (the Jinja-style context) and for interchange.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DocumentContext {
+    /// Named definitions (`\def(...)`) with their resolved-use counts.
+    pub defs: Vec<ContextDef>,
+    /// `\model` statements (the named models a `\prob` can bind to).
+    pub models: Vec<ContextModel>,
+    /// Every kernel/biblio statement, in document order, with its
+    /// block index (blocks = cells; N-series).
+    pub statements: Vec<ContextStatement>,
+    /// Numbered `\cite` labels in document order.
+    pub references: Vec<ContextReference>,
+    /// Computed inline annotations (e.g. a `\prob`'s ` = 0.4231`),
+    /// keyed by their segment body start; filled by the caller from
+    /// `TransformOptions.annotations` (kernel results live in the
+    /// bridge, not the index).
+    pub annotations: Vec<ContextAnnotation>,
+    /// Blocks (from `split_blocks`), with a heading + statement
+    /// count each — the per-cell summary templates iterate over.
+    pub blocks: Vec<ContextBlock>,
+}
+
+/// One `\def(...)` with the text it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextDef {
+    pub name: String,
+    pub body: String,
+    /// Occurrences resolved to this definition (use sites).
+    pub uses: usize,
+}
+
+/// One `\model` statement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextModel {
+    pub kind: String,
+    pub name: Option<String>,
+    pub body: String,
+    pub block: usize,
+}
+
+/// One kernel/biblio statement (any kind), in document order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextStatement {
+    pub kind: String,
+    pub name: Option<String>,
+    pub body: String,
+    pub block: usize,
+}
+
+/// One numbered `\cite` in document order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextReference {
+    /// Visible label, e.g. `[3]`.
+    pub label: String,
+    /// `docref` (document part) or `bib` (bibliography keys).
+    pub kind: String,
+    pub keys: Vec<String>,
+}
+
+/// One computed annotation (`at` = the segment body's start offset).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextAnnotation {
+    pub at: usize,
+    pub markup: String,
+}
+
+/// One block of the document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextBlock {
+    pub start: usize,
+    pub len: usize,
+    /// First non-blank line of the block, trimmed to 40 chars.
+    pub heading: String,
+    pub statement_count: usize,
+}
+
+fn kind_name(kind: PropKind) -> String {
+    format!("{kind:?}").to_ascii_lowercase()
+}
+
+/// Which block (index into `block_ranges`) owns a doc byte position.
+fn block_of(pos: usize, block_ranges: &[Range<usize>]) -> usize {
+    let mut idx = 0;
+    for (k, r) in block_ranges.iter().enumerate() {
+        if r.start <= pos {
+            idx = k;
+        }
+    }
+    idx
+}
+
+fn block_heading(doc: &str, r: &Range<usize>) -> String {
+    doc[r.clone()]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('=')
+        .trim()
+        .chars()
+        .take(40)
+        .collect()
+}
+
+impl DocumentContext {
+    /// Build the context from a document. `annotations` is the
+    /// caller's inline-annotation map (kernel results etc. — the
+    /// transform stays kernel-agnostic, so the bridge supplies it).
+    pub fn from_index(
+        doc_text: &str,
+        scan: &crate::markers::MarkerScan,
+        idx: &SemanticIndex,
+        annotations: &HashMap<usize, String>,
+    ) -> Self {
+        let blocks = crate::blocks::split_blocks(doc_text);
+
+        let defs = idx
+            .defs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| ContextDef {
+                name: d.name.clone(),
+                body: doc_text[d.span.clone()].trim().to_string(),
+                uses: idx
+                    .occurrences
+                    .iter()
+                    .filter(|o| o.resolved == Some(i))
+                    .count(),
+            })
+            .collect();
+
+        let mut models = Vec::new();
+        // (doc start, statement) pairs so the final list is in
+        // document order regardless of which index bucket a
+        // statement came from.
+        let mut ordered: Vec<(usize, ContextStatement)> = Vec::new();
+        for ks in &idx.kernel_statements {
+            ordered.push((
+                ks.span.start,
+                build_statement(ks.kind, &ks.name, &ks.body_text, ks.span.start, &blocks),
+            ));
+            if ks.kind == PropKind::Model {
+                models.push(ContextModel {
+                    kind: kind_name(ks.kind),
+                    name: ks.name.clone(),
+                    body: ks.body_text.clone(),
+                    block: block_of(ks.span.start, &blocks),
+                });
+            }
+        }
+        for bs in &idx.biblio_statements {
+            ordered.push((
+                bs.span.start,
+                build_statement(bs.kind, &bs.name, &bs.body_text, bs.span.start, &blocks),
+            ));
+        }
+        ordered.sort_by_key(|(start, _)| *start);
+        let statements: Vec<ContextStatement> = ordered.into_iter().map(|(_, s)| s).collect();
+
+        let references = crate::markers::scan_references(scan)
+            .into_iter()
+            .map(|e| {
+                let (kind, keys) = match &e.kind {
+                    crate::markers::ReferenceKind::DocumentRef { .. } => {
+                        ("docref".to_string(), Vec::new())
+                    }
+                    crate::markers::ReferenceKind::Bibliography { keys } => {
+                        ("bib".to_string(), keys.clone())
+                    }
+                };
+                ContextReference {
+                    label: crate::markers::cite_label_text(&e),
+                    kind,
+                    keys,
+                }
+            })
+            .collect();
+
+        let mut annotations: Vec<ContextAnnotation> = annotations
+            .iter()
+            .map(|(at, markup)| ContextAnnotation {
+                at: *at,
+                markup: markup.clone(),
+            })
+            .collect();
+        annotations.sort_by_key(|a| a.at);
+
+        let blocks = blocks
+            .iter()
+            .enumerate()
+            .map(|(bi, r)| ContextBlock {
+                start: r.start,
+                len: r.end - r.start,
+                heading: block_heading(doc_text, r),
+                statement_count: statements.iter().filter(|s| s.block == bi).count(),
+            })
+            .collect();
+
+        Self {
+            defs,
+            models,
+            statements,
+            references,
+            annotations,
+            blocks,
+        }
+    }
+}
+
+fn build_statement(
+    kind: PropKind,
+    name: &Option<String>,
+    body: &str,
+    doc_start: usize,
+    block_ranges: &[Range<usize>],
+) -> ContextStatement {
+    ContextStatement {
+        kind: kind_name(kind),
+        name: name.clone(),
+        body: body.to_string(),
+        block: block_of(doc_start, block_ranges),
+    }
+}
+
 /// Determine which block (index into `per_block_renders`) owns the
 /// given doc byte position by checking which render output's copy
 /// spans contain it. Falls back to 0 if no block claims the position.
@@ -824,5 +1068,98 @@ mod tests {
             .expect("a cite statement");
         assert_eq!(cite.keys, vec!["crazy-rich".to_string()]);
         assert_eq!(cite.bib_name.as_deref(), Some("refs"));
+    }
+
+    // ── T1: DocumentContext (the template context) ─────────────
+
+    /// Build the T1 sample document and its context: two blocks
+    /// (`=` headings), one def, one named model, one `\prob` bound
+    /// to it, one doc-ref cite and one bib-key cite, and one
+    /// computed annotation on the prob.
+    fn sample_doc_and_context() -> (String, DocumentContext) {
+        let doc = concat!(
+            "= Model section\n",
+            "#1 h #2 \\def(#1,#2, h)\n",
+            "#3 a^† a #4 \\model(#3,#4, sys)\n",
+            "#5 P(heads) #6 \\prob(#5,#6, heads, model: \"sys\")\n",
+            "= Refs\n",
+            "#7 x #8 \\cite(#7,#8)\n",
+            "\\cite(k1, k2)\n",
+        );
+        let s = scan(doc);
+        let segs = resolve_segments(&s);
+        let render = to_render_text(doc, &s, &segs, &TransformOptions::default());
+        let mut idx = SemanticIndex::default();
+        idx.build_index(doc, &segs, &[&render]);
+
+        let prob_span = segs
+            .iter()
+            .find(|seg| seg.prop == "prob")
+            .and_then(|seg| seg.span.clone())
+            .expect("prob segment present");
+        let mut annotations = HashMap::new();
+        annotations.insert(prob_span.start, " = 0.42".to_string());
+
+        let ctx = DocumentContext::from_index(doc, &s, &idx, &annotations);
+        (doc.to_string(), ctx)
+    }
+
+    #[test]
+    fn context_defs_and_models() {
+        let (_doc, ctx) = sample_doc_and_context();
+        assert_eq!(ctx.defs.len(), 1);
+        assert_eq!(ctx.defs[0].name, "h");
+        assert_eq!(ctx.defs[0].body, "h");
+
+        assert_eq!(ctx.models.len(), 1);
+        assert_eq!(ctx.models[0].kind, "model");
+        assert_eq!(ctx.models[0].name.as_deref(), Some("sys"));
+        assert_eq!(ctx.models[0].body, "a^† a");
+        assert_eq!(ctx.models[0].block, 0);
+    }
+
+    #[test]
+    fn context_statements_and_blocks() {
+        let (_doc, ctx) = sample_doc_and_context();
+        let kinds: Vec<&str> = ctx.statements.iter().map(|s| s.kind.as_str()).collect();
+        // Document order: model then prob. The doc-ref cite
+        // resolves to a Reference (not a kernel/biblio statement)
+        // and a bib-key-only cite has no marker-ref segment, so
+        // neither lands in the statement list — both still appear
+        // in `references` (asserted in the references test).
+        assert_eq!(kinds, vec!["model", "prob"]);
+        let prob = &ctx.statements[1];
+        assert_eq!(prob.name.as_deref(), Some("heads"));
+        assert_eq!(prob.block, 0);
+
+        assert_eq!(ctx.blocks.len(), 2);
+        assert_eq!(ctx.blocks[0].heading, "Model section");
+        assert_eq!(ctx.blocks[0].statement_count, 2);
+        assert_eq!(ctx.blocks[1].heading, "Refs");
+        assert_eq!(ctx.blocks[1].statement_count, 0);
+    }
+
+    #[test]
+    fn context_references_annotations_and_json_round_trip() {
+        let (_doc, ctx) = sample_doc_and_context();
+        let labels: Vec<&str> = ctx.references.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["[1]", "[2, 3]"]);
+        assert_eq!(ctx.references[0].kind, "docref");
+        assert_eq!(ctx.references[1].kind, "bib");
+        assert_eq!(
+            ctx.references[1].keys,
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+
+        assert_eq!(ctx.annotations.len(), 1);
+        assert_eq!(ctx.annotations[0].markup, " = 0.42");
+
+        // Serialize → deserialize must reproduce the context exactly
+        // (key names snake_case, no data loss).
+        let json = serde_json::to_string(&ctx).expect("serialize context");
+        let back: DocumentContext = serde_json::from_str(&json).expect("deserialize context");
+        assert_eq!(back, ctx);
+        // The def entry keeps export_json's `name`/`body` keys.
+        assert!(json.contains("\"name\":\"h\""), "json: {json}");
     }
 }

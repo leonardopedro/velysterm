@@ -39,7 +39,10 @@ pub use markers::{
     cite_label_text, derive_tag, lowest_free_marker_numbers, next_marker_id, references_for_cursor,
     resolve_segments, scan, scan_references,
 };
-pub use semantics::{Definition, KernelStatement, Occurrence, SemanticIndex, TranslatorDef};
+pub use semantics::{
+    ContextAnnotation, ContextBlock, ContextDef, ContextModel, ContextReference, ContextStatement,
+    Definition, DocumentContext, KernelStatement, Occurrence, SemanticIndex, TranslatorDef,
+};
 pub use transform::{
     CopySpan, OffsetMap, RenderOutput, TransformOptions, to_render_text, to_render_text_range,
 };
