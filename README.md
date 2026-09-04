@@ -42,6 +42,15 @@ cargo build -p mathed
 printf '{"id":"1","op":"version","params":{}}\n' | cargo run -p kernel_client --bin unfer_agent
 ```
 
+## Toolchain
+
+Single stable Rust toolchain across the project repos (velysterm, unfer,
+dynamic-arctic, australVM): **1.97.1**, pinned via `rust-toolchain.toml`
+— no nightly anywhere. rustup honors the pin for every `cargo`/`rustfmt`
+invocation, so the editor, all builds, and CI run exactly this compiler.
+Formatting is default rustfmt style (no repo `rustfmt.toml`). Bump
+`rust-toolchain.toml` deliberately.
+
 ## Upstream velyst content
 
 The workspace vendors [velyst](https://github.com/voxell-tech/velyst)

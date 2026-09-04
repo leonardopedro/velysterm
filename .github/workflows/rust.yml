@@ -43,7 +43,7 @@ jobs:
       - run: rustup component add rustfmt
       # cargo fmt --all also formats path-dependency sources (the sibling
       # unfer/dynamic-arctic repos), so scope to this repo's own files with
-      # rustfmt directly (rustfmt.toml is read from the cwd).
+      # rustfmt directly (edition passed explicitly; default style).
       - run: rustfmt --edition 2024 --check $(git ls-files '*.rs')
 
   check:

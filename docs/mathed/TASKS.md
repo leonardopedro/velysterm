@@ -10,8 +10,9 @@
 for a strong model. **Easy tasks (E-series)** below are self-contained
 specs: each can be implemented with only this file plus the named target
 file, and unit-tested without Bevy unless stated. Follow the existing
-code style (see `crates/mathed_core/src/*.rs`): `rustfmt.toml` applies,
-comments only where the code can't say it.
+code style (see `crates/mathed_core/src/*.rs`): default rustfmt style
+applies (no repo rustfmt.toml; single 1.97.1 toolchain, see
+`rust-toolchain.toml`), comments only where the code can't say it.
 
 Read `docs/mathed/DESIGN.md` first for context.
 
@@ -338,7 +339,8 @@ view degrades gracefully (clamp, no oscillation).
 ## Notes for implementers
 
 - Run `cargo test -p mathed_core` / `cargo check -p mathed` before
-  declaring done. `cargo fmt` with the repo's `rustfmt.toml`.
+  declaring done. `cargo fmt` (default rustfmt style, no repo
+  `rustfmt.toml`).
 - Do not change public APIs of `doc.rs`, `markers.rs`, `transform.rs`.
 - Byte offsets everywhere; all ranges are `std::ops::Range<usize>` over
   UTF-8 bytes and must lie on char boundaries.
