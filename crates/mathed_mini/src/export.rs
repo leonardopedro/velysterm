@@ -75,9 +75,7 @@ fn export_ascii_inner(
             out.push(c);
             continue;
         }
-        if in_math
-            && let Some(name) = mathed_core::tables::ascii_of_overridden(c, mappings)
-        {
+        if in_math && let Some(name) = mathed_core::tables::ascii_of_overridden(c, mappings) {
             out.push_str(&name);
         } else {
             // Explicit, round-trippable flag — never a silent drop.
@@ -416,7 +414,12 @@ pub fn export_typst_template(
     doc_text: &str,
     extra_ctx_json: Option<&str>,
 ) -> Result<String, String> {
-    render_doc(doc_text, extra_ctx_json, std::collections::HashMap::new())
+    render_doc(
+        doc_text,
+        extra_ctx_json,
+        std::collections::HashMap::new(),
+        &[],
+    )
 }
 
 /// T9: headless template preview — the document rendered exactly as
@@ -424,7 +427,7 @@ pub fn export_typst_template(
 /// wrapped), for the editor's preview overlay. The document is never
 /// modified; a failing template surfaces the eval error text.
 pub fn preview_template(doc_text: &str) -> Result<String, String> {
-    render_doc(doc_text, None, std::collections::HashMap::new())
+    render_doc(doc_text, None, std::collections::HashMap::new(), &[])
 }
 
 /// N8: the headless notebook record — execute every block (refresh
@@ -517,10 +520,26 @@ pub fn record_stale_blocks(doc_text: &str, record_json: &str) -> Result<Vec<usiz
 /// markup is spliced at its block's end offset via
 /// `TransformOptions.block_splices` — never written into the doc text.
 /// A document without kernel statements renders byte-identically to
-/// plain `--export-typst` (no regions to splice).
+/// plain `--export-typst` (no regions to splice). Exec grants follow
+/// `MATHED_EXEC_GRANTS` (the default bridge constructor; deny-by-
+/// default without it).
 pub fn export_typst_with_outputs(doc_text: &str) -> Result<String, String> {
+    export_typst_with_outputs_impl(doc_text, None)
+}
+
+/// [`export_typst_with_outputs`] with an explicit worker exec
+/// allowlist (`Some`) or the default env-driven constructor (`None`)
+/// — the embedding/test hook that keeps execs deterministic without
+/// touching process env.
+fn export_typst_with_outputs_impl(
+    doc_text: &str,
+    grants: Option<&[&str]>,
+) -> Result<String, String> {
     let block_ranges = mathed_core::blocks::split_blocks(doc_text);
-    let mut bridge = crate::kernel_bridge::KernelBridge::new();
+    let mut bridge = match grants {
+        Some(g) => crate::kernel_bridge::KernelBridge::with_exec_grants(g),
+        None => crate::kernel_bridge::KernelBridge::new(),
+    };
     bridge.refresh(doc_text);
     // Settle best-effort: a hung worker must not hang the export, so
     // the wait is bounded and partial results still render.
@@ -548,19 +567,22 @@ pub fn export_typst_with_outputs(doc_text: &str) -> Result<String, String> {
             format!("// ---- block {bi} output region ----\n{markup}\n"),
         );
     }
-    render_doc(doc_text, None, block_splices)
+    render_doc(doc_text, None, block_splices, bridge.run_log())
 }
 
 /// Shared template render: evaluate every `\template` against the
 /// derived context (with the caller's overlay), splice the results at
 /// the T3 seam, and — for `--with-outputs` — splice each block's
-/// computed region at its end offset. `block_splices` is empty for
-/// the plain template export, so that path stays byte-identical to
-/// the T4 fixture.
+/// computed region at its end offset and expose the run log's exec
+/// rows as `ctx.exec` (N9). `block_splices` is empty for the plain
+/// template export and `exec_runs` is empty for every caller that did
+/// not run the blocks, so those paths stay byte-identical to the T4
+/// fixture.
 fn render_doc(
     doc_text: &str,
     extra_ctx_json: Option<&str>,
     block_splices: std::collections::HashMap<usize, String>,
+    exec_runs: &[crate::kernel_bridge::RunEntry],
 ) -> Result<String, String> {
     let (scan, segments, _, idx) = crate::kernel_bridge::scan_pipeline(doc_text);
 
@@ -579,6 +601,54 @@ fn render_doc(
         let extra: serde_json::Value =
             serde_json::from_str(extra).map_err(|e| format!("--ctx is not valid JSON: {e}"))?;
         merge_overlay(&mut ctx_value, extra);
+    }
+    // N9: templated figures — when the caller ran the blocks (the
+    // `--with-outputs` report path), every exec run whose stdout was
+    // NDJSON rows is exposed to templates as `ctx.exec`, a slice of
+    // the run log: `(name:, block:, rows:)` per run, rows as objects.
+    // A `\template` (or the `\base`) can then wrap the rows into a
+    // Typst figure — the notebook rich-output role, with the region's
+    // table rendering the same rows. Runs whose rows would not lower
+    // to a Typst dict (non-identifier keys) stay out of ctx — they
+    // still render in the output region. Plain export passes no runs:
+    // no `exec` key appears, so the T4/T7 ctx shape is pinned.
+    if !exec_runs.is_empty() {
+        let names: std::collections::HashMap<usize, &str> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == mathed_core::markers::PropKind::Exec)
+            .filter_map(|s| s.name.as_deref().map(|n| (s.span.start, n)))
+            .collect();
+        let execs: Vec<serde_json::Value> = exec_runs
+            .iter()
+            .filter(|e| e.op == "exec")
+            .filter_map(|e| {
+                let crate::kernel_bridge::KernelResult::StringValue(out) = &e.result else {
+                    return None;
+                };
+                let rows: Vec<serde_json::Value> = crate::output_region::parse_rows(out)?
+                    .into_iter()
+                    .map(serde_json::Value::Object)
+                    .collect();
+                if rows.is_empty()
+                    || !rows.iter().all(|o| {
+                        o.as_object()
+                            .is_some_and(|m| m.keys().all(|k| is_typst_ident(k)))
+                    })
+                {
+                    return None;
+                }
+                let name = names.get(&e.offset).copied().unwrap_or("exec");
+                Some(serde_json::json!({
+                    "name": if is_typst_ident(name) { name } else { "exec" },
+                    "block": e.block,
+                    "rows": rows,
+                }))
+            })
+            .collect();
+        if !execs.is_empty() {
+            ctx_value["exec"] = serde_json::Value::Array(execs);
+        }
     }
     let ctx_literal = ctx_to_typst_literal(&ctx_value)?;
 
@@ -986,9 +1056,8 @@ mod tests {
     fn rules_engine_select_ops_use_the_slice() {
         // T8: for select ops the pre-sliced rows win over the raw
         // body — the slice argument is part of the contract.
-        let stub = stub_rules_bin(
-            "#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"x;z\"}'\n",
-        );
+        let stub =
+            stub_rules_bin("#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"x;z\"}'\n");
         let got = mathed_rules_engine_with_bin(
             stub.to_str().unwrap(),
             "unused raw body",
@@ -1140,6 +1209,32 @@ mod tests {
     }
 
     #[test]
+    fn with_outputs_feeds_exec_rows_to_templates() {
+        // N9: the report path exposes each row-producing exec run to
+        // templates as ctx.exec (name + rows), so a `\template` wraps
+        // the rows into a figure; the block's output region renders
+        // the same rows as a table (the rich-output notebook role,
+        // one renderer).
+        let doc = concat!(
+            "= Figure cell\n\n",
+            "#1 awk BEGIN{print\"{\\\"x\\\":1}\";print\"{\\\"x\\\":2}\"} #2 ",
+            "\\exec(#1,#2, grants: \"data\", name: rows)\n\n",
+            "#3 #let render(ctx) = \"#figure[\" + str(ctx.at(\"exec\").at(0).at(\"rows\").len())",
+            " + \" rows, first x = \" + str(ctx.at(\"exec\").at(0).at(\"rows\").at(0).at(\"x\"))",
+            " + \"]\" #4 \\template(#3,#4, name: fig)",
+        );
+        let out = export_typst_with_outputs_impl(doc, Some(&["data"])).expect("figure export");
+        assert!(
+            out.contains("#figure[2 rows, first x = 1]"),
+            "template wrapped the exec rows into a figure: {out}"
+        );
+        assert!(
+            out.contains("#table("),
+            "the region renders the same rows as a table: {out}"
+        );
+    }
+
+    #[test]
     fn template_failure_is_loud_and_named() {
         let doc = "#1 not valid typst code #2 \\template(#1,#2, name: bad)";
         let err = export_typst_template(doc, None).unwrap_err();
@@ -1206,7 +1301,10 @@ mod tests {
             "\\base(#1,#2, name: bad)",
         );
         let err = export_typst_template(doc, None).unwrap_err();
-        assert!(err.contains("does not parse"), "parse failure surfaced: {err}");
+        assert!(
+            err.contains("does not parse"),
+            "parse failure surfaced: {err}"
+        );
     }
 
     #[test]
@@ -1316,7 +1414,10 @@ mod tests {
         );
         let out = preview_template(doc).expect("preview");
         assert!(out.contains("#box[WRAP]"), "preview prefix: {out}");
-        assert!(out.contains("#emph[t1]"), "preview carries the sub-template: {out}");
+        assert!(
+            out.contains("#emph[t1]"),
+            "preview carries the sub-template: {out}"
+        );
         assert!(out.contains("#box[END]"), "preview suffix: {out}");
     }
 

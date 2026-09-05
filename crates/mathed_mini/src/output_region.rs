@@ -54,7 +54,13 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
                 format!("#text(rgb(\"#138000\"))[\\\\= {p:.4}{timing}]")
             }
             KernelResult::StringValue(s) => {
-                format!("#text(rgb(\"#138000\"))[{s}{timing}]")
+                // N9: NDJSON rows render as a Typst table (the
+                // notebook rich-output role); plain text stays the
+                // green StringValue line.
+                match rows_table(s) {
+                    Some(table) => table,
+                    None => format!("#text(rgb(\"#138000\"))[{s}{timing}]"),
+                }
             }
             KernelResult::Error {
                 code_name,
@@ -73,6 +79,60 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
         lines.push(line);
     }
     lines
+}
+
+/// N9: parse an exec's stdout as NDJSON rows — every non-empty line
+/// must parse as a JSON object. Shared by the region's table rendering
+/// and the `ctx.exec` template context; `None` means the text is not
+/// row-shaped (plain stdout stays the StringValue line).
+pub fn parse_rows(s: &str) -> Option<Vec<serde_json::Map<String, serde_json::Value>>> {
+    let lines: Vec<&str> = s.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines
+        .iter()
+        .map(|l| match serde_json::from_str::<serde_json::Value>(l) {
+            Ok(serde_json::Value::Object(o)) => Some(o),
+            _ => None,
+        })
+        .collect()
+}
+
+/// N9: detect NDJSON rows in an exec's stdout and render them as a
+/// Typst table — every non-empty line must parse as a JSON object.
+/// Columns are the union of keys in first-seen order; cells are the
+/// stringified values (escaped as Typst string literals so special
+/// chars render literally). `None` when the text is not row-shaped
+/// (plain stdout stays the StringValue line).
+fn rows_table(s: &str) -> Option<String> {
+    let objs = parse_rows(s)?;
+    let mut cols: Vec<String> = Vec::new();
+    for o in &objs {
+        for k in o.keys() {
+            if !cols.contains(k) {
+                cols.push(k.clone());
+            }
+        }
+    }
+    let mut cells: Vec<String> = cols
+        .iter()
+        .map(|c| format!("[{}]", crate::translate::typst_str_lit(c)))
+        .collect();
+    for o in &objs {
+        for c in &cols {
+            let v = o.get(c).map(|v| v.to_string()).unwrap_or_default();
+            cells.push(format!("[{}]", crate::translate::typst_str_lit(&v)));
+        }
+    }
+    let mut out = String::from("#table(\n  columns: (");
+    out.push_str(&vec!["auto".to_string(); cols.len()].join(", "));
+    out.push_str("),\n");
+    for c in &cells {
+        out.push_str(&format!("  {c},\n"));
+    }
+    out.push_str(")\n");
+    Some(out)
 }
 
 pub fn region_markup(outputs: &[(usize, KernelResult)]) -> String {
@@ -166,6 +226,34 @@ mod tests {
             "repair hint: {m}"
         );
         assert!(m.contains("#c00000"), "red tint: {m}");
+    }
+
+    #[test]
+    fn row_shaped_stdout_renders_as_table() {
+        // N9: NDJSON rows in an exec's stdout become a Typst table
+        // (columns from the union of keys; one row per object).
+        let outputs = vec![(
+            10,
+            KernelResult::StringValue("{\"x\":1,\"y\":\"a\"}\n{\"x\":2,\"y\":\"b\"}\n".to_string()),
+        )];
+        let m = region_markup(&outputs);
+        assert!(m.contains("#table("), "row stdout renders as a table: {m}");
+        assert!(m.contains("[\"x\"]"), "key column header: {m}");
+        assert!(m.contains("[\"y\"]"), "second column header: {m}");
+        assert!(
+            m.contains("[\"1\"]") && m.contains("[\"2\"]"),
+            "cell values in row order: {m}"
+        );
+    }
+
+    #[test]
+    fn non_row_stdout_stays_the_string_line() {
+        // N9 pinned: plain text stdout is not row-shaped — it keeps
+        // the green StringValue line (no table, no data loss).
+        let outputs = vec![(10, KernelResult::StringValue("hello world".to_string()))];
+        let m = region_markup(&outputs);
+        assert!(!m.contains("#table("), "plain text is not a table: {m}");
+        assert!(m.contains("hello world"), "text kept verbatim: {m}");
     }
 
     #[test]

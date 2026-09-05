@@ -5827,6 +5827,7 @@ dependencies = [
  "thiserror 2.0.19",
  "typst",
  "unicode-math-class",
+ "unicode-segmentation",
 ]
 
 [[package]]
