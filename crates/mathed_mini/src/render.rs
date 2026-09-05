@@ -1,6 +1,8 @@
 //! The Bevy-free render pipeline: mathed document → Typst markup →
 //! laid-out [`Frame`] → CPU-rasterized RGBA8 image.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use imaging::RgbaImage;
 use imaging_vello_cpu::VelloCpuRenderer;
 use mathed_core::glyphs::{GlyphIndex, build_glyph_index};
@@ -9,6 +11,20 @@ use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 use typst::layout::{Abs, Axes, Frame, Region, Size};
 
 use crate::world::MiniWorld;
+
+/// F5: total number of Typst compile passes issued since startup,
+/// bumped at the two compile choke points ([`layout_world`] and
+/// [`render_paged`]). Every render this crate issues funnels through
+/// one of them, so this is an honest global count — the HUD reports
+/// per-frame deltas (how many compiles a given interaction really
+/// cost) and per-tick rates from it. Relaxed ordering is enough: it
+/// only feeds diagnostics/counters.
+static COMPILE_PASSES: AtomicU64 = AtomicU64::new(0);
+
+/// The current global compile-pass count (see [`COMPILE_PASSES`]).
+pub(crate) fn compile_passes() -> u64 {
+    COMPILE_PASSES.load(Ordering::Relaxed)
+}
 
 /// Default page width in points for the minimal editor.
 pub const DEFAULT_WIDTH_PT: f64 = 600.0;
@@ -109,6 +125,7 @@ pub struct DocLayout {
 /// Lay out the world's current document into a Typst [`Frame`] at
 /// `width_pt`.
 fn layout_world(world: &MiniWorld, width_pt: f64) -> Result<Frame, RenderError> {
+    COMPILE_PASSES.fetch_add(1, Ordering::Relaxed);
     let content = world.eval_main().ok_or(RenderError::Eval)?;
     let region = Region::new(
         Size::new(Abs::pt(width_pt), Abs::pt(MAX_HEIGHT_PT)),
@@ -155,6 +172,7 @@ pub fn rasterize_frame(frame: &Frame) -> Result<RgbaImage, RenderError> {
 /// path behind `export::doc_pages_image` / `--pages-image`: page
 /// breaks come from Typst's page model, never from slicing pixels.
 pub fn render_paged(world: &MiniWorld) -> Result<Vec<RgbaImage>, RenderError> {
+    COMPILE_PASSES.fetch_add(1, Ordering::Relaxed);
     let warned = typst::compile::<typst_layout::PagedDocument>(world);
     let doc = warned.output.map_err(|_| RenderError::Eval)?;
     doc.pages()
@@ -413,6 +431,26 @@ mod tests {
     // them into `Vec<usize>`.
     #![allow(clippy::single_range_in_vec_init)]
     use super::*;
+
+    #[test]
+    fn compile_counter_tracks_every_render_pass() {
+        // Every public render funnels through `layout_world` (single
+        // frames) or `render_paged`, the two counted choke points —
+        // so the HUD's per-frame compile count is honest. Tests run
+        // in parallel threads against the one global counter, so the
+        // assertions are monotonic bounds (each render must advance
+        // it by at least one) rather than exact deltas.
+        let before = compile_passes();
+        assert!(render_preedit("ab", DEFAULT_WIDTH_PT).is_ok());
+        let mid = compile_passes();
+        assert!(mid > before, "each render advances the counter");
+        assert!(render_preedit("cd", DEFAULT_WIDTH_PT).is_ok());
+        assert!(render_markup("hello", 200.0).is_ok());
+        assert!(
+            compile_passes() >= mid + 2,
+            "two more renders, two more passes"
+        );
+    }
 
     #[test]
     fn renders_math_to_nonempty_image() {

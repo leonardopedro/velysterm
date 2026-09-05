@@ -40,6 +40,13 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// is a pure blit.
 const IDLE_PREFETCH_DELAY: Duration = Duration::from_millis(400);
 
+/// Adaptive open-preview refresh (F5): how long the editor must be
+/// quiet *while the Ctrl+R preview is open* before the stale raster
+/// is refreshed on the worker. Shorter than the closed-preview warm
+/// delay — the user is watching, so a snappier swap is worth a
+/// compile — and the single-in-flight guard still prevents churn.
+const OPEN_REFRESH_DELAY: Duration = Duration::from_millis(150);
+
 /// F4: how long the transient bottom-left status flash stays visible
 /// after an overlay close reports its memo accounting.
 const STATUS_FLASH_MS: Duration = Duration::from_millis(3000);
@@ -205,6 +212,29 @@ fn cached_doc_text(cache: &mut Option<(u64, Arc<str>)>, rev: u64, mirror: &str) 
 /// store (constant width slot): blink and caret-motion frames blit
 /// the cached raster and a compile happens only when the composed
 /// text actually changes.
+/// F5: content-keyed [`crate::render::render_markup`] raster for a
+/// draw-time status line (the doc-preview hint label and its error
+/// message). These used to compile fresh Typst at their draw sites on
+/// every redraw the preview was open — including pure-blit blink
+/// frames. Memoized per (content, window width): a blink or
+/// caret-motion frame blits, and a compile happens only when the text
+/// or the width actually changed.
+fn memo_markup_image(
+    store: &mut crate::memo::MemoStore,
+    site: &'static str,
+    markup: &str,
+    width_px: u32,
+) -> Option<imaging::RgbaImage> {
+    let key = overlay_memo_key(width_px, markup);
+    if store.get(site, width_px, key).is_none() {
+        match crate::render::render_markup(markup, width_px as f64) {
+            Ok(image) => store.insert(site, width_px, key, image),
+            Err(_) => store.remove(site, width_px),
+        }
+    }
+    store.image(site, width_px).cloned()
+}
+
 fn preedit_raster(
     store: &mut crate::memo::MemoStore,
     site: &'static str,
@@ -470,12 +500,19 @@ struct App {
     /// memoization's effect is measurable in-editor. Not an overlay:
     /// Esc / F5 dismiss it.
     hud: bool,
-    /// F5: baseline (wall clock + memo lifetime counters) of the HUD's
-    /// current per-interval tick.
-    hud_state: Option<(std::time::Instant, (u64, u64, u64))>,
+    /// F5: baseline (wall clock + global compile-pass count) of the
+    /// HUD's current per-interval tick.
+    hud_state: Option<(std::time::Instant, u64)>,
     /// F5: classification of the most recent redraw (see
     /// [`FrameClass`]); reported by the HUD.
     last_frame_class: FrameClass,
+    /// F5: Typst compile passes issued during the most recent redraw
+    /// (the delta of [`crate::render::compile_passes`] across the
+    /// frame) — the HUD's per-frame compile count.
+    last_frame_compiles: u64,
+    /// F5: elapsed time of the most recent full memo pre-pass (ms) —
+    /// the HUD's per-frame derived-work cost.
+    last_prepass_ms: f64,
     /// (block-based caching — per-block reveal is handled by
     /// `block_layouts` eviction on reveal-block changes and
     /// per-block `TransformOptions` in `redraw`.)
@@ -667,6 +704,8 @@ impl App {
             hud: false,
             hud_state: None,
             last_frame_class: FrameClass::Blit,
+            last_frame_compiles: 0,
+            last_prepass_ms: 0.0,
             pref_x: None,
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
@@ -1274,18 +1313,25 @@ impl App {
         });
     }
 
-    /// F4: while the editor is quiet, keep the Ctrl+R raster warm on
-    /// a worker thread — both *before* the preview is ever opened
+    /// F4/F5: while the editor is quiet, keep the Ctrl+R raster warm
+    /// on a worker thread — both *before* the preview is ever opened
     /// (the user has opened it before, so re-opening is a blit) and
     /// *while* it is open (the doc or the results moved: the stale
     /// raster stays on screen and swaps when the fresh compose
     /// lands). Either way, no per-keystroke synchronous whole-doc
-    /// compile happens while the preview is open.
+    /// compile happens while the preview is open. The debounce is
+    /// adaptive: shorter while the preview is open (the user is
+    /// watching), longer when warming a closed preview.
     fn prefetch_doc_preview_if_idle(&mut self) {
         if !self.preview_wanted || self.preview_job.is_some() {
             return;
         }
-        if std::time::Instant::now().duration_since(self.last_edit) < IDLE_PREFETCH_DELAY {
+        let quiet = if self.doc_preview.is_some() {
+            OPEN_REFRESH_DELAY
+        } else {
+            IDLE_PREFETCH_DELAY
+        };
+        if std::time::Instant::now().duration_since(self.last_edit) < quiet {
             return;
         }
         self.dispatch_doc_preview_job();
@@ -1373,7 +1419,7 @@ impl App {
     fn toggle_hud(&mut self) {
         self.hud = !self.hud;
         if self.hud {
-            self.hud_state = Some((std::time::Instant::now(), self.memo_store.lifetime()));
+            self.hud_state = Some((std::time::Instant::now(), crate::render::compile_passes()));
         } else {
             self.hud_state = None;
             self.memo_store.remove("hud", self.layout_width);
@@ -1385,50 +1431,37 @@ impl App {
     /// [`HUD_TICK`]. Content-keyed like the overlays, so the line
     /// compiles Typst a few times a second at most while every other
     /// frame blits it. Runs outside the idle guard (it is a
-    /// measurement tool: it must reflect the *last* frame's class and
-    /// the current counters even on pure-blit frames).
+    /// measurement tool: it must reflect the *last* frame even on
+    /// pure-blit frames). The compile rate comes from the global
+    /// render counter ([`crate::render::compile_passes`]) — every
+    /// Typst pass this crate issues funnels through it, so the
+    /// per-tick delta covers block re-layouts, footer/region
+    /// re-renders and the memo overlays alike, not just the store.
     fn refresh_hud_memo(&mut self, width_px: u32) {
         const SITE: &str = "hud";
         if !self.hud {
             return;
         }
         let now = std::time::Instant::now();
-        let Some((last_tick, last_counts)) = self.hud_state else {
-            self.hud_state = Some((now, self.memo_store.lifetime()));
+        let Some((last_tick, last_total)) = self.hud_state else {
+            self.hud_state = Some((now, crate::render::compile_passes()));
             return;
         };
         if now.duration_since(last_tick) < HUD_TICK {
             return;
         }
-        let counts = self.memo_store.lifetime();
-        let (dh, dc, de) = (
-            counts.0.saturating_sub(last_counts.0),
-            counts.1.saturating_sub(last_counts.1),
-            counts.2.saturating_sub(last_counts.2),
-        );
+        let total = crate::render::compile_passes();
+        let dc = total.saturating_sub(last_total);
         let secs = now.duration_since(last_tick).as_secs_f64().max(0.001);
         let cps = dc as f64 / secs;
-        let total = counts.0 + counts.1;
-        let pct = if total == 0 {
-            100.0
-        } else {
-            counts.0 as f64 * 100.0 / total as f64
-        };
-        let mut markup = format!(
-            "frame {} · {}h/{}c/{}e since tick · Σ {}h/{}c/{}e ({:.0}%) · {cps:.1} c/s",
+        let markup = format!(
+            "frame {} · {} comp · pre {:>5.1}ms · {:>4.1} c/s (Σ {total})",
             self.last_frame_class.label(),
-            dh,
-            dc,
-            de,
-            counts.0,
-            counts.1,
-            counts.2,
-            pct,
+            self.last_frame_compiles,
+            self.last_prepass_ms,
+            cps,
         );
-        if de > 0 {
-            markup.push_str(&format!(" · {de} evicted"));
-        }
-        self.hud_state = Some((now, counts));
+        self.hud_state = Some((now, total));
         self.memo_overlay_markup(SITE, &markup, width_px);
     }
 
@@ -2299,6 +2332,10 @@ impl App {
         // block layouts, the footer (F3a) and the regions (F3b) all
         // re-key naturally below/on refresh.
         self.layout_width = size.width;
+        // F5: frame compile count — the delta of the global render
+        // counter across this whole redraw (pre-pass compiles plus
+        // draw-time ones like the caret preedit and memo misses).
+        let compiles_at_frame_start = crate::render::compile_passes();
 
         // F3 idle-frame guard: every cached raster in the memo
         // pre-pass below consumes a subset of exactly these inputs —
@@ -2330,6 +2367,9 @@ impl App {
         let mut frame_class = FrameClass::Blit;
 
         if !idle {
+            // F5: time the whole memo pre-pass (the HUD reports it as
+            // the per-frame derived-work cost).
+            let pre_start = std::time::Instant::now();
             // F3: block layouts are content-keyed over exactly (doc
             // slice + reveal + per-block annotations/errors + width),
             // and the per-block annotation/error maps only move with
@@ -2524,6 +2564,7 @@ impl App {
                 let markup = format!("#text(fill: rgb(\"#a0a0a0\"))[{msg}]");
                 self.memo_overlay_markup("status_flash", &markup, win_px);
             }
+            self.last_prepass_ms = pre_start.elapsed().as_secs_f64() * 1000.0;
         }
         // The pre-pass above consumed exactly the inputs folded into
         // `frame`; record it so the next frame can prove nothing
@@ -2707,15 +2748,17 @@ impl App {
         if let Some(result) = &self.doc_preview {
             let label =
                 "#text(fill: rgb(\"#808080\"))[document raster preview — ↑/↓ scroll · esc close]";
-            if let Ok(lbl) = crate::render::render_markup(label, size.width as f64) {
+            if let Some(lbl) =
+                memo_markup_image(&mut self.memo_store, "doc_preview_label", label, win_px)
+            {
                 blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &lbl);
                 let y0 = 8 + lbl.height as usize + 4;
                 match result {
                     Ok(()) => {
                         // The raster is the content-keyed memo; a
-                        // stale-content frame was recomposed by the
-                        // pre-pass (or prefetched while idle — F4), so
-                        // an idle frame here is a pure scrolled blit.
+                        // stale-content frame is recomposed by the
+                        // worker refresh (F4/F5), so an idle frame
+                        // here is a pure scrolled blit.
                         if let Some(m) = self.memo_store.image("doc_preview", 0) {
                             let scroll = self.doc_preview_scroll.min(m.height as usize);
                             blit_over_bg_scrolled(&mut buffer, win_w, doc_h, 8, y0, m, scroll);
@@ -2724,12 +2767,16 @@ impl App {
                     Err(e) => {
                         // The message is dynamic text (it can contain
                         // Typst syntax, e.g. a path) — render it as a
-                        // string literal in code position.
+                        // string literal in code position. Content-
+                        // keyed (F5): blink frames blit; only a new
+                        // error message or a resize compiles.
                         let msg = format!(
                             "#text(fill: rgb(\"#c03030\"))[#{}]",
                             crate::translate::typst_str_lit(e)
                         );
-                        if let Ok(mimg) = crate::render::render_markup(&msg, size.width as f64) {
+                        if let Some(mimg) =
+                            memo_markup_image(&mut self.memo_store, "doc_preview_err", &msg, win_px)
+                        {
                             blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, y0, &mimg);
                         }
                     }
@@ -2805,6 +2852,8 @@ impl App {
             blit_over_bg_clipped(&mut buffer, win_w, win_h, left, top, img);
         }
 
+        self.last_frame_compiles =
+            crate::render::compile_passes().saturating_sub(compiles_at_frame_start);
         let _ = buffer.present();
     }
 }

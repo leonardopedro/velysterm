@@ -113,7 +113,7 @@ the doc stays the source of truth).
   overlays (content-keyed: doc text + live results — it renders at
   a fixed width, so resizing never recompiles it), so idle frames
   are pure blits; and once you have ever opened it, the raster is
-  prefetched while the editor is quiet (400ms debounce) on a
+  prefetched while the editor is quiet on a
   **background worker thread** from an owned `ScreenshotSnapshot`
   (never a frame stall), so Ctrl+R re-opens as a blit instead of a
   compile — a stale compose (the doc or results moved on mid-flight)
@@ -122,7 +122,9 @@ the doc stays the source of truth).
   whole-doc compile per keystroke — the stale raster stays on
   screen and swaps when the fresh compose lands after the editor
   quiets down (the loop busy-polls while a compose is in flight so
-  the swap is prompt).
+  the swap is prompt). The debounce is adaptive — **150ms** while
+  the preview is open (the user is watching), 400ms when warming a
+  closed preview.
 - **Paginated A4 export** — `--pages-image <doc> [--grants g]
   --out base` writes one PNG per page (`base.1.png`, …). The page
   breaks come from **Typst's own page model**
@@ -231,12 +233,18 @@ the doc stays the source of truth).
   wins measurable in-editor: it reports the last frame's class —
   `blit` (the idle guard skipped the whole pre-pass), `caret` (the
   layout/region pass was provably skipped), or `full` (real work
-  ran) — plus the memo store's **lifetime** counters (never reset by
-  the overlay-close report, so per-interval deltas stay honest
-  mid-session) and the compile rate since the last tick. The line is
-  itself a content-keyed raster rebuilt at most every 250ms, so the
-  HUD compiles Typst a few times a second while every other frame
-  blits it.
+  ran) — plus how many Typst compile passes that frame really cost
+  and how long the pre-pass took, with the compile rate since the
+  last tick. The counts come from a global render counter bumped at
+  the compile choke points (`layout_world` / `render_paged`), so
+  they cover block re-layouts, footer/region re-renders and the
+  memo overlays alike — not just the store. The line is itself a
+  content-keyed raster rebuilt at most every 250ms, so the HUD
+  compiles Typst a few times a second while every other frame blits
+  it. (The same code-reading "profile" also caught the last hidden
+  per-frame compiles: the doc-preview hint label and its error line
+  used to recompile at their draw sites on every redraw the preview
+  was open — they are content-keyed rasters now.)
 
 ## Input + interchange (U-series)
 
