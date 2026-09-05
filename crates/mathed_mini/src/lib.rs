@@ -20,6 +20,7 @@ pub mod completion_ui;
 pub mod dispatch;
 pub mod durable_dashboard;
 pub mod export;
+pub mod help_overlay;
 pub mod kernel_bridge;
 pub mod kernel_menu;
 pub mod marker_overlay;

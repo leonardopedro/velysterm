@@ -41,6 +41,47 @@ fn is_menu_statement(kind: PropKind) -> bool {
     matches!(kind, PropKind::Exec | PropKind::Kernel)
 }
 
+/// Per-kind menu filter (`f` cycles All → exec → kernel → All). The
+/// filter is part of the menu's *derived* state: it only narrows
+/// which rows the list shows, never what runs or what the doc
+/// contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MenuKindFilter {
+    #[default]
+    All,
+    Exec,
+    Kernel,
+}
+
+impl MenuKindFilter {
+    /// Does this filter show statements of `kind`?
+    pub fn allows(&self, kind: PropKind) -> bool {
+        match self {
+            MenuKindFilter::All => true,
+            MenuKindFilter::Exec => kind == PropKind::Exec,
+            MenuKindFilter::Kernel => kind == PropKind::Kernel,
+        }
+    }
+
+    /// The filter's short tag, shown in the menu footer.
+    pub fn label(&self) -> &'static str {
+        match self {
+            MenuKindFilter::All => "all",
+            MenuKindFilter::Exec => "exec",
+            MenuKindFilter::Kernel => "kernel",
+        }
+    }
+
+    /// The next filter in the cycle (All → exec → kernel → All).
+    pub fn next(self) -> Self {
+        match self {
+            MenuKindFilter::All => MenuKindFilter::Exec,
+            MenuKindFilter::Exec => MenuKindFilter::Kernel,
+            MenuKindFilter::Kernel => MenuKindFilter::All,
+        }
+    }
+}
+
 /// One-line, escaped snippet of a statement body (≤ 40 chars).
 fn snippet(body: &str) -> String {
     let first_line = body.lines().next().unwrap_or_default().trim();
@@ -104,10 +145,23 @@ fn esc_text(s: &str) -> String {
 /// statement in document order, tagged with its kind and current
 /// region status. `results` and `stale` come from the bridge (the
 /// live, derived state); nothing here reads or writes the doc.
+/// Equivalent to [`rows_for_doc_with`] under [`MenuKindFilter::All`].
 pub fn rows_for_doc(
     doc_text: &str,
     results: &HashMap<usize, KernelResult>,
     stale: &[usize],
+) -> Vec<KernelMenuRow> {
+    rows_for_doc_with(doc_text, results, stale, MenuKindFilter::All)
+}
+
+/// [`rows_for_doc`] under a per-kind filter: only statements the
+/// filter allows are listed. Same derived-state contract; the filter
+/// never touches the doc or the bridge.
+pub fn rows_for_doc_with(
+    doc_text: &str,
+    results: &HashMap<usize, KernelResult>,
+    stale: &[usize],
+    filter: MenuKindFilter,
 ) -> Vec<KernelMenuRow> {
     let scan = mathed_core::markers::scan(doc_text);
     let segments = mathed_core::markers::resolve_segments(&scan);
@@ -124,7 +178,7 @@ pub fn rows_for_doc(
 
     idx.kernel_statements
         .iter()
-        .filter(|s| is_menu_statement(s.kind))
+        .filter(|s| is_menu_statement(s.kind) && filter.allows(s.kind))
         .map(|s| {
             let block = block_of(s.span.start);
             let tag = match s.kind {
@@ -169,12 +223,21 @@ pub fn blocks_to_run(rows: &[KernelMenuRow]) -> Vec<usize> {
 
 /// The dimmed one-line footer under the rows (a static hint — no
 /// user content, so no escaping needed), returned as ready markup
-/// the caller appends to the rows' markup block.
-pub fn footer_hint_markup(rows_len: usize) -> String {
+/// the caller appends to the rows' markup block. Names the current
+/// per-kind filter and the `f` key that cycles it.
+pub fn footer_hint_markup(rows_len: usize, filter: MenuKindFilter) -> String {
     let hint = if rows_len == 0 {
-        "no exec/kernel blocks — esc to close".to_string()
+        format!(
+            "no {} blocks — f: filter ({} · esc: close)",
+            filter.label(),
+            filter.next().label()
+        )
     } else {
-        "enter: run block · shift+enter: run all · esc: close".to_string()
+        format!(
+            "enter: run block · shift+enter: run all · f: filter ({} · {})",
+            filter.label(),
+            filter.next().label()
+        )
     };
     format!("#text(fill: rgb(\"#808080\"))[{hint}]\n")
 }
@@ -297,9 +360,9 @@ mod tests {
         let rows = rows_for_doc(doc, &HashMap::new(), &[]);
         // The app composes footer + rows into one markup block: it
         // must stay parseable (no escaping gaps) and the footer must
-        // name the run-all action.
+        // name the run-all action and the current filter.
         let mut markup = rows_markup(&rows, 0);
-        markup.push_str(&footer_hint_markup(rows.len()));
+        markup.push_str(&footer_hint_markup(rows.len(), MenuKindFilter::All));
         let parsed = typst::syntax::parse(&markup);
         let (errors, _) = parsed.errors_and_warnings();
         assert!(errors.is_empty(), "menu + footer parses: {errors:?}");
@@ -307,12 +370,49 @@ mod tests {
             markup.contains("shift+enter: run all"),
             "footer advertises the run-all action: {markup}"
         );
-        // An empty menu still draws a footer (never a bare overlay).
-        let empty = footer_hint_markup(0);
         assert!(
-            empty.contains("no exec/kernel blocks"),
-            "empty-menu hint: {empty}"
+            markup.contains("f: filter (all · exec)"),
+            "footer names the filter + next state: {markup}"
         );
+        // An empty menu still draws a footer (never a bare overlay).
+        let empty = footer_hint_markup(0, MenuKindFilter::Kernel);
+        assert!(
+            empty.contains("no kernel blocks"),
+            "empty-menu hint names the filter: {empty}"
+        );
+    }
+
+    #[test]
+    fn kind_filter_narrows_rows_without_touching_the_doc() {
+        let doc = "= A\n\
+                   #1 echo hi #2 \\exec(#1,#2, grants: \"readonly\", name: greet)\n\n\
+                   #3 2 + 2 #4 \\kernel(#3,#4, lang: \"mathed\", grants: \"kernel\")\n";
+        let all = rows_for_doc(doc, &HashMap::new(), &[]);
+        assert_eq!(all.len(), 2, "both kinds under All: {all:?}");
+
+        let exec_only = rows_for_doc_with(doc, &HashMap::new(), &[], MenuKindFilter::Exec);
+        assert_eq!(exec_only.len(), 1, "exec filter: {exec_only:?}");
+        assert!(
+            exec_only[0].text.contains("exec: echo hi"),
+            "only the exec row: {exec_only:?}"
+        );
+
+        let kernel_only = rows_for_doc_with(doc, &HashMap::new(), &[], MenuKindFilter::Kernel);
+        assert_eq!(kernel_only.len(), 1, "kernel filter: {kernel_only:?}");
+        assert!(
+            kernel_only[0].text.contains("kernel[mathed]"),
+            "only the kernel row: {kernel_only:?}"
+        );
+
+        // The cycle is closed and the labels round-trip.
+        assert_eq!(MenuKindFilter::All.next(), MenuKindFilter::Exec);
+        assert_eq!(MenuKindFilter::Exec.next(), MenuKindFilter::Kernel);
+        assert_eq!(MenuKindFilter::Kernel.next(), MenuKindFilter::All);
+        assert_eq!(MenuKindFilter::All.label(), "all");
+        assert!(MenuKindFilter::All.allows(PropKind::Exec));
+        assert!(MenuKindFilter::All.allows(PropKind::Kernel));
+        assert!(!MenuKindFilter::Exec.allows(PropKind::Kernel));
+        assert!(!MenuKindFilter::Kernel.allows(PropKind::Exec));
     }
 
     #[test]

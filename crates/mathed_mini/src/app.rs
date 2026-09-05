@@ -157,8 +157,16 @@ struct App {
     /// the doc + the bridge's live results each time it opens or a
     /// row re-runs; Enter re-runs the selected row's block, Up/Down
     /// move, Esc dismisses. The document is never modified.
+    /// F1: the shortcut help overlay — static reflowable text, drawn
+    /// like the other overlays; Esc dismisses. Derived from nothing:
+    /// a pure const table.
+    help_overlay: bool,
     kernel_menu: Option<Vec<crate::kernel_menu::KernelMenuRow>>,
     kernel_menu_selected: usize,
+    /// Per-kind menu filter (`f` cycles all → exec → kernel).
+    /// Persisted across opens like the selection, so a filter set in
+    /// one session is the one the next open shows.
+    kernel_menu_filter: crate::kernel_menu::MenuKindFilter,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -241,8 +249,10 @@ impl App {
             references_panel: None,
             references_panel_height: 0,
             template_preview: None,
+            help_overlay: false,
             kernel_menu: None,
             kernel_menu_selected: 0,
+            kernel_menu_filter: crate::kernel_menu::MenuKindFilter::default(),
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -397,22 +407,54 @@ impl App {
 
     /// T9: toggle the rendered-template preview overlay (Ctrl+P).
     /// Runs the same headless pipeline as `--render-typst`; the
+    /// Toggle the shortcut help overlay (F1): static markup, Esc
+    /// dismisses (folded into the same Esc chain as the other
+    /// overlays). Never touches the doc.
+    fn toggle_help_overlay(&mut self) {
+        self.help_overlay = !self.help_overlay;
+        self.request_redraw();
+    }
+
     /// Toggle the kernel statements menu (Ctrl+K): open = recompute
     /// the `\exec` / `\kernel` rows from the current doc + bridge
-    /// state; close = dismiss. See [`Self::run_kernel_menu_selected`].
+    /// state (under the persisted per-kind filter); close = dismiss.
+    /// The selection survives the close, so reopening lands where the
+    /// user left off (clamped when the row set shrank). See
+    /// [`Self::run_kernel_menu_selected`].
     fn toggle_kernel_menu(&mut self) {
         if self.kernel_menu.is_some() {
             self.kernel_menu = None;
         } else {
-            let text = self.doc.text().to_string();
-            self.kernel_menu = Some(crate::kernel_menu::rows_for_doc(
-                &text,
-                self.bridge.results(),
-                &self.bridge.stale_blocks(),
-            ));
+            self.refresh_kernel_menu_rows();
+        }
+        self.request_redraw();
+    }
+
+    /// Recompute the open menu's rows from the current doc + bridge
+    /// state under the current filter, clamping the selection to the
+    /// row set. Called on open, after a run, and on filter change.
+    fn refresh_kernel_menu_rows(&mut self) {
+        let text = self.doc.text().to_string();
+        self.kernel_menu = Some(crate::kernel_menu::rows_for_doc_with(
+            &text,
+            self.bridge.results(),
+            &self.bridge.stale_blocks(),
+            self.kernel_menu_filter,
+        ));
+        let n = self.kernel_menu.as_ref().map_or(0, |r| r.len());
+        if n > 0 && self.kernel_menu_selected >= n {
+            self.kernel_menu_selected = n - 1;
+        } else if n == 0 {
             self.kernel_menu_selected = 0;
         }
         self.request_redraw();
+    }
+
+    /// Cycle the per-kind menu filter (`f` while the menu is open) and
+    /// rebuild the rows under the new filter.
+    fn cycle_kernel_menu_filter(&mut self) {
+        self.kernel_menu_filter = self.kernel_menu_filter.next();
+        self.refresh_kernel_menu_rows();
     }
 
     /// Re-run every row's block (Shift+Enter in the kernel menu) —
@@ -432,12 +474,7 @@ impl App {
             self.invalidate_annotations();
         }
         self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
-        self.kernel_menu = Some(crate::kernel_menu::rows_for_doc(
-            &text,
-            self.bridge.results(),
-            &self.bridge.stale_blocks(),
-        ));
-        self.request_redraw();
+        self.refresh_kernel_menu_rows();
     }
 
     /// Re-run the selected row's block (Enter in the kernel menu) —
@@ -459,12 +496,7 @@ impl App {
         }
         self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
         // Refresh the rows so the region status column updates.
-        self.kernel_menu = Some(crate::kernel_menu::rows_for_doc(
-            &text,
-            self.bridge.results(),
-            &self.bridge.stale_blocks(),
-        ));
-        self.request_redraw();
+        self.refresh_kernel_menu_rows();
     }
 
     /// document is never modified.
@@ -1432,11 +1464,24 @@ impl App {
         // Esc dismisses. Derived state; never touches the document.
         if let Some(rows) = &self.kernel_menu {
             let mut markup = crate::kernel_menu::rows_markup(rows, self.kernel_menu_selected);
-            markup.push_str(&crate::kernel_menu::footer_hint_markup(rows.len()));
+            markup.push_str(&crate::kernel_menu::footer_hint_markup(
+                rows.len(),
+                self.kernel_menu_filter,
+            ));
             if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
                 blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
             }
         }
+
+        // Shortcut help overlay (F1): one reflowable markup block at
+        // the window width, drawn top-left above the other overlays;
+        // Esc dismisses. Static content — never touches the doc.
+        if self.help_overlay
+            && let Ok(img) =
+                crate::render::render_markup(&crate::help_overlay::markup(), size.width as f64)
+            {
+                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
+            }
 
         // Popup boxes.
         if !self.popup_stack.is_empty() {
@@ -2008,10 +2053,15 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 // Kernel menu navigation: while the menu is open,
-                // Up/Down move the selection (the citation-popup
-                // cycling precedent); every other key falls through.
+                // Up/Down move the selection, `f` cycles the per-kind
+                // filter (the citation-popup cycling precedent);
+                // every other key falls through.
                 if self.kernel_menu.is_some() {
                     match &logical_key {
+                        Key::Character(c) if c.eq_ignore_ascii_case("f") => {
+                            self.cycle_kernel_menu_filter();
+                            return;
+                        }
                         Key::Named(NamedKey::ArrowUp) => {
                             self.kernel_menu_selected = self.kernel_menu_selected.saturating_sub(1);
                             self.request_redraw();
@@ -2041,6 +2091,11 @@ impl ApplicationHandler<UserEvent> for App {
                         if self.completion.pending.is_some() {
                             self.completion.cancel();
                             self.request_redraw();
+                        } else if self.help_overlay {
+                            // The help overlay is the topmost overlay:
+                            // Esc closes it before anything below.
+                            self.help_overlay = false;
+                            self.request_redraw();
                         } else if self.template_preview.take().is_some()
                             || self.kernel_menu.take().is_some()
                         {
@@ -2051,6 +2106,11 @@ impl ApplicationHandler<UserEvent> for App {
                             self.pop_cite_popup(None);
                             self.push_a11y_update();
                         }
+                    }
+                    Key::Named(NamedKey::F1) => {
+                        // Shortcut help overlay (TUI convention: F1
+                        // is help everywhere).
+                        self.toggle_help_overlay();
                     }
                     Key::Named(NamedKey::Backspace) => {
                         self.backspace();

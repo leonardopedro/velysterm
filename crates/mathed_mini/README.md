@@ -23,8 +23,12 @@ the doc stays the source of truth).
   snippet, region status: `✓ …`, `✗ UK-code`, `· not run`, `stale`);
   Up/Down pick, Enter re-runs that block, Shift+Enter re-runs every
   listed block (the menu's run-all, same deduplicated set each time),
-  Esc dismisses. Rows are plain text escaped and reflowed at the
-  window width (never fixed-width widgets).
+  `f` cycles a per-kind filter (all → exec → kernel), the selection
+  and filter survive reopening (clamped to the row set), Esc
+  dismisses. Rows are plain text escaped and reflowed at the window
+  width (never fixed-width widgets).
+- **Shortcut help** — `F1` opens the keyboard reference as the same
+  kind of reflowable overlay; Esc closes.
 - **Run all** — `Ctrl+Shift+Enter` re-issues every block.
 - **Clear outputs** — `Ctrl+Shift+K` empties the regions only; the doc
   and the run log are untouched.
@@ -64,6 +68,13 @@ the doc stays the source of truth).
 - **Rich outputs** — NDJSON rows in exec stdout render as a Typst
   table in the region, and `ctx.exec` feeds the same rows to
   templates for figures.
+- **Rich kernel MIME** — a real kernel's `display_data`/`execute_result`
+  data dict keeps every string-valued payload (`text/plain` first,
+  then `image/png`, `text/html`, …) through the run log, `ctx.kernel`,
+  and the `.ipynb` projection; the TUI region renders `text/plain` as
+  text and the rich payloads as a terse size marker (`[image/png ·
+  12 kB]`) — payloads are never dropped, base64/HTML is never dumped
+  into region text.
 
 ## Input + interchange (U-series)
 
