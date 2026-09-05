@@ -348,6 +348,7 @@ impl KernelWorker {
     /// output cap, and every attempt is audited. All failures answer a
     /// UK-49xx `Error`; exit 0 answers [`BlockResponse::Exec`] with
     /// stdout.
+    #[allow(clippy::too_many_arguments)] // the request's fields, one per param
     fn handle_exec(
         &mut self,
         block_id: BlockId,

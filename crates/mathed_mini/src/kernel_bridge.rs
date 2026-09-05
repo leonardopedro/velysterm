@@ -34,7 +34,7 @@ use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src, statement_to_event_json,
-    statement_to_exec_request, statement_to_exec_request_with_stdin, statement_to_model_spec,
+    statement_to_exec_request_with_stdin, statement_to_model_spec,
 };
 use crate::translate::{TranslateError, Translator};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
