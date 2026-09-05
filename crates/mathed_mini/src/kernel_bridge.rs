@@ -80,14 +80,34 @@ fn fold_kernel_outputs(outputs: &[kernel_client::KernelOutput]) -> KernelResult 
     for o in outputs {
         match o {
             KernelOutput::Stream { text: t, .. } => text.push_str(t),
-            KernelOutput::Result { data, .. } => {
+            // `text/plain` results display as their text; every other
+            // MIME payload — the rich outputs a real kernel's
+            // display_data carries — is kept verbatim in the run
+            // record / `ctx.kernel` / `.ipynb` projection but shows a
+            // terse marker in the region (dumping base64 or HTML
+            // source into TUI text helps nobody).
+            KernelOutput::Result { mime, data } if mime == "text/plain" => {
                 text.push_str(data);
                 text.push('\n');
+            }
+            KernelOutput::Result { mime, data } => {
+                text.push_str(&format!("[{mime} · {}]\n", human_bytes(data.len())));
             }
             KernelOutput::Error { .. } => {}
         }
     }
     KernelResult::StringValue(text)
+}
+
+/// A byte count rendered for the region's rich-MIME markers.
+fn human_bytes(n: usize) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} kB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 /// One completed kernel run, appended to the bridge's run log when a
@@ -3213,5 +3233,50 @@ esac
                 .all(|e| e.op != "kernel" || !e.outputs.is_empty()),
             "every kernel entry has outputs"
         );
+    }
+
+    #[test]
+    fn rich_mime_results_mark_in_the_region_but_stay_verbatim_on_the_log() {
+        use kernel_client::KernelOutput;
+        // A real kernel's display_data may carry image/png or
+        // text/html payloads alongside text/plain: the region fold
+        // renders the text/plain as text and the rich payloads as a
+        // terse size marker (never base64 or HTML source dumped into
+        // TUI text) — the verbatim payloads live on the run-log
+        // entry for the record / ctx / .ipynb consumers.
+        let html = format!("<b>{}</b>", "x".repeat(5000));
+        let folded = fold_kernel_outputs(&[
+            KernelOutput::Result {
+                mime: "text/plain".to_string(),
+                data: "n = 2\n".to_string(),
+            },
+            KernelOutput::Result {
+                mime: "image/png".to_string(),
+                data: "iVBORw0KGgo".to_string(),
+            },
+            KernelOutput::Result {
+                mime: "text/html".to_string(),
+                data: html.clone(),
+            },
+        ]);
+        match &folded {
+            KernelResult::StringValue(s) => {
+                assert!(s.contains("n = 2"), "text/plain renders: {s:?}");
+                assert!(
+                    s.contains("[image/png · 11 B]"),
+                    "png marker with size: {s:?}"
+                );
+                assert!(
+                    s.contains("[text/html · 4.9 kB]"),
+                    "html marker with size: {s:?}"
+                );
+                assert!(!s.contains("iVBOR"), "base64 never dumped: {s:?}");
+                assert!(!s.contains("<b>"), "html source never dumped: {s:?}");
+            }
+            other => panic!("expected StringValue fold, got {other:?}"),
+        }
+        // The payloads themselves are untouched for the rich
+        // consumers (the fold only shapes the region's one result).
+        assert_eq!(html.len(), 5007, "payload kept as built");
     }
 }

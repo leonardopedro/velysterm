@@ -131,15 +131,48 @@ pub fn outputs_from_messages(msgs: &[serde_json::Value]) -> Vec<KernelOutput> {
             }
             Some("execute_result") | Some("display_data") => {
                 let data = content.get("data");
-                let text = data
+                // MIME-faithful v1: every *string-valued* payload in
+                // the data dict survives as its own Result —
+                // `text/plain` first (the display order convention),
+                // then the rest — so rich payloads (`image/png`,
+                // `text/html`, …) are carried into the run record,
+                // `ctx.kernel`, and the `.ipynb` projection instead of
+                // being dropped. A data dict with no string payload
+                // falls back to its JSON dump (never a silent drop).
+                let mut emitted = false;
+                if let Some(t) = data
                     .and_then(|d| d.get("text/plain"))
                     .and_then(|t| t.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| data.map(|d| d.to_string()).unwrap_or_default());
-                out.push(KernelOutput::Result {
-                    mime: "text/plain".to_string(),
-                    data: text,
-                });
+                {
+                    out.push(KernelOutput::Result {
+                        mime: "text/plain".to_string(),
+                        data: t.to_string(),
+                    });
+                    emitted = true;
+                }
+                if let Some(map) = data.and_then(|d| d.as_object()) {
+                    for (mime, v) in map {
+                        if mime == "text/plain" {
+                            continue;
+                        }
+                        if let Some(s) = v.as_str() {
+                            out.push(KernelOutput::Result {
+                                mime: mime.clone(),
+                                data: s.to_string(),
+                            });
+                            emitted = true;
+                        }
+                    }
+                }
+                if !emitted {
+                    let text = data.map(|d| d.to_string()).unwrap_or_default();
+                    if !text.is_empty() {
+                        out.push(KernelOutput::Result {
+                            mime: "text/plain".to_string(),
+                            data: text,
+                        });
+                    }
+                }
             }
             Some("error") => out.push(KernelOutput::Error {
                 ename: content
@@ -211,6 +244,73 @@ mod tests {
             ],
             "wire content normalized to the op's output contract"
         );
+    }
+
+    #[test]
+    fn multi_mime_data_dicts_keep_every_string_payload() {
+        // A real kernel's display_data carries a *dict* of mimes: the
+        // normalization must keep text/plain first and then every
+        // other string-valued payload (image/png base64, text/html),
+        // so rich outputs survive to the record / ctx / .ipynb.
+        let msgs = vec![
+            serde_json::json!({ "msg_type": "display_data", "content": {
+                "output_type": "display_data",
+                "data": {
+                    "text/plain": "a plot",
+                    "image/png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+                    "text/html": "<svg></svg>",
+                },
+            }}),
+            serde_json::json!({ "msg_type": "execute_result", "content": {
+                "output_type": "execute_result",
+                "data": { "text/html": "<b>hi</b>" },
+            }}),
+        ];
+        let outputs = outputs_from_messages(&msgs);
+        assert_eq!(
+            outputs,
+            vec![
+                KernelOutput::Result {
+                    mime: "text/plain".to_string(),
+                    data: "a plot".to_string(),
+                },
+                KernelOutput::Result {
+                    mime: "image/png".to_string(),
+                    data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB".to_string(),
+                },
+                KernelOutput::Result {
+                    mime: "text/html".to_string(),
+                    data: "<svg></svg>".to_string(),
+                },
+                KernelOutput::Result {
+                    mime: "text/html".to_string(),
+                    data: "<b>hi</b>".to_string(),
+                },
+            ],
+            "every string payload survives, text/plain first"
+        );
+    }
+
+    #[test]
+    fn data_dict_without_string_payloads_falls_back_not_drops() {
+        // Non-string mime values (nested JSON) have no v1 string
+        // home: the whole dict is kept as a JSON text/plain dump so
+        // nothing is silently dropped.
+        let msgs = vec![
+            serde_json::json!({ "msg_type": "execute_result", "content": {
+                "output_type": "execute_result",
+                "data": { "application/json": { "a": [1, 2] } },
+            }}),
+        ];
+        let outputs = outputs_from_messages(&msgs);
+        assert_eq!(outputs.len(), 1);
+        match &outputs[0] {
+            KernelOutput::Result { mime, data } => {
+                assert_eq!(mime, "text/plain");
+                assert!(data.contains("application/json"), "dump kept: {data}");
+            }
+            o => panic!("expected a Result dump, got {o:?}"),
+        }
     }
 
     #[test]
