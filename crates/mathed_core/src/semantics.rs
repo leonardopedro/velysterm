@@ -102,6 +102,11 @@ pub struct KernelStatement {
     /// the grant is honored (deny-by-default). `None` for every other
     /// kind.
     pub grants: Option<String>,
+    /// N7: `\exec` only — the `from: #ref` pipe source: the marker
+    /// id of the *referenced* `\exec` segment whose latest stdout is
+    /// threaded into this segment's stdin. `None` for every other
+    /// kind (and for execs without a `from:`).
+    pub from: Option<String>,
     pub span: Range<usize>,
 }
 
@@ -300,6 +305,11 @@ impl SemanticIndex {
                 PropKind::Exec => extract_named_string(&seg.extra_args, "grants"),
                 _ => None,
             };
+            // N7: `\exec(from: #ref)` — the pipe source marker id.
+            let from = match seg.kind {
+                PropKind::Exec => extract_named_string(&seg.extra_args, "from"),
+                _ => None,
+            };
             let name = match (name, seg.kind) {
                 (None, PropKind::Exec) => extract_named_string(&seg.extra_args, "name"),
                 (name, _) => name,
@@ -313,6 +323,7 @@ impl SemanticIndex {
                 model_name,
                 condition_event,
                 grants,
+                from,
                 span,
             });
         }

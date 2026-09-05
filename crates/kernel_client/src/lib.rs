@@ -59,6 +59,10 @@ pub enum KernelRequest {
     /// `cap_bytes`. Exit 0 answers `BlockResponse::Exec` with stdout;
     /// any failure answers a UK-4908/4909/4910 `Error`. Execution lives
     /// in the worker, never in the editor process.
+    /// N7: `stdin` (additive) is the text written to the child's
+    /// stdin before its output is read — the `\exec(from: #ref)`
+    /// pipe seam; empty means no stdin (N4 behavior). Bounded by the
+    /// same `cap_bytes`.
     Exec {
         block_id: BlockId,
         command: String,
@@ -66,6 +70,7 @@ pub enum KernelRequest {
         grants: Vec<String>,
         timeout_ms: u64,
         cap_bytes: usize,
+        stdin: String,
     },
     Shutdown,
     /// Test-only: injects a deterministic panic into the worker's

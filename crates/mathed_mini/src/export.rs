@@ -1168,13 +1168,20 @@ mod tests {
         let doc = concat!(
             "= Title\n\n",
             "#1 #let render(ctx) = \"#box[t]\" #2 \\template(#1,#2, name: e)\n\n",
-            "#3 #let render(ctx) = ctx.at(\"body\") #4 \\base(#3,#4, name: wrap)\n\n",
-            family,
-            "\n",
+            "#3 #let render(ctx) = ctx.at(\"body\") + ctx.at(\"templates\").at(\"e\") #4 ",
+            "\\base(#3,#4, name: wrap)\n\n",
+            "\u{1F469}\u{200D}\u{1F52C}\n",
         );
         let out = preview_template(doc).expect("render");
         assert!(out.contains(family), "doc clusters intact: {out}");
-        assert!(out.contains("#box[t]"), "template output present: {out}");
+        assert!(
+            out.contains("#box[t]"),
+            "template output reached the base via ctx.templates: {out}"
+        );
+        assert!(
+            !out.contains("render(ctx) = ctx.at"),
+            "base body collapses into a code panel in the body markup: {out}"
+        );
     }
 
     #[test]

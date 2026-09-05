@@ -45,6 +45,10 @@ pub const EXEC_GRANT_VOCABULARIES: &[(&str, &[&str])] = &[
         ],
     ),
     ("compute", &["bc"]),
+    // N7: `data` — text/JSON processing over pipes (the bash-role
+    // filter stage); `jq` for JSON, `awk` for text. Still no shell:
+    // one command + literal args under the grant gate.
+    ("data", &["jq", "awk"]),
 ];
 
 pub struct KernelWorker {
@@ -326,7 +330,8 @@ impl KernelWorker {
                 grants,
                 timeout_ms,
                 cap_bytes,
-            } => self.handle_exec(block_id, command, args, grants, timeout_ms, cap_bytes),
+                stdin,
+            } => self.handle_exec(block_id, command, args, grants, timeout_ms, cap_bytes, stdin),
             KernelRequest::Shutdown => {
                 unreachable!("run() breaks on Shutdown before dispatching")
             }
@@ -351,6 +356,7 @@ impl KernelWorker {
         grants: Vec<String>,
         timeout_ms: u64,
         cap_bytes: usize,
+        stdin: String,
     ) {
         // 1. Grant check: the first requested grant present in the
         // configured allowlist wins; none configured = deny everything.
@@ -427,16 +433,42 @@ impl KernelWorker {
             return;
         }
 
+        // 3b. N7: the pipe seam — stdin is bounded by the same
+        // output cap, so an oversized pipe fails closed instead of
+        // filling a pipe.
+        if !stdin.is_empty() && stdin.len() > cap_bytes {
+            self.audit_exec(Some(grant.to_string()), &command, "failed");
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!(
+                        "exec failed: stdin is {} bytes, over the {} byte cap",
+                        stdin.len(),
+                        cap_bytes
+                    ),
+                    Severity::Error,
+                ),
+            ));
+            return;
+        }
+
         // 4. Run under timeout + cap. The child is polled so a
         // non-exiting process is killed at the deadline; pipes are
-        // drained only after exit, so draining cannot hang.
+        // drained only after exit, so draining cannot hang. A
+        // non-empty `stdin` is piped (written on a thread so a
+        // child that never reads it cannot deadlock the worker).
         let started = Instant::now();
-        let mut child = match Command::new(&command)
-            .args(&args)
-            .stdin(Stdio::null())
+        let mut cmd = Command::new(&command);
+        cmd.args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        if stdin.is_empty() {
+            cmd.stdin(Stdio::null());
+        } else {
+            cmd.stdin(Stdio::piped());
+        }
+        let mut child = match cmd.spawn()
         {
             Ok(c) => c,
             Err(e) => {
@@ -452,6 +484,16 @@ impl KernelWorker {
                 return;
             }
         };
+        if !stdin.is_empty() {
+            let child_stdin = child.stdin.take();
+            let data = stdin.clone();
+            std::thread::spawn(move || {
+                if let Some(mut s) = child_stdin {
+                    use std::io::Write as _;
+                    let _ = s.write_all(data.as_bytes());
+                }
+            });
+        }
         let deadline = started + Duration::from_millis(timeout_ms.max(1));
         let timed_out = loop {
             match child.try_wait() {
@@ -1003,6 +1045,25 @@ mod tests {
             grants: vec![grant.to_string()],
             timeout_ms: 1000,
             cap_bytes: 4096,
+            stdin: String::new(),
+        }
+    }
+
+    fn exec_request_with_stdin(
+        block_id: u64,
+        command: &str,
+        args: &[&str],
+        grant: &str,
+        stdin: &str,
+    ) -> KernelRequest {
+        KernelRequest::Exec {
+            block_id,
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            grants: vec![grant.to_string()],
+            timeout_ms: 1000,
+            cap_bytes: 4096,
+            stdin: stdin.to_string(),
         }
     }
 
@@ -1063,6 +1124,37 @@ mod tests {
     }
 
     #[test]
+    fn exec_stdin_reaches_the_command() {
+        // N7: `cat` with piped stdin echoes it back — the pipe seam
+        // works end to end through the worker.
+        let h = Harness::with_grants(&["readonly"]);
+        let resp = h.send(exec_request_with_stdin(6, "cat", &[], "readonly", "piped\n"));
+        match resp {
+            BlockResponse::Exec(id, out) => {
+                assert_eq!(id, 6);
+                assert_eq!(out.trim(), "piped");
+            }
+            other => panic!("expected Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_stdin_over_cap_fails_closed() {
+        // N7: an oversized pipe fails with UK-4910 instead of
+        // filling a pipe.
+        let h = Harness::with_grants(&["readonly"]);
+        let big = "x".repeat(5000); // cap is 4096 in the test helper
+        let resp = h.send(exec_request_with_stdin(7, "cat", &[], "readonly", &big));
+        match resp {
+            BlockResponse::Error(_, diag) => {
+                assert_eq!(diag.code, Code::EXEC_FAILED);
+                assert!(diag.message.contains("stdin"), "got: {}", diag.message);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn exec_nonzero_exit_returns_uk4910_with_code() {
         let h = Harness::with_grants(&["readonly"]);
         // `false` exits 1 with no stderr.
@@ -1087,6 +1179,7 @@ mod tests {
             grants: vec!["readonly".to_string()],
             timeout_ms: 200,
             cap_bytes: 4096,
+            stdin: String::new(),
         });
         assert!(
             start.elapsed() < std::time::Duration::from_secs(10),
@@ -1114,6 +1207,7 @@ mod tests {
             grants: vec!["readonly".to_string()],
             timeout_ms: 1000,
             cap_bytes: 100,
+            stdin: String::new(),
         });
         match resp {
             BlockResponse::Exec(_, out) => {
@@ -1138,6 +1232,7 @@ mod tests {
             vec!["readonly".to_string()],
             1000,
             4096,
+            String::new(),
         );
         w.handle_exec(
             2,
@@ -1146,6 +1241,7 @@ mod tests {
             vec!["readonly".to_string()],
             1000,
             4096,
+            String::new(),
         );
         let audit = w.exec_audit();
         assert_eq!(audit.len(), 2);
@@ -1163,6 +1259,7 @@ mod tests {
             vec!["readonly".to_string()],
             1000,
             4096,
+            String::new(),
         );
         assert_eq!(w2.exec_audit()[0].outcome, "grant-denied");
     }

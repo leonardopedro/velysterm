@@ -331,7 +331,12 @@ pub fn to_render_text_range(
     // *mechanism* as everything else.
     let translator_spans: Vec<(Range<usize>, &Segment)> = segments
         .iter()
-        .filter(|seg| seg.kind == PropKind::Translator || seg.kind == PropKind::Template)
+        .filter(|seg| {
+            matches!(
+                seg.kind,
+                PropKind::Translator | PropKind::Template | PropKind::Base
+            )
+        })
         .filter_map(|seg| {
             let span = seg.span.clone()?;
             if span.start >= range.end || span.end <= range.start {

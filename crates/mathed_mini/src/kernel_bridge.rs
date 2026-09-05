@@ -34,7 +34,7 @@ use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src, statement_to_event_json,
-    statement_to_exec_request, statement_to_model_spec,
+    statement_to_exec_request, statement_to_exec_request_with_stdin, statement_to_model_spec,
 };
 use crate::translate::{TranslateError, Translator};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
@@ -119,9 +119,13 @@ pub struct KernelBridge {
     /// prob offset → hash of the last-dispatched (prob body, model
     /// body) pair.
     prob_hashes: HashMap<usize, u64>,
-    /// exec offset → hash of the last-dispatched (command, grants)
-    /// pair (N4: `\exec` scripted segments).
+    /// exec offset → hash of the last-dispatched (command, grants,
+    /// resolved stdin) triple (N4: `\exec` scripted segments; N7:
+    /// stdin joins the hash so a changed upstream re-pipes).
     exec_hashes: HashMap<usize, u64>,
+    /// N7: pipe edges — exec offset → the offset of the exec its
+    /// `from:` references (staleness propagates along these edges).
+    from_edges: HashMap<usize, usize>,
     /// Statement offsets present in the last-refreshed index. `poll`
     /// drops any late response whose key is not live so a
     /// deleted statement can never resurrect a stale annotation,
@@ -163,6 +167,7 @@ impl KernelBridge {
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
             exec_hashes: HashMap::new(),
+            from_edges: HashMap::new(),
             translator_errors: HashMap::new(),
             live: HashSet::new(),
             pending: HashMap::new(),
@@ -186,6 +191,7 @@ impl KernelBridge {
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
             exec_hashes: HashMap::new(),
+            from_edges: HashMap::new(),
             translator_errors: HashMap::new(),
             live: HashSet::new(),
             pending: HashMap::new(),
@@ -663,22 +669,47 @@ impl KernelBridge {
             }
         }
 
-        // N4: dispatch each `\exec` whose (command, grants) changed.
-        // The worker enforces grants (deny-by-default) and answers
-        // UK-49xx on denial/failure; stdout lands via `poll`'s Exec
-        // arm and renders in the block's output region.
+        // N4: dispatch each `\exec` whose (command, grants, resolved
+        // stdin) changed. The worker enforces grants (deny-by-default)
+        // and answers UK-49xx on denial/failure; stdout lands via
+        // `poll`'s Exec arm and renders in the block's output region.
+        // N7: stdin joins the hash, so a changed upstream re-pipes
+        // (the pipe resolves the referenced stdout at dispatch time).
+        // The pipe-segment scan is skipped when no statement has a
+        // `from:` — the common path pays nothing.
+        let (pipe_segments, pipe_markers) = pipe_segments_for(doc_text, idx);
         for stmt in idx
             .kernel_statements
             .iter()
             .filter(|s| s.kind == PropKind::Exec)
         {
-            let h = hash_many(&[&stmt.body_text, stmt.grants.as_deref().unwrap_or("")]);
+            let stdin = self.exec_stdin_for(stmt, &pipe_segments, &pipe_markers);
+            let h = hash_many(&[
+                &stmt.body_text,
+                stmt.grants.as_deref().unwrap_or(""),
+                &stdin,
+            ]);
             self.cur_hashes.insert(stmt.span.start, h);
             if self.exec_hashes.get(&stmt.span.start) == Some(&h) {
                 continue;
             }
-            self.submit_or_error(stmt.span.start as u64, statement_to_exec_request(stmt));
+            self.submit_or_error(
+                stmt.span.start as u64,
+                statement_to_exec_request_with_stdin(stmt, &stdin),
+            );
             self.exec_hashes.insert(stmt.span.start, h);
+        }
+
+        // N7: record the pipe edges for staleness propagation.
+        self.from_edges.clear();
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Exec)
+        {
+            if let Some(src) = resolve_from_offset(stmt, &pipe_segments, &pipe_markers) {
+                self.from_edges.insert(stmt.span.start, src);
+            }
         }
 
         // Reconcile every scratch map against the statements now in
@@ -916,14 +947,26 @@ impl KernelBridge {
         // Re-run every in-block `\exec` (forced — the notebook
         // "run cell" affordance for scripted segments). Grants are
         // enforced by the worker; denial/failure surfaces via `poll`.
+        // N7: the pipe resolves the referenced stdout at dispatch
+        // time — re-running the block is how a pipe re-reads an
+        // upstream that ran earlier.
+        let (pipe_segments, pipe_markers) = pipe_segments_for(doc_text, &idx);
         for stmt in idx
             .kernel_statements
             .iter()
             .filter(|s| s.kind == PropKind::Exec && in_block(s))
         {
-            let h = hash_many(&[&stmt.body_text, stmt.grants.as_deref().unwrap_or("")]);
+            let stdin = self.exec_stdin_for(stmt, &pipe_segments, &pipe_markers);
+            let h = hash_many(&[
+                &stmt.body_text,
+                stmt.grants.as_deref().unwrap_or(""),
+                &stdin,
+            ]);
             self.cur_hashes.insert(stmt.span.start, h);
-            self.submit_or_error(stmt.span.start as u64, statement_to_exec_request(stmt));
+            self.submit_or_error(
+                stmt.span.start as u64,
+                statement_to_exec_request_with_stdin(stmt, &stdin),
+            );
             self.exec_hashes.insert(stmt.span.start, h);
         }
 
@@ -1016,7 +1059,41 @@ impl KernelBridge {
                 stale.insert(block);
             }
         }
+        // N7: a block is stale when any `\exec(from:)` pipe source
+        // lives in a stale block (hash propagation along pipe edges,
+        // to a fixpoint for chains).
+        loop {
+            let mut added = false;
+            for (&off, &src) in &self.from_edges {
+                let (Some(&b), Some(&sb)) = (self.stmt_blocks.get(&off), self.stmt_blocks.get(&src))
+                else {
+                    continue;
+                };
+                if stale.contains(&sb) && !stale.contains(&b) {
+                    stale.insert(b);
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
         stale.into_iter().collect()
+    }
+
+    /// N7: the stdin threaded into a `\exec(from:)` — the referenced
+    /// segment's latest stdout (empty when unresolvable or not yet
+    /// computed).
+    fn exec_stdin_for(
+        &self,
+        stmt: &KernelStatement,
+        segments: &[Segment],
+        markers: &[mathed_core::markers::Marker],
+    ) -> String {
+        match resolve_from_offset(stmt, segments, markers).and_then(|off| self.results.get(&off)) {
+            Some(KernelResult::StringValue(s)) => s.clone(),
+            _ => String::new(),
+        }
     }
 
     /// Outputs grouped to a block (the notebook "cell" view of
@@ -1127,6 +1204,43 @@ impl KernelBridge {
 /// block): scan → segments → render → semantic index. The kernel
 /// refresh and the accessibility tree consume the SAME result, so an
 /// edit runs this once, never once per consumer.
+/// N7: the (segments, marker positions) needed for pipe resolution
+/// — only when some `\exec` carries a `from:` (the common no-pipe
+/// path scans nothing, so the keystroke path pays no extra scan).
+fn pipe_segments_for(
+    doc_text: &str,
+    idx: &SemanticIndex,
+) -> (Vec<Segment>, Vec<mathed_core::markers::Marker>) {
+    if idx.kernel_statements.iter().any(|s| s.from.is_some()) {
+        let s = scan(doc_text);
+        let markers = s.markers.clone();
+        (resolve_segments(&s), markers)
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
+/// N7: resolve `\exec(from: #N)` to the referenced exec segment's
+/// body start — the offset whose latest stdout is piped as stdin.
+/// `from` names the referenced segment's FIRST marker id; the
+/// segment is the one whose span starts at that marker's position
+/// (a segment's own positional markers are its delimiters, not
+/// extra args).
+fn resolve_from_offset(
+    stmt: &KernelStatement,
+    segments: &[Segment],
+    markers: &[mathed_core::markers::Marker],
+) -> Option<usize> {
+    let from = stmt.from.as_deref()?.trim_start_matches('#');
+    // A segment's span starts just AFTER its first (opening) marker
+    // token, so the marker's byte range END is the anchor.
+    let pos = markers.iter().find(|m| m.id == from)?.range.end;
+    let target = segments
+        .iter()
+        .find(|seg| seg.kind == PropKind::Exec && seg.span.as_ref().map(|s| s.start) == Some(pos))?;
+    target.span.as_ref().map(|s| s.start)
+}
+
 pub fn scan_pipeline(doc_text: &str) -> (MarkerScan, Vec<Segment>, RenderOutput, SemanticIndex) {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
@@ -2603,12 +2717,14 @@ mod tests {
                 grants,
                 timeout_ms,
                 cap_bytes,
+                stdin,
             } => {
                 assert_eq!(command, "echo");
                 assert_eq!(args, vec!["hello", "world"]);
                 assert_eq!(grants, vec!["readonly"]);
                 assert_eq!(block_id, e.span.start as u64);
                 assert!(timeout_ms > 0 && cap_bytes > 0, "defaults set");
+                assert!(stdin.is_empty(), "no from: → no stdin");
             }
             _ => panic!("expected Exec request"),
         }
@@ -2682,6 +2798,100 @@ mod tests {
                 assert!(message.contains("exit 1"), "got: {message}");
             }
             other => panic!("expected ExecFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_from_threads_referenced_stdout_into_stdin() {
+        // N7: `\exec(from: #ref)` pipes the referenced segment's
+        // latest stdout into this segment's stdin. First refresh:
+        // the upstream result has not landed yet, so the downstream
+        // runs with empty stdin; re-running the block (the notebook
+        // affordance) re-resolves the pipe from the upstream's
+        // stored stdout — the bash model: re-run the cell to read
+        // the new upstream.
+        let doc = "= Cell\n\
+                   #1 echo piped #2 \\exec(#1,#2, grants: \"readonly\", name: gen)\n\
+                   #3 cat #4 \\exec(#3,#4, from: #1, grants: \"readonly\", name: use)";
+        let mut bridge = KernelBridge::with_exec_grants(&["readonly"]);
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        // Re-run the block: now the upstream's stdout is stored, so
+        // the downstream receives it as stdin and echoes it back.
+        bridge.run_block(doc, 0);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let out = bridge.block_outputs(0);
+        let texty: Vec<&str> = out
+            .iter()
+            .filter_map(|(_, r)| match r {
+                KernelResult::StringValue(s) => Some(s.trim()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texty.iter().filter(|s| **s == "piped").count() >= 2,
+            "upstream stdout reached the downstream via stdin: {texty:?}"
+        );
+    }
+
+    #[test]
+    fn exec_from_staleness_propagates_along_pipe_edges() {
+        // N7: a block is stale when a from-referenced block is stale
+        // (hash propagation along the pipe edge).
+        let doc = "= A\n\
+                   #1 echo x #2 \\exec(#1,#2, grants: \"readonly\", name: gen)\n\n\
+                   = B\n\
+                   #3 cat #4 \\exec(#3,#4, from: #1, grants: \"readonly\", name: use)";
+        let mut bridge = KernelBridge::with_exec_grants(&["readonly"]);
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+        assert!(bridge.stale_blocks().is_empty(), "clean after settle");
+
+        // Editing the upstream's body marks block A stale — and
+        // block B with it (the pipe edge propagates).
+        let edited = doc.replace("echo x", "echo y");
+        bridge.refresh(&edited);
+        let stale = bridge.stale_blocks();
+        assert!(stale.contains(&0), "upstream block stale: {stale:?}");
+        assert!(stale.contains(&1), "downstream block stale too: {stale:?}");
+    }
+
+    #[test]
+    fn exec_from_unresolved_yields_empty_stdin() {
+        // N7: a `from:` naming no segment resolves to empty stdin
+        // (cat with no input outputs nothing) — never an error.
+        let doc = "= Cell\n\
+                   #1 cat #2 \\exec(#1,#2, from: #99, grants: \"readonly\", name: use)";
+        let mut bridge = KernelBridge::with_exec_grants(&["readonly"]);
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let out = bridge.block_outputs(0);
+        match &out[0].1 {
+            KernelResult::StringValue(s) => assert!(s.trim().is_empty(), "got: {s:?}"),
+            other => panic!("expected empty StringValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_data_grant_denied_without_allowlist() {
+        // N7: the `data` vocabulary exists but is still deny-by-
+        // default — an allowlist without it refuses with the UK
+        // code.
+        let doc = "= Cell\n\
+                   #1 jq . #2 \\exec(#1,#2, grants: \"data\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let out = bridge.block_outputs(0);
+        match &out[0].1 {
+            KernelResult::Error { code_name, .. } => {
+                assert_eq!(code_name, "ExecGrantDenied");
+            }
+            other => panic!("expected ExecGrantDenied, got {other:?}"),
         }
     }
 }

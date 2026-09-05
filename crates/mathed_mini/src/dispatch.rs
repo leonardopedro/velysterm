@@ -67,6 +67,13 @@ pub const EXEC_DEFAULT_CAP_BYTES: usize = 64 * 1024;
 /// This is pure data plumbing — the grant/vocabulary enforcement
 /// happens in the worker, which answers UK-49xx on denial.
 pub fn statement_to_exec_request(stmt: &KernelStatement) -> KernelRequest {
+    statement_to_exec_request_with_stdin(stmt, "")
+}
+
+/// N7: like [`statement_to_exec_request`] with the pipe seam —
+/// `stdin` is the referenced segment's latest stdout (resolved by
+/// the bridge, which owns the results map). Empty = no stdin.
+pub fn statement_to_exec_request_with_stdin(stmt: &KernelStatement, stdin: &str) -> KernelRequest {
     debug_assert_eq!(stmt.kind, PropKind::Exec);
     let mut parts = stmt.body_text.split_whitespace();
     let command = parts.next().unwrap_or_default().to_string();
@@ -86,6 +93,7 @@ pub fn statement_to_exec_request(stmt: &KernelStatement) -> KernelRequest {
         grants,
         timeout_ms: EXEC_DEFAULT_TIMEOUT_MS,
         cap_bytes: EXEC_DEFAULT_CAP_BYTES,
+        stdin: stdin.to_string(),
     }
 }
 
