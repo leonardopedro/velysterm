@@ -144,6 +144,15 @@ pub enum PropKind {
     /// markup is spliced after the body (T3 seam). See
     /// [`PropKind::is_template`].
     Template,
+    /// T7: a `\base(#s,#f, name: "…")` segment — the *base template*
+    /// (Jinja base-template / layout role). Same body contract as
+    /// `\template` (`#let render(ctx) = …`) but its output **wraps
+    /// the whole document**: `ctx.body` carries the rendered doc-body
+    /// markup and `ctx.templates` the other templates' outputs. At
+    /// most one per document (first wins). Deliberately not named
+    /// `\layout` — that statement belongs to the GPU-federation
+    /// layout claim. See [`PropKind::is_base`].
+    Base,
     /// N4: a granted scripted segment — `\exec(#s,#f, grants:
     /// "readonly", name: "…")`. The body is a command line (no
     /// shell) run by the kernel worker under the named grant,
@@ -179,6 +188,9 @@ impl PropKind {
             "layout" => Self::Layout,
             // T2: `\template` / `\tpl` (see [`PropKind::Template`]).
             "template" | "tpl" => Self::Template,
+            // T7: `\base` — the base template (see
+            // [`PropKind::Base`]).
+            "base" | "master" => Self::Base,
             // N4: `\exec` — a granted scripted segment (see
             // [`PropKind::Exec`]).
             "exec" => Self::Exec,
@@ -256,6 +268,16 @@ impl PropKind {
     /// ops, so this is deliberately separate from `is_kernel`.
     pub fn is_template(self) -> bool {
         matches!(self, Self::Template)
+    }
+
+    /// T7: `\base` segments — like `\template`, their body is Typst
+    /// code whose `render(ctx)` output **wraps the whole document**
+    /// (`ctx.body` + `ctx.templates`). Content, not a kernel op —
+    /// deliberately separate from `is_kernel` (the GPU-federation
+    /// `\layout` claim is kernel-affiliated; the base template is a
+    /// different statement entirely).
+    pub fn is_base(self) -> bool {
+        matches!(self, Self::Base)
     }
 }
 

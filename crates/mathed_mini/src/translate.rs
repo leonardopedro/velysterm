@@ -34,6 +34,13 @@ pub const BUILTIN_TRANSLATOR: &str = include_str!("builtin_translator.typ");
 /// still produces a well-formed kernel request.
 pub const BUILTIN_EVENT_TRANSLATOR: &str = include_str!("builtin_event_translator.typ");
 
+/// T7: the shared template helpers (filters role) prepended to every
+/// `\template` / `\base` body before evaluation — the Jinja-filters
+/// / XSLT-functions role without a second language. Ordinary Typst
+/// `#let` bindings at module scope; user code may shadow any of them
+/// (later bindings win). See `builtin_template.typ`.
+pub const BUILTIN_TEMPLATE_HELPERS: &str = include_str!("builtin_template.typ");
+
 /// The scope binding the engine reads back after evaluation.
 const RESULT_BINDING: &str = "__mathed_result";
 
@@ -121,7 +128,19 @@ impl Translator {
         template_src: &str,
         ctx_literal: &str,
     ) -> Result<String, TranslateError> {
-        self.run_entry_expr("render", template_src, ctx_literal)
+        self.run_entry_expr("render", &template_with_helpers(template_src), ctx_literal)
+    }
+
+    /// T7: evaluate a `\base` body — the same contract as
+    /// [`Self::run_template`] (its `render(ctx)` wraps the document
+    /// via `ctx.body` / `ctx.templates`), kept as a distinct entry
+    /// point for call-site clarity.
+    pub fn run_base(
+        &mut self,
+        base_src: &str,
+        ctx_literal: &str,
+    ) -> Result<String, TranslateError> {
+        self.run_entry_expr("render", &template_with_helpers(base_src), ctx_literal)
     }
 
     /// Run the built-in default translator against `body`.
@@ -172,6 +191,11 @@ impl Translator {
         let lit = typst_str_lit(arg);
         self.run_entry_expr(fn_name, src, &lit)
     }
+}
+
+/// Prepend the shared template helpers to a template/base body.
+fn template_with_helpers(src: &str) -> String {
+    format!("{BUILTIN_TEMPLATE_HELPERS}\n{src}")
 }
 
 /// Escape `s` into a Typst double-quoted string literal (including

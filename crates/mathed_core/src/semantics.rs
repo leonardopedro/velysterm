@@ -22,6 +22,14 @@ pub struct SemanticIndex {
     /// separately because template output is content (spliced
     /// markup), not a kernel payload.
     pub templates: HashMap<String, TranslatorDef>,
+    /// T7: the document's base template (`\base`), if any — same
+    /// shape as `TemplateDef`. Its `render(ctx)` output wraps the
+    /// whole document (`ctx.body` + `ctx.templates`). At most one:
+    /// the first wins; later ones are recorded in
+    /// `base_duplicates` and surfaced as a warning by the CLI.
+    pub base: Option<TranslatorDef>,
+    /// Spans of `\base` segments that lost the first-wins race.
+    pub base_duplicates: Vec<Range<usize>>,
     /// `\bibliography`/`\cite` statements (P11.21) collected for the
     /// `mathed_biblio` citation bridge, mirroring
     /// `kernel_statements` but routed to the bibliography
@@ -333,6 +341,33 @@ impl SemanticIndex {
             );
         }
 
+        // --- Collect the base template (\base, T7): first wins. ---
+        let mut base: Option<TranslatorDef> = None;
+        let mut base_duplicates: Vec<Range<usize>> = Vec::new();
+        for seg in segments {
+            if !seg.kind.is_base() {
+                continue;
+            }
+            let span = match seg.span.clone() {
+                Some(s) => s,
+                None => continue,
+            };
+            let body_text = doc_text[span.clone()].trim().to_string();
+            let block = find_block_for_doc_pos(per_block_renders, span.start);
+            let name = extract_named_string(&seg.extra_args, "name").unwrap_or_default();
+            let def = TranslatorDef {
+                name,
+                body_text,
+                span,
+                block,
+            };
+            if base.is_none() {
+                base = Some(def);
+            } else {
+                base_duplicates.push(def.span);
+            }
+        }
+
         // --- Collect bibliography statements (Bibliography/Cite,
         // P11.21). ---
         let mut biblio_statements = Vec::new();
@@ -399,6 +434,8 @@ impl SemanticIndex {
         self.kernel_statements = kernel_statements;
         self.translators = translators;
         self.templates = templates;
+        self.base = base;
+        self.base_duplicates = base_duplicates;
         self.biblio_statements = biblio_statements;
     }
 
@@ -807,6 +844,21 @@ mod tests {
         let mut idx = SemanticIndex::default();
         idx.build_index(doc_text, &segments, &[&render]);
         idx
+    }
+
+    #[test]
+    fn base_collected_and_duplicates_flagged() {
+        // T7: the first \base wins; a second one is flagged (never
+        // silently ignored).
+        let doc = concat!(
+            "#1 #let render(ctx) = \"x\" #2 \\base(#1,#2, name: wrap)\n",
+            "#3 #let render(ctx) = \"y\" #4 \\base(#3,#4, name: dup)",
+        );
+        let idx = build_index_for(doc);
+        let base = idx.base.expect("first base collected");
+        assert_eq!(base.name, "wrap");
+        assert_eq!(idx.base_duplicates.len(), 1, "second base flagged");
+        assert!(!idx.base_duplicates[0].is_empty());
     }
 
     #[test]

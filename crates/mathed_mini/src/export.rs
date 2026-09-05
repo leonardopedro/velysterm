@@ -461,6 +461,8 @@ fn render_doc(
     // template fails the export loudly (never a silent partial
     // render).
     let mut splices = std::collections::HashMap::new();
+    let mut template_outputs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut engine = crate::translate::Translator::new();
     for (name, def) in &idx.templates {
         // T5: when the authoring-time egison rules binary is present
@@ -471,12 +473,59 @@ fn render_doc(
             apply_mathed_rules(&def.body_text, "rewrite").unwrap_or_else(|| def.body_text.clone());
         match engine.run_template(&body, &ctx_literal) {
             Ok(markup) => {
+                template_outputs.insert(name.clone(), markup.clone());
                 splices.insert(def.span.start, markup);
             }
             Err(e) => {
                 return Err(format!("\\template `{name}` failed to render: {e}"));
             }
         }
+    }
+
+    // T7: base-template composition. When a `\base` segment exists,
+    // its `render(ctx)` output *is* the exported document: `ctx.body`
+    // carries the doc-body markup (without template splices — the
+    // templates reach the base through `ctx.templates`), so the base
+    // wraps rather than duplicates. No base → the plain path below
+    // (templates spliced inline), byte-identical to the T4 fixture.
+    if let Some(base) = &idx.base {
+        let body_render = to_render_text(
+            doc_text,
+            &scan,
+            &segments,
+            &TransformOptions {
+                block_splices: block_splices.clone(),
+                ..Default::default()
+            },
+        );
+        let mut base_ctx = ctx_value.clone();
+        base_ctx["body"] = serde_json::Value::String(body_render.text);
+        let mut tmpls = serde_json::Map::new();
+        for (name, markup) in &template_outputs {
+            if is_typst_ident(name) {
+                tmpls.insert(name.clone(), serde_json::Value::String(markup.clone()));
+            }
+        }
+        base_ctx["templates"] = serde_json::Value::Object(tmpls);
+        let base_literal = ctx_to_typst_literal(&base_ctx)?;
+        let body = apply_mathed_rules(&base.body_text, "rewrite")
+            .unwrap_or_else(|| base.body_text.clone());
+        let out = match engine.run_base(&body, &base_literal) {
+            Ok(markup) => markup,
+            Err(e) => return Err(format!("\\base `{}` failed to render: {e}", base.name)),
+        };
+        // The base output *is* the exported file — it must parse.
+        let parsed = typst::syntax::parse(&out);
+        let (errors, _) = parsed.errors_and_warnings();
+        if !errors.is_empty() {
+            return Err(format!(
+                "\\base output does not parse as Typst ({} error(s)): {out}",
+                errors.len()
+            ));
+        }
+        return Ok(format!(
+            "// Exported from mathed_mini (rendered template)\n{out}"
+        ));
     }
 
     let render = to_render_text(
@@ -514,11 +563,6 @@ fn merge_overlay(base: &mut serde_json::Value, extra: serde_json::Value) {
 /// Object keys must be Typst identifiers (the DocumentContext keys
 /// are; the `--ctx` overlay is validated here).
 fn ctx_to_typst_literal(v: &serde_json::Value) -> Result<String, String> {
-    fn ident_ok(k: &str) -> bool {
-        let mut cs = k.chars();
-        matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-            && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    }
     fn go(v: &serde_json::Value) -> Result<String, String> {
         Ok(match v {
             serde_json::Value::Null => "none".to_string(),
@@ -539,7 +583,7 @@ fn ctx_to_typst_literal(v: &serde_json::Value) -> Result<String, String> {
             serde_json::Value::Object(map) => {
                 let mut parts = Vec::new();
                 for (k, val) in map {
-                    if !ident_ok(k) {
+                    if !is_typst_ident(k) {
                         return Err(format!("ctx key `{k}` is not a valid Typst identifier"));
                     }
                     parts.push(format!("{k}: {}", go(val)?));
@@ -553,6 +597,14 @@ fn ctx_to_typst_literal(v: &serde_json::Value) -> Result<String, String> {
         })
     }
     go(v)
+}
+
+/// Whether `k` can be a Typst identifier (a dictionary-literal key in
+/// the lowered ctx expression).
+fn is_typst_ident(k: &str) -> bool {
+    let mut cs = k.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn escape_html(s: &str) -> String {
@@ -915,6 +967,71 @@ mod tests {
         );
         let out = export_typst_template(doc, Some(r#"{"author": "leo"}"#)).expect("byline export");
         assert!(out.contains("author: leo"), "overlay value spliced: {out}");
+    }
+
+    #[test]
+    fn base_wraps_body_and_keeps_it_out_of_the_plain_splice() {
+        // T7: with a \base, its output *is* the exported file: the
+        // body reaches the base through ctx.body, and the doc text
+        // itself is not re-spliced.
+        let doc = concat!(
+            "= Report\n\n",
+            "#1 #let render(ctx) = \"#box[HEAD]\\n\" + ctx.at(\"body\") + \"\\n#box[TAIL]\" #2 ",
+            "\\base(#1,#2, name: wrap)\n\n",
+            "Body text.\n",
+        );
+        let out = export_typst_template(doc, None).expect("base export");
+        assert!(out.contains("#box[HEAD]"), "base head: {out}");
+        assert!(out.contains("#box[TAIL]"), "base tail: {out}");
+        assert!(out.contains("Body text."), "base wraps the doc body: {out}");
+        assert!(
+            !out.contains("template: "),
+            "no template splice in base mode: {out}"
+        );
+    }
+
+    #[test]
+    fn base_ctx_templates_carries_subtemplate_output() {
+        // The base reads a plain template's rendered output out of
+        // ctx.templates (the Jinja include role).
+        let doc = concat!(
+            "#1 #let render(ctx) = \"#emph[t1]\" #2 ",
+            "\\template(#1,#2, name: t1)\n",
+            "#3 #let render(ctx) = \"#box[WRAP]\" + ctx.at(\"templates\").at(\"t1\") + \"#box[END]\" #4 ",
+            "\\base(#3,#4, name: wrap)",
+        );
+        let out = export_typst_template(doc, None).expect("base export");
+        assert!(out.contains("#box[WRAP]"), "base prefix: {out}");
+        assert!(
+            out.contains("#emph[t1]"),
+            "sub-template output reached the base via ctx.templates: {out}"
+        );
+        assert!(out.contains("#box[END]"), "base suffix: {out}");
+    }
+
+    #[test]
+    fn base_output_must_parse_as_typst() {
+        // The base output *is* the exported file: unparseable markup
+        // fails loudly instead of producing a broken .typ.
+        let doc = concat!(
+            "#1 #let render(ctx) = \"#emph[unclosed\" #2 ",
+            "\\base(#1,#2, name: bad)",
+        );
+        let err = export_typst_template(doc, None).unwrap_err();
+        assert!(err.contains("does not parse"), "parse failure surfaced: {err}");
+    }
+
+    #[test]
+    fn template_filter_helpers_evaluate() {
+        // T7: the builtin_template.typ helpers (filters role) are
+        // prepended to every template body and callable from
+        // render(ctx).
+        let doc = concat!(
+            "#1 #let render(ctx) = \"sum: \" + join((\"a\", \"b\", \"c\"), sep: \"+\") #2 ",
+            "\\template(#1,#2, name: joined)",
+        );
+        let out = export_typst_template(doc, None).expect("filter export");
+        assert!(out.contains("sum: a+b+c"), "helper `join` evaluated: {out}");
     }
 
     #[test]
