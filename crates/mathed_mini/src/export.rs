@@ -1478,6 +1478,30 @@ mod tests {
     }
 
     #[test]
+    fn ipynb_projection_maps_kernel_cells() {
+        // N11: `\kernel` statement lines become code cells like any
+        // other kernel statement (the projection is kind-agnostic);
+        // without a run record their outputs are empty. When a
+        // kernel run exists, its folded result flows through the
+        // same `kernel_output` mapping as exec/prob runs.
+        let doc = "#1 x #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: k)\n";
+        let nb: serde_json::Value =
+            serde_json::from_str(&export_ipynb(doc).expect("ipynb export")).expect("ipynb JSON");
+        let cells = nb["cells"].as_array().expect("cells");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0]["cell_type"], "code");
+        assert_eq!(
+            cells[0]["source"][0],
+            "#1 x #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: k)\n"
+        );
+        assert_eq!(
+            cells[0]["outputs"].as_array().expect("outputs").len(),
+            0,
+            "no run record → no outputs"
+        );
+    }
+
+    #[test]
     fn template_failure_is_loud_and_named() {
         let doc = "#1 not valid typst code #2 \\template(#1,#2, name: bad)";
         let err = export_typst_template(doc, None).unwrap_err();

@@ -97,6 +97,35 @@ pub fn statement_to_exec_request_with_stdin(stmt: &KernelStatement, stdin: &str)
     }
 }
 
+/// N11: build the `\kernel` request for a kernel statement — code +
+/// language + grants, all resolved from the segment's named args and
+/// body. The worker gates the grant and the language (deny-by-
+/// default) and runs the module backend; outputs land as
+/// [`kernel_client::KernelOutput`]s.
+pub fn statement_to_kernel_request(stmt: &KernelStatement) -> KernelRequest {
+    debug_assert_eq!(stmt.kind, PropKind::Kernel);
+    let grants: Vec<String> = stmt
+        .grants
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    KernelRequest::KernelExec {
+        block_id: stmt.span.start as BlockId,
+        module: stmt
+            .name
+            .clone()
+            .unwrap_or_else(|| "mathed_kernel".to_string()),
+        language: stmt.lang.clone().unwrap_or_default(),
+        code: stmt.body_text.clone(),
+        grants,
+        timeout_ms: EXEC_DEFAULT_TIMEOUT_MS,
+        cap_bytes: EXEC_DEFAULT_CAP_BYTES,
+    }
+}
+
 /// Resolve the translator source for a statement: its named
 /// translator, then the unnamed block-local default (`""`), then the
 /// provided built-in default.
@@ -497,5 +526,38 @@ mod tests {
             }
         );
         assert_eq!(spec.solver.krylov_dim, 16);
+    }
+
+    #[test]
+    fn kernel_statement_builds_the_kernel_request() {
+        // N11: dispatch resolves code/language/grants/name into the
+        // KernelExec request the worker gates and runs.
+        let doc = "#1 2 + 2 #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: calc)";
+        let idx = index_for(doc);
+        let stmt = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Kernel)
+            .expect("kernel statement");
+        let req = statement_to_kernel_request(stmt);
+        match req {
+            KernelRequest::KernelExec {
+                block_id,
+                module,
+                language,
+                code,
+                grants,
+                timeout_ms,
+                cap_bytes,
+            } => {
+                assert_eq!(block_id, stmt.span.start as u64);
+                assert_eq!(module, "calc", "name arg names the module");
+                assert_eq!(language, "mathed");
+                assert_eq!(code, "2 + 2");
+                assert_eq!(grants, vec!["kernel"]);
+                assert!(timeout_ms > 0 && cap_bytes > 0, "defaults set");
+            }
+            _ => panic!("expected KernelExec"),
+        }
     }
 }

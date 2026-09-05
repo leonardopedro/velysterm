@@ -160,6 +160,13 @@ pub enum PropKind {
     /// failures surface a UK-49xx code. Execution lives in the
     /// worker, never in the editor process.
     Exec,
+    /// N11: a granted kernel segment — `\kernel(#s,#f, lang: "…",
+    /// grants: "…", name: "…")`. The body is code run by the kernel
+    /// worker's module backend (Jupyter-kernel-compatible outputs:
+    /// streams / results / errors), grant- and language-gated,
+    /// deny-by-default. The generalization over Jupyter: safety
+    /// comes from grants, not per-kernel container isolation.
+    Kernel,
 }
 
 impl PropKind {
@@ -194,6 +201,9 @@ impl PropKind {
             // N4: `\exec` — a granted scripted segment (see
             // [`PropKind::Exec`]).
             "exec" => Self::Exec,
+            // N11: `\kernel` — a granted, language-gated code run
+            // (see [`PropKind::Kernel`]).
+            "kernel" => Self::Kernel,
             _ => Self::Other,
         }
     }
@@ -237,6 +247,7 @@ impl PropKind {
                 | Self::Translator
                 | Self::Layout
                 | Self::Exec
+                | Self::Kernel
         )
     }
 

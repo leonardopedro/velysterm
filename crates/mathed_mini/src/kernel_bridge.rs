@@ -34,7 +34,7 @@ use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src, statement_to_event_json,
-    statement_to_exec_request_with_stdin, statement_to_model_spec,
+    statement_to_exec_request_with_stdin, statement_to_kernel_request, statement_to_model_spec,
 };
 use crate::translate::{TranslateError, Translator};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
@@ -55,6 +55,39 @@ pub enum KernelResult {
         message: String,
         hints: Vec<RepairHint>,
     },
+}
+
+/// N11: fold one kernel run's Jupyter-shaped outputs into the single
+/// [`KernelResult`] a statement displays in its region — streams
+/// (stdout/stderr) become the string text, `text/plain` results are
+/// appended as StringValue lines, and any error output turns the whole
+/// result into that UK error (errors win: a failed run shows its
+/// failure, not a partial stream). v1 keeps the region's
+/// one-result-per-statement contract.
+fn fold_kernel_outputs(outputs: &[kernel_client::KernelOutput]) -> KernelResult {
+    use kernel_client::KernelOutput;
+    if let Some(KernelOutput::Error { ename, evalue, .. }) = outputs
+        .iter()
+        .find(|o| matches!(o, KernelOutput::Error { .. }))
+    {
+        return KernelResult::Error {
+            code_name: ename.clone(),
+            message: evalue.clone(),
+            hints: Vec::new(),
+        };
+    }
+    let mut text = String::new();
+    for o in outputs {
+        match o {
+            KernelOutput::Stream { text: t, .. } => text.push_str(t),
+            KernelOutput::Result { data, .. } => {
+                text.push_str(data);
+                text.push('\n');
+            }
+            KernelOutput::Error { .. } => {}
+        }
+    }
+    KernelResult::StringValue(text)
 }
 
 /// One completed kernel run, appended to the bridge's run log when a
@@ -155,23 +188,7 @@ impl Default for KernelBridge {
 
 impl KernelBridge {
     pub fn new() -> Self {
-        Self {
-            client: KernelClient::new(),
-            engine: Translator::new(),
-            results: HashMap::new(),
-            prob_names: HashMap::new(),
-            stmt_blocks: HashMap::new(),
-            cur_hashes: HashMap::new(),
-            last_result_hashes: HashMap::new(),
-            run_log: Vec::new(),
-            model_hashes: HashMap::new(),
-            prob_hashes: HashMap::new(),
-            exec_hashes: HashMap::new(),
-            from_edges: HashMap::new(),
-            translator_errors: HashMap::new(),
-            live: HashSet::new(),
-            pending: HashMap::new(),
-        }
+        Self::with_client(KernelClient::new())
     }
 
     /// N4 test/embedding hook: construct the bridge with an explicit
@@ -179,8 +196,26 @@ impl KernelBridge {
     /// The default constructor reads `MATHED_EXEC_GRANTS` instead.
     pub fn with_exec_grants(grants: &[&str]) -> Self {
         let grants: Vec<String> = grants.iter().map(|s| s.to_string()).collect();
+        Self::with_client(KernelClient::new_with_grants(&grants))
+    }
+
+    /// N11 test/embedding hook: explicit worker exec-grant allowlist,
+    /// kernel-language allowlist, and kernel module binary —
+    /// deterministic `\kernel` execution without touching process
+    /// env.
+    pub fn with_kernel_config(grants: &[&str], langs: &[&str], bin: Option<&str>) -> Self {
+        let grants: Vec<String> = grants.iter().map(|s| s.to_string()).collect();
+        let langs: Vec<String> = langs.iter().map(|s| s.to_string()).collect();
+        Self::with_client(KernelClient::new_with_kernel_config(
+            &grants,
+            &langs,
+            bin.map(str::to_string),
+        ))
+    }
+
+    fn with_client(client: KernelClient) -> Self {
         Self {
-            client: KernelClient::new_with_grants(&grants),
+            client,
             engine: Translator::new(),
             results: HashMap::new(),
             prob_names: HashMap::new(),
@@ -700,6 +735,30 @@ impl KernelBridge {
             self.exec_hashes.insert(stmt.span.start, h);
         }
 
+        // N11: dispatch each `\kernel` whose (code, language, grants)
+        // changed — same deny-by-default worker gates as `\exec`,
+        // generalized: grant AND language must be in the worker's
+        // allowlists (UK-4911/4912), and the module backend runs the
+        // code (UK-4913 on failure). Outputs land via `poll`'s
+        // KernelExec arm and render in the block's output region.
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Kernel)
+        {
+            let h = hash_many(&[
+                &stmt.body_text,
+                stmt.lang.as_deref().unwrap_or(""),
+                stmt.grants.as_deref().unwrap_or(""),
+            ]);
+            self.cur_hashes.insert(stmt.span.start, h);
+            if self.exec_hashes.get(&stmt.span.start) == Some(&h) {
+                continue;
+            }
+            self.submit_or_error(stmt.span.start as u64, statement_to_kernel_request(stmt));
+            self.exec_hashes.insert(stmt.span.start, h);
+        }
+
         // N7: record the pipe edges for staleness propagation.
         self.from_edges.clear();
         for stmt in idx
@@ -970,6 +1029,22 @@ impl KernelBridge {
             self.exec_hashes.insert(stmt.span.start, h);
         }
 
+        // Re-run every in-block `\kernel` (forced, exec-style).
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Kernel && in_block(s))
+        {
+            let h = hash_many(&[
+                &stmt.body_text,
+                stmt.lang.as_deref().unwrap_or(""),
+                stmt.grants.as_deref().unwrap_or(""),
+            ]);
+            self.cur_hashes.insert(stmt.span.start, h);
+            self.submit_or_error(stmt.span.start as u64, statement_to_kernel_request(stmt));
+            self.exec_hashes.insert(stmt.span.start, h);
+        }
+
         changed
     }
 
@@ -1135,6 +1210,7 @@ impl KernelBridge {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
                 | BlockResponse::Exec(id, _)
+                | BlockResponse::KernelExec(id, _)
                 | BlockResponse::Error(id, _)
                 | BlockResponse::Success(id) => self
                     .pending
@@ -1148,6 +1224,7 @@ impl KernelBridge {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
                 | BlockResponse::Exec(id, _)
+                | BlockResponse::KernelExec(id, _)
                 | BlockResponse::Error(id, _) => self.live.contains(&(*id as usize)),
                 // Model (re)definition carries no displayed result.
                 BlockResponse::Success(_) => true,
@@ -1181,6 +1258,17 @@ impl KernelBridge {
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
                     self.log_run(&(id as usize), "exec", elapsed_ms, r);
+                    changed = true;
+                }
+                // N11: a granted `\kernel` finished; its Jupyter-
+                // shaped outputs fold into the one result the region
+                // displays (streams as text, results as StringValue,
+                // any error output into the UK error).
+                BlockResponse::KernelExec(id, outputs) => {
+                    let r = fold_kernel_outputs(&outputs);
+                    self.results.insert(id as usize, r.clone());
+                    self.record_fresh(&(id as usize));
+                    self.log_run(&(id as usize), "kernel", elapsed_ms, r);
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
@@ -2895,5 +2983,116 @@ mod tests {
             }
             other => panic!("expected ExecGrantDenied, got {other:?}"),
         }
+    }
+
+    /// A stub kernel module binary: reads `{module, language, code}`
+    /// JSON on stdin and answers `{outputs: [...]}` JSON that depends
+    /// on the code, so one binary exercises every output shape.
+    fn stub_kernel_module() -> std::path::PathBuf {
+        use std::hash::{Hash as _, Hasher as _};
+        use std::io::Write as _;
+        let script = r#"#!/bin/sh
+read -r line
+case "$line" in
+  *stream*) printf '%s' '{"outputs":[{"output_type":"stream","name":"stdout","text":"kernel stream hi\n"}]}' ;;
+  *result*) printf '%s' '{"outputs":[{"output_type":"execute_result","mime":"text/plain","data":"= 0.5"}]}' ;;
+  *error*) printf '%s' '{"outputs":[{"output_type":"error","ename":"KernelFailed","evalue":"boom","traceback":[]}]}' ;;
+esac
+"#;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        script.hash(&mut h);
+        let path = std::env::temp_dir().join(format!(
+            "mathed_kernel_stub_{}_{:x}.sh",
+            std::process::id(),
+            h.finish()
+        ));
+        let mut f = std::fs::File::create(&path).expect("create stub");
+        f.write_all(script.as_bytes()).expect("write stub");
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        path
+    }
+
+    #[test]
+    fn kernel_denials_surface_uk_codes() {
+        // N11: both deny-by-default gates answer UK codes — the grant
+        // gate (no allowlist → KernelGrantDenied) and the language
+        // gate (grant allowed but language not configured →
+        // KernelLangDenied).
+        let doc = "= Cell\n\
+                   #1 x #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: k)";
+        // Grant gate: no allowlist at all.
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+        let out = bridge.block_outputs(0);
+        match &out[0].1 {
+            KernelResult::Error { code_name, .. } => {
+                assert_eq!(code_name, "KernelGrantDenied");
+            }
+            other => panic!("expected KernelGrantDenied, got {other:?}"),
+        }
+        // Language gate: the grant is allowed, the language is not.
+        let mut bridge2 = KernelBridge::with_exec_grants(&["kernel"]);
+        bridge2.refresh(doc);
+        settle(&mut bridge2, Duration::from_secs(15));
+        let out2 = bridge2.block_outputs(0);
+        match &out2[0].1 {
+            KernelResult::Error { code_name, .. } => {
+                assert_eq!(code_name, "KernelLangDenied");
+            }
+            other => panic!("expected KernelLangDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kernel_outputs_render_in_the_region_and_run_log() {
+        // N11: a granted, language-allowed `\kernel` runs through the
+        // module backend — stream output renders as region text,
+        // text/plain results as a StringValue, error outputs as the
+        // UK error; the run log records each as a `kernel` entry.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Cell\n",
+            "#1 stream #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\")\n",
+            "#3 result #4 \\kernel(#3,#4, lang: \"mathed\", grants: \"kernel\")\n",
+            "#5 error #6 \\kernel(#5,#6, lang: \"mathed\", grants: \"kernel\")",
+        );
+        let mut bridge = KernelBridge::with_kernel_config(
+            &["kernel"],
+            &["mathed"],
+            Some(stub.to_str().expect("stub path")),
+        );
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let out = bridge.block_outputs(0);
+        assert_eq!(out.len(), 3, "one result per kernel statement: {out:?}");
+        let texty: Vec<&str> = out
+            .iter()
+            .filter_map(|(_, r)| match r {
+                KernelResult::StringValue(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texty.iter().any(|s| s.contains("kernel stream hi")),
+            "stream output rendered as text: {texty:?}"
+        );
+        assert!(
+            texty.iter().any(|s| s.contains("= 0.5")),
+            "text/plain result rendered as StringValue: {texty:?}"
+        );
+        match out.iter().find(|(_, r)| {
+            matches!(r, KernelResult::Error { code_name, .. } if code_name == "KernelFailed")
+        }) {
+            Some((_, KernelResult::Error { message, .. })) => {
+                assert!(message.contains("boom"), "error evalue: {message}");
+            }
+            other => panic!("expected the KernelFailed error output, got {other:?}"),
+        }
+        let log = bridge.run_log();
+        assert_eq!(log.len(), 3);
+        assert!(log.iter().all(|e| e.op == "kernel"), "kernel runs: {log:?}");
     }
 }

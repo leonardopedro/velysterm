@@ -168,6 +168,7 @@ pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
         PropKind::Template => (AccessRole::Math, format!("template: {content}")),
         PropKind::Base => (AccessRole::Math, format!("base: {content}")),
         PropKind::Exec => (AccessRole::Math, format!("exec: {content}")),
+        PropKind::Kernel => (AccessRole::Math, format!("kernel: {content}")),
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }

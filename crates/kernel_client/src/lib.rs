@@ -1,3 +1,4 @@
+pub mod jupyter_stdio;
 pub mod worker;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -7,6 +8,30 @@ use crate::worker::{BlockResponse, KernelWorker};
 use unfer_protocol::ModelSpec;
 
 pub type BlockId = u64;
+
+/// N11: one kernel output — the Jupyter message content, mirrored.
+/// The op's `kernel_exec` contract (unfer PROTOCOL.md) and the module
+/// backend's `{outputs: [...]}` payload both use this schema:
+/// `stream` (stdout/stderr text), `execute_result` (a MIME payload;
+/// v1 carries `text/plain`), or `error` (ename/evalue/traceback).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "output_type", rename_all = "snake_case")]
+pub enum KernelOutput {
+    /// stdout/stderr text (`{"output_type": "stream", "name":
+    /// "stdout"|"stderr", "text": "..."}`).
+    Stream { name: String, text: String },
+    /// A MIME-typed result (`{"output_type": "execute_result",
+    /// "mime": "text/plain", "data": "..."}`).
+    #[serde(rename = "execute_result")]
+    Result { mime: String, data: String },
+    /// A kernel-side error (`{"output_type": "error", "ename":
+    /// "...", "evalue": "...", "traceback": []}`).
+    Error {
+        ename: String,
+        evalue: String,
+        traceback: Vec<String>,
+    },
+}
 
 pub enum KernelRequest {
     DefineModel {
@@ -72,6 +97,23 @@ pub enum KernelRequest {
         cap_bytes: usize,
         stdin: String,
     },
+    /// N11: a granted kernel segment (`\kernel`). The worker gates
+    /// the grant AND the language (both deny-by-default — the
+    /// australVM module philosophy, generalized to kernels) and runs
+    /// `code` through the configured kernel module backend
+    /// (`MATHED_KERNEL_BIN`), enforcing `timeout_ms` and `cap_bytes`.
+    /// Success answers `BlockResponse::KernelExec` with
+    /// Jupyter-shaped [`KernelOutput`]s; failures answer UK-4911 /
+    /// 4912 / 4913 `Error`s.
+    KernelExec {
+        block_id: BlockId,
+        module: String,
+        language: String,
+        code: String,
+        grants: Vec<String>,
+        timeout_ms: u64,
+        cap_bytes: usize,
+    },
     Shutdown,
     /// Test-only: injects a deterministic panic into the worker's
     /// request handling, so tests can pin the "a panicked request
@@ -99,7 +141,8 @@ impl KernelRequest {
             | KernelRequest::DidCreate { block_id, .. }
             | KernelRequest::ContentPublish { block_id, .. }
             | KernelRequest::ContentResolve { block_id, .. }
-            | KernelRequest::Exec { block_id, .. } => Some(*block_id),
+            | KernelRequest::Exec { block_id, .. }
+            | KernelRequest::KernelExec { block_id, .. } => Some(*block_id),
             KernelRequest::CloseModelById { model_id } => Some(*model_id),
             KernelRequest::Shutdown => None,
             #[cfg(test)]
@@ -115,31 +158,53 @@ pub struct KernelClient {
 }
 
 impl KernelClient {
-    pub fn new() -> Self {
-        // N4: the worker's exec allowlist comes from the environment,
-        // default empty = deny everything (a document with `\exec`
-        // segments stays inert until an operator opts in).
-        let grants = std::env::var("MATHED_EXEC_GRANTS")
+    fn env_list(name: &str) -> Vec<String> {
+        std::env::var(name)
             .map(|v| {
                 v.split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-        Self::new_with_grants(&grants)
+            .unwrap_or_default()
+    }
+
+    pub fn new() -> Self {
+        // N4/N11: the worker's allowlists come from the environment,
+        // default empty = deny everything (documents with `\exec` or
+        // `\kernel` segments stay inert until an operator opts in).
+        let grants = Self::env_list("MATHED_EXEC_GRANTS");
+        let langs = Self::env_list("MATHED_KERNEL_LANGS");
+        let bin = std::env::var("MATHED_KERNEL_BIN").ok();
+        Self::new_with_kernel_config(&grants, &langs, bin)
     }
 
     /// Construct a client whose worker's exec allowlist is `grants`
     /// (grant names only — the command vocabulary is fixed data in the
-    /// worker). Test/embedding hook; the default constructor reads
-    /// `MATHED_EXEC_GRANTS` instead.
+    /// worker) and whose kernel allowlists come from the environment
+    /// (`MATHED_KERNEL_LANGS`/`MATHED_KERNEL_BIN`). Test/embedding
+    /// hook; the default constructor reads `MATHED_EXEC_GRANTS`
+    /// instead.
     pub fn new_with_grants(grants: &[String]) -> Self {
+        let langs = Self::env_list("MATHED_KERNEL_LANGS");
+        let bin = std::env::var("MATHED_KERNEL_BIN").ok();
+        Self::new_with_kernel_config(grants, &langs, bin)
+    }
+
+    /// Full embedding hook (N11): explicit worker exec-grant
+    /// allowlist, kernel-language allowlist, and kernel module binary
+    /// — deterministic without touching process env.
+    pub fn new_with_kernel_config(
+        grants: &[String],
+        langs: &[String],
+        bin: Option<String>,
+    ) -> Self {
         let (tx, worker_rx) = unbounded::<KernelRequest>();
         let (worker_tx, rx) = unbounded::<BlockResponse>();
 
         let mut worker = KernelWorker::new(worker_tx);
         worker.with_exec_grants(grants);
+        worker.with_kernel_config(langs, bin);
         let worker_handle = thread::spawn(move || {
             worker.run(worker_rx);
         });

@@ -1,4 +1,4 @@
-use crate::{BlockId, KernelRequest};
+use crate::{BlockId, KernelOutput, KernelRequest};
 use crossbeam_channel::{Receiver, Sender};
 use prob_kernel::Session;
 use std::collections::{HashMap, VecDeque};
@@ -15,6 +15,10 @@ pub enum BlockResponse {
     /// N4: a granted `\exec` segment completed with exit 0; `stdout` is
     /// rendered in the block's output region (StringValue-like).
     Exec(BlockId, String),
+    /// N11: a granted `\kernel` segment completed; the module backend's
+    /// Jupyter-shaped outputs (streams / results / errors) render in
+    /// the block's output region.
+    KernelExec(BlockId, Vec<KernelOutput>),
 }
 
 /// N4: one audited `\exec` attempt. Every invocation — denied or
@@ -60,6 +64,14 @@ pub struct KernelWorker {
     /// N4: enabled exec grant names (deny-by-default; set via
     /// `MATHED_EXEC_GRANTS` by the client or `with_exec_grants`).
     exec_grants: Vec<String>,
+    /// N11: enabled kernel language names (deny-by-default; set via
+    /// `MATHED_KERNEL_LANGS` by the client or `with_kernel_config`).
+    kernel_langs: Vec<String>,
+    /// N11: the kernel module backend binary (set via
+    /// `MATHED_KERNEL_BIN` or `with_kernel_config`). It receives
+    /// `{module, language, code}` JSON on stdin and answers
+    /// `{outputs: [KernelOutput...]}` JSON on stdout.
+    kernel_bin: Option<String>,
     /// N4: bounded audit trail of exec attempts (oldest drained).
     exec_audit: VecDeque<ExecAuditEntry>,
 }
@@ -79,6 +91,8 @@ impl KernelWorker {
             keypair: unfer_consensus::Keypair::generate(),
             did: None,
             exec_grants: Vec::new(),
+            kernel_langs: Vec::new(),
+            kernel_bin: None,
             exec_audit: VecDeque::new(),
         }
     }
@@ -87,6 +101,14 @@ impl KernelWorker {
     /// `\exec` segment runs until its grant is named here.
     pub fn with_exec_grants(&mut self, grants: &[String]) {
         self.exec_grants = grants.to_vec();
+    }
+
+    /// N11: configure the kernel backend — the language allowlist
+    /// (deny-by-default) and the module binary. `None` binary = every
+    /// `\kernel` segment fails with UK-4913 (nothing configured).
+    pub fn with_kernel_config(&mut self, langs: &[String], bin: Option<String>) {
+        self.kernel_langs = langs.to_vec();
+        self.kernel_bin = bin;
     }
 
     /// The bounded audit trail of exec attempts, oldest first.
@@ -334,6 +356,17 @@ impl KernelWorker {
             } => self.handle_exec(
                 block_id, command, args, grants, timeout_ms, cap_bytes, stdin,
             ),
+            KernelRequest::KernelExec {
+                block_id,
+                module,
+                language,
+                code,
+                grants,
+                timeout_ms,
+                cap_bytes,
+            } => self.handle_kernel(
+                block_id, module, language, code, grants, timeout_ms, cap_bytes,
+            ),
             KernelRequest::Shutdown => {
                 unreachable!("run() breaks on Shutdown before dispatching")
             }
@@ -576,6 +609,308 @@ impl KernelWorker {
                     Diagnostic::new(
                         Code::EXEC_FAILED,
                         format!("exec output read failed: {e}"),
+                        Severity::Error,
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// N11: run one granted `\kernel` segment through the configured
+    /// module backend. Two deny-by-default gates — the australVM
+    /// module philosophy (UK-4001) generalized to kernels: the
+    /// requested grant must be in the exec allowlist, and the
+    /// language must be in the kernel language allowlist. The module
+    /// binary (`MATHED_KERNEL_BIN`) receives `{module, language,
+    /// code}` JSON on stdin and answers `{outputs: [KernelOutput...]}`
+    /// JSON on stdout — the same wire convention kernel_client uses;
+    /// a real Jupyter kernel over the stdio transport is drivable
+    /// through the same op via [`crate::jupyter_stdio`]. Outputs are
+    /// returned verbatim; every failure answers UK-4913.
+    #[allow(clippy::too_many_arguments)] // the request's fields, one per param
+    fn handle_kernel(
+        &mut self,
+        block_id: BlockId,
+        module: String,
+        language: String,
+        code: String,
+        grants: Vec<String>,
+        timeout_ms: u64,
+        cap_bytes: usize,
+    ) {
+        // 1. Grant gate: the first requested grant present in the
+        // configured allowlist wins; none configured = deny everything.
+        if !grants
+            .iter()
+            .any(|g| self.exec_grants.iter().any(|a| a == g))
+        {
+            self.audit_exec(
+                grants.first().cloned(),
+                &format!("kernel:{language}"),
+                "grant-denied",
+            );
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::KERNEL_GRANT_DENIED,
+                    format!(
+                        "kernel grant denied: the segment asked for {grants:?} but the \
+                         worker allowlist is deny-by-default; grant the segment \
+                         (MATHED_EXEC_GRANTS) or remove it"
+                    ),
+                    Severity::Error,
+                )
+                .with_hint(unfer_protocol::RepairHint::new(
+                    unfer_protocol::HintKind::SetParam,
+                    "kernel.grants",
+                    "add the requested grant to the worker allowlist \
+                     (MATHED_EXEC_GRANTS) or remove the segment",
+                )),
+            ));
+            return;
+        }
+        // 2. Language gate: deny-by-default like grants — a language
+        // no operator enabled never runs, whatever the module.
+        if !self.kernel_langs.iter().any(|l| l == &language) {
+            self.audit_exec(
+                grants.first().cloned(),
+                &format!("kernel:{language}"),
+                "lang-denied",
+            );
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::KERNEL_LANG_DENIED,
+                    format!(
+                        "kernel language denied: {language:?} is not in the worker's \
+                         language allowlist {:?}; allow the language \
+                         (MATHED_KERNEL_LANGS) or remove the segment",
+                        self.kernel_langs
+                    ),
+                    Severity::Error,
+                )
+                .with_hint(unfer_protocol::RepairHint::new(
+                    unfer_protocol::HintKind::SetParam,
+                    "kernel.lang",
+                    "add the requested language to the worker allowlist \
+                     (MATHED_KERNEL_LANGS) or remove the segment",
+                )),
+            ));
+            return;
+        }
+        // 3. The module backend must be configured.
+        let Some(bin) = self.kernel_bin.clone() else {
+            self.audit_exec(
+                grants.first().cloned(),
+                &format!("kernel:{language}"),
+                "failed",
+            );
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::KERNEL_FAILED,
+                    "kernel failed: no module backend configured (set \
+                     MATHED_KERNEL_BIN)"
+                        .to_string(),
+                    Severity::Error,
+                ),
+            ));
+            return;
+        };
+
+        // 4. Run under timeout + cap, exec-style: the module reads
+        // {module, language, code} JSON on stdin and answers
+        // {outputs: [...]} JSON on stdout.
+        let started = Instant::now();
+        let mut cmd = Command::new(&bin);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.audit_exec(
+                    grants.first().cloned(),
+                    &format!("kernel:{language}"),
+                    "failed",
+                );
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::KERNEL_FAILED,
+                        format!("kernel launch failed: {e}"),
+                        Severity::Error,
+                    ),
+                ));
+                return;
+            }
+        };
+        let input =
+            serde_json::json!({ "module": module, "language": language, "code": code }).to_string();
+        if let Some(child_stdin) = child.stdin.take() {
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let mut s = child_stdin;
+                let _ = s.write_all(input.as_bytes());
+            });
+        }
+        let deadline = started + Duration::from_millis(timeout_ms.max(1));
+        let timed_out = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break false,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        break true;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    self.audit_exec(
+                        grants.first().cloned(),
+                        &format!("kernel:{language}"),
+                        "failed",
+                    );
+                    let _ = self.tx.send(BlockResponse::Error(
+                        block_id,
+                        Diagnostic::new(
+                            Code::KERNEL_FAILED,
+                            format!("kernel wait failed: {e}"),
+                            Severity::Error,
+                        ),
+                    ));
+                    return;
+                }
+            }
+        };
+        let output = child.wait_with_output();
+        match output {
+            Ok(_) if timed_out => {
+                self.audit_exec(
+                    grants.first().cloned(),
+                    &format!("kernel:{language}"),
+                    "timed-out",
+                );
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::KERNEL_FAILED,
+                        format!("kernel timed out after {timeout_ms}ms"),
+                        Severity::Error,
+                    ),
+                ));
+            }
+            Ok(out) if out.status.success() => {
+                match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    Ok(v) => match v.get("outputs").cloned() {
+                        Some(outputs_json) => {
+                            match serde_json::from_value::<Vec<KernelOutput>>(outputs_json) {
+                                Ok(outputs) => {
+                                    self.audit_exec(
+                                        grants.first().cloned(),
+                                        &format!("kernel:{language}"),
+                                        "ok",
+                                    );
+                                    let _ =
+                                        self.tx.send(BlockResponse::KernelExec(block_id, outputs));
+                                }
+                                Err(e) => {
+                                    self.audit_exec(
+                                        grants.first().cloned(),
+                                        &format!("kernel:{language}"),
+                                        "failed",
+                                    );
+                                    let _ = self.tx.send(BlockResponse::Error(
+                                        block_id,
+                                        Diagnostic::new(
+                                            Code::KERNEL_FAILED,
+                                            format!(
+                                                "kernel outputs unparseable ({e}): {}",
+                                                truncate(
+                                                    &String::from_utf8_lossy(&out.stdout),
+                                                    cap_bytes
+                                                )
+                                            ),
+                                            Severity::Error,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            self.audit_exec(
+                                grants.first().cloned(),
+                                &format!("kernel:{language}"),
+                                "failed",
+                            );
+                            let _ = self.tx.send(BlockResponse::Error(
+                                block_id,
+                                Diagnostic::new(
+                                    Code::KERNEL_FAILED,
+                                    format!(
+                                        "kernel output has no `outputs` array: {}",
+                                        truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes)
+                                    ),
+                                    Severity::Error,
+                                ),
+                            ));
+                        }
+                    },
+                    Err(e) => {
+                        self.audit_exec(
+                            grants.first().cloned(),
+                            &format!("kernel:{language}"),
+                            "failed",
+                        );
+                        let _ = self.tx.send(BlockResponse::Error(
+                            block_id,
+                            Diagnostic::new(
+                                Code::KERNEL_FAILED,
+                                format!(
+                                    "kernel stdout is not JSON ({e}): {}",
+                                    truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes)
+                                ),
+                                Severity::Error,
+                            ),
+                        ));
+                    }
+                }
+            }
+            Ok(out) => {
+                let code = out.status.code().unwrap_or(-1);
+                let stderr = truncate(&String::from_utf8_lossy(&out.stderr), cap_bytes);
+                self.audit_exec(
+                    grants.first().cloned(),
+                    &format!("kernel:{language}"),
+                    "failed",
+                );
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::KERNEL_FAILED,
+                        format!(
+                            "kernel failed (exit {code}): {}",
+                            if stderr.trim().is_empty() {
+                                "(no stderr)".to_string()
+                            } else {
+                                stderr.trim().to_string()
+                            }
+                        ),
+                        Severity::Error,
+                    ),
+                ));
+            }
+            Err(e) => {
+                self.audit_exec(
+                    grants.first().cloned(),
+                    &format!("kernel:{language}"),
+                    "failed",
+                );
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::KERNEL_FAILED,
+                        format!("kernel output read failed: {e}"),
                         Severity::Error,
                     ),
                 ));

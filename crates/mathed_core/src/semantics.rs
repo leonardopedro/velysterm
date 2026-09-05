@@ -97,16 +97,20 @@ pub struct KernelStatement {
     pub translator: Option<String>,
     pub model_name: Option<String>,
     pub condition_event: Option<String>,
-    /// N4: `\exec` only — the requested grant name(s), comma-separated
-    /// (e.g. `"readonly"`); the worker's allowlist decides whether
-    /// the grant is honored (deny-by-default). `None` for every other
-    /// kind.
+    /// N4/N11: `\exec` and `\kernel` — the requested grant name(s),
+    /// comma-separated (e.g. `"readonly"`); the worker's allowlist
+    /// decides whether the grant is honored (deny-by-default). `None`
+    /// for every other kind.
     pub grants: Option<String>,
     /// N7: `\exec` only — the `from: #ref` pipe source: the marker
     /// id of the *referenced* `\exec` segment whose latest stdout is
     /// threaded into this segment's stdin. `None` for every other
     /// kind (and for execs without a `from:`).
     pub from: Option<String>,
+    /// N11: `\kernel` only — the requested kernel language (e.g.
+    /// `"typst"`), gated by the worker's language allowlist
+    /// (deny-by-default). `None` for every other kind.
+    pub lang: Option<String>,
     pub span: Range<usize>,
 }
 
@@ -302,7 +306,9 @@ impl SemanticIndex {
             // and names itself via a named `name:` arg (its display
             // label in the output region).
             let grants = match seg.kind {
-                PropKind::Exec => extract_named_string(&seg.extra_args, "grants"),
+                PropKind::Exec | PropKind::Kernel => {
+                    extract_named_string(&seg.extra_args, "grants")
+                }
                 _ => None,
             };
             // N7: `\exec(from: #ref)` — the pipe source marker id.
@@ -310,8 +316,15 @@ impl SemanticIndex {
                 PropKind::Exec => extract_named_string(&seg.extra_args, "from"),
                 _ => None,
             };
+            // N11: `\kernel` — the requested kernel language.
+            let lang = match seg.kind {
+                PropKind::Kernel => extract_named_string(&seg.extra_args, "lang"),
+                _ => None,
+            };
             let name = match (name, seg.kind) {
-                (None, PropKind::Exec) => extract_named_string(&seg.extra_args, "name"),
+                (None, PropKind::Exec | PropKind::Kernel) => {
+                    extract_named_string(&seg.extra_args, "name")
+                }
                 (name, _) => name,
             };
             kernel_statements.push(KernelStatement {
@@ -324,6 +337,7 @@ impl SemanticIndex {
                 condition_event,
                 grants,
                 from,
+                lang,
                 span,
             });
         }
