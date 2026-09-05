@@ -16,6 +16,7 @@
 //! [`BUILTIN_TRANSLATOR`].
 
 use crate::translate::{BUILTIN_EVENT_TRANSLATOR, BUILTIN_TRANSLATOR, TranslateError, Translator};
+use kernel_client::{BlockId, KernelRequest};
 use mathed_core::{KernelStatement, PropKind, TranslatorDef};
 use std::collections::HashMap;
 use unfer_protocol::{EventPredicate, HamiltonianSpec, ModelSpec, PriorSpec, SolverSpec, TermSpec};
@@ -53,6 +54,40 @@ impl std::fmt::Display for DispatchError {
 }
 
 impl std::error::Error for DispatchError {}
+
+/// N4 defaults for a `\exec` segment: 5 s timeout, 64 KiB output cap
+/// (the worker enforces both; the segment can carry its own later).
+pub const EXEC_DEFAULT_TIMEOUT_MS: u64 = 5000;
+pub const EXEC_DEFAULT_CAP_BYTES: usize = 64 * 1024;
+
+/// N4: turn a `\exec` [`KernelStatement`] into the worker request.
+/// The body is the command line (no shell — the worker splits it on
+/// whitespace: first token command, rest args); the `grants` named
+/// arg (comma-separated) is the segment's requested allowlist entry.
+/// This is pure data plumbing — the grant/vocabulary enforcement
+/// happens in the worker, which answers UK-49xx on denial.
+pub fn statement_to_exec_request(stmt: &KernelStatement) -> KernelRequest {
+    debug_assert_eq!(stmt.kind, PropKind::Exec);
+    let mut parts = stmt.body_text.split_whitespace();
+    let command = parts.next().unwrap_or_default().to_string();
+    let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+    let grants: Vec<String> = stmt
+        .grants
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    KernelRequest::Exec {
+        block_id: stmt.span.start as BlockId,
+        command,
+        args,
+        grants,
+        timeout_ms: EXEC_DEFAULT_TIMEOUT_MS,
+        cap_bytes: EXEC_DEFAULT_CAP_BYTES,
+    }
+}
 
 /// Resolve the translator source for a statement: its named
 /// translator, then the unnamed block-local default (`""`), then the

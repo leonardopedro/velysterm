@@ -89,6 +89,11 @@ pub struct KernelStatement {
     pub translator: Option<String>,
     pub model_name: Option<String>,
     pub condition_event: Option<String>,
+    /// N4: `\exec` only — the requested grant name(s), comma-separated
+    /// (e.g. `"readonly"`); the worker's allowlist decides whether
+    /// the grant is honored (deny-by-default). `None` for every other
+    /// kind.
+    pub grants: Option<String>,
     pub span: Range<usize>,
 }
 
@@ -279,6 +284,18 @@ impl SemanticIndex {
                 }
                 _ => None,
             };
+            // N4: `\exec` carries a named `grants:` arg naming the
+            // worker allowlist entry it requests (e.g. "readonly"),
+            // and names itself via a named `name:` arg (its display
+            // label in the output region).
+            let grants = match seg.kind {
+                PropKind::Exec => extract_named_string(&seg.extra_args, "grants"),
+                _ => None,
+            };
+            let name = match (name, seg.kind) {
+                (None, PropKind::Exec) => extract_named_string(&seg.extra_args, "name"),
+                (name, _) => name,
+            };
             kernel_statements.push(KernelStatement {
                 kind: seg.kind,
                 block,
@@ -287,6 +304,7 @@ impl SemanticIndex {
                 translator,
                 model_name,
                 condition_event,
+                grants,
                 span,
             });
         }
@@ -894,6 +912,19 @@ mod tests {
         let p = &idx.kernel_statements[0];
         assert_eq!(p.kind, PropKind::Prior);
         assert_eq!(p.body_text, "vacuum");
+    }
+
+    #[test]
+    fn exec_kernel_statement_carries_grants() {
+        let doc = "#1 echo hello #2 \\exec(#1,#2, grants: \"readonly\", name: \"greet\")";
+        let idx = build_index_for(doc);
+        assert_eq!(idx.kernel_statements.len(), 1);
+        let e = &idx.kernel_statements[0];
+        assert_eq!(e.kind, PropKind::Exec);
+        assert_eq!(e.body_text, "echo hello");
+        assert_eq!(e.grants.as_deref(), Some("readonly"));
+        assert_eq!(e.name.as_deref(), Some("greet"));
+        assert!(e.translator.is_none() && e.model_name.is_none() && e.condition_event.is_none());
     }
 
     // ── P3 #10: translator segments ──

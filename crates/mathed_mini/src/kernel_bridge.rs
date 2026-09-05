@@ -34,7 +34,7 @@ use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
 use crate::dispatch::{
     DispatchError, parse_prior, parse_solver, resolve_translator_src, statement_to_event_json,
-    statement_to_model_spec,
+    statement_to_exec_request, statement_to_model_spec,
 };
 use crate::translate::{TranslateError, Translator};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
@@ -119,6 +119,9 @@ pub struct KernelBridge {
     /// prob offset → hash of the last-dispatched (prob body, model
     /// body) pair.
     prob_hashes: HashMap<usize, u64>,
+    /// exec offset → hash of the last-dispatched (command, grants)
+    /// pair (N4: `\exec` scripted segments).
+    exec_hashes: HashMap<usize, u64>,
     /// Statement offsets present in the last-refreshed index. `poll`
     /// drops any late response whose key is not live so a
     /// deleted statement can never resurrect a stale annotation,
@@ -159,6 +162,30 @@ impl KernelBridge {
             run_log: Vec::new(),
             model_hashes: HashMap::new(),
             prob_hashes: HashMap::new(),
+            exec_hashes: HashMap::new(),
+            translator_errors: HashMap::new(),
+            live: HashSet::new(),
+            pending: HashMap::new(),
+        }
+    }
+
+    /// N4 test/embedding hook: construct the bridge with an explicit
+    /// worker exec allowlist (grant names; empty = deny everything).
+    /// The default constructor reads `MATHED_EXEC_GRANTS` instead.
+    pub fn with_exec_grants(grants: &[&str]) -> Self {
+        let grants: Vec<String> = grants.iter().map(|s| s.to_string()).collect();
+        Self {
+            client: KernelClient::new_with_grants(&grants),
+            engine: Translator::new(),
+            results: HashMap::new(),
+            prob_names: HashMap::new(),
+            stmt_blocks: HashMap::new(),
+            cur_hashes: HashMap::new(),
+            last_result_hashes: HashMap::new(),
+            run_log: Vec::new(),
+            model_hashes: HashMap::new(),
+            prob_hashes: HashMap::new(),
+            exec_hashes: HashMap::new(),
             translator_errors: HashMap::new(),
             live: HashSet::new(),
             pending: HashMap::new(),
@@ -636,12 +663,31 @@ impl KernelBridge {
             }
         }
 
+        // N4: dispatch each `\exec` whose (command, grants) changed.
+        // The worker enforces grants (deny-by-default) and answers
+        // UK-49xx on denial/failure; stdout lands via `poll`'s Exec
+        // arm and renders in the block's output region.
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Exec)
+        {
+            let h = hash_many(&[&stmt.body_text, stmt.grants.as_deref().unwrap_or("")]);
+            self.cur_hashes.insert(stmt.span.start, h);
+            if self.exec_hashes.get(&stmt.span.start) == Some(&h) {
+                continue;
+            }
+            self.submit_or_error(stmt.span.start as u64, statement_to_exec_request(stmt));
+            self.exec_hashes.insert(stmt.span.start, h);
+        }
+
         // Reconcile every scratch map against the statements now in
         // the document. A deleted statement's stale
         // annotation (or dispatch hash) must not persist
         // across refreshes.
         self.results.retain(|k, _| self.live.contains(k));
         self.prob_hashes.retain(|k, _| self.live.contains(k));
+        self.exec_hashes.retain(|k, _| self.live.contains(k));
         self.model_hashes.retain(|k, _| self.live.contains(k));
         self.prob_names.retain(|k, _| self.live.contains(k));
         self.stmt_blocks.retain(|k, _| self.live.contains(k));
@@ -867,6 +913,20 @@ impl KernelBridge {
             }
         }
 
+        // Re-run every in-block `\exec` (forced — the notebook
+        // "run cell" affordance for scripted segments). Grants are
+        // enforced by the worker; denial/failure surfaces via `poll`.
+        for stmt in idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == PropKind::Exec && in_block(s))
+        {
+            let h = hash_many(&[&stmt.body_text, stmt.grants.as_deref().unwrap_or("")]);
+            self.cur_hashes.insert(stmt.span.start, h);
+            self.submit_or_error(stmt.span.start as u64, statement_to_exec_request(stmt));
+            self.exec_hashes.insert(stmt.span.start, h);
+        }
+
         changed
     }
 
@@ -968,6 +1028,7 @@ impl KernelBridge {
             let elapsed_ms = match &resp {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
+                | BlockResponse::Exec(id, _)
                 | BlockResponse::Error(id, _)
                 | BlockResponse::Success(id) => self
                     .pending
@@ -980,6 +1041,7 @@ impl KernelBridge {
             let key_live = match &resp {
                 BlockResponse::Value(id, _)
                 | BlockResponse::StringValue(id, _)
+                | BlockResponse::Exec(id, _)
                 | BlockResponse::Error(id, _) => self.live.contains(&(*id as usize)),
                 // Model (re)definition carries no displayed result.
                 BlockResponse::Success(_) => true,
@@ -1003,6 +1065,16 @@ impl KernelBridge {
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
                     self.log_run(&(id as usize), "federation", elapsed_ms, r);
+                    changed = true;
+                }
+                // N4: a granted `\exec` finished with exit 0; stdout
+                // renders in the block's output region like any other
+                // string result.
+                BlockResponse::Exec(id, s) => {
+                    let r = KernelResult::StringValue(s);
+                    self.results.insert(id as usize, r.clone());
+                    self.record_fresh(&(id as usize));
+                    self.log_run(&(id as usize), "exec", elapsed_ms, r);
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
@@ -2494,5 +2566,107 @@ mod tests {
             elapsed < Duration::from_millis(16),
             "100-block unchanged refresh took {elapsed:?} (target < 16 ms)"
         );
+    }
+
+    // ── N4: granted `\exec` scripted segments ──
+
+    #[test]
+    fn exec_dispatch_builds_the_request() {
+        let doc = "#1 echo hello world #2 \\exec(#1,#2, grants: \"readonly\", name: \"greet\")";
+        let idx = build_index(doc);
+        let e = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Exec)
+            .expect("exec statement collected");
+        let req = statement_to_exec_request(e);
+        match req {
+            KernelRequest::Exec {
+                block_id,
+                command,
+                args,
+                grants,
+                timeout_ms,
+                cap_bytes,
+            } => {
+                assert_eq!(command, "echo");
+                assert_eq!(args, vec!["hello", "world"]);
+                assert_eq!(grants, vec!["readonly"]);
+                assert_eq!(block_id, e.span.start as u64);
+                assert!(timeout_ms > 0 && cap_bytes > 0, "defaults set");
+            }
+            _ => panic!("expected Exec request"),
+        }
+    }
+
+    #[test]
+    fn exec_runs_and_renders_stdout_in_region() {
+        let doc = "= Cell\n\
+                   #1 echo hello #2 \\exec(#1,#2, grants: \"readonly\")";
+        let mut bridge = KernelBridge::with_exec_grants(&["readonly"]);
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        // stdout renders in the block's output region.
+        let out = bridge.block_outputs(0);
+        assert_eq!(out.len(), 1, "one exec output: {out:?}");
+        assert!(matches!(out[0].1, KernelResult::StringValue(ref s) if s.trim() == "hello"));
+
+        // The run log records it as an exec run.
+        let log = bridge.run_log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].op, "exec");
+        assert_eq!(log[0].block, 0);
+        assert!(matches!(log[0].result, KernelResult::StringValue(_)));
+    }
+
+    #[test]
+    fn exec_grant_denied_surfaces_uk_error_with_hint() {
+        // Deny-by-default bridge: the readonly grant is not configured.
+        let doc = "= Cell\n\
+                   #1 echo hello #2 \\exec(#1,#2, grants: \"readonly\")";
+        let mut bridge = KernelBridge::new();
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let out = bridge.block_outputs(0);
+        assert_eq!(out.len(), 1);
+        match &out[0].1 {
+            KernelResult::Error {
+                code_name,
+                message,
+                hints,
+            } => {
+                assert_eq!(code_name, "ExecGrantDenied");
+                assert!(message.contains("deny-by-default"));
+                assert!(
+                    hints.iter().any(|h| h.target == "exec.grants"),
+                    "repair hint points at the grant setting"
+                );
+            }
+            other => panic!("expected ExecGrantDenied, got {other:?}"),
+        }
+        let log = bridge.run_log();
+        assert_eq!(log[0].op, "error:ExecGrantDenied");
+    }
+
+    #[test]
+    fn exec_nonzero_exit_surfaces_uk_error_with_code() {
+        let doc = "= Cell\n\
+                   #1 false #2 \\exec(#1,#2, grants: \"readonly\")";
+        let mut bridge = KernelBridge::with_exec_grants(&["readonly"]);
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let out = bridge.block_outputs(0);
+        match &out[0].1 {
+            KernelResult::Error {
+                code_name, message, ..
+            } => {
+                assert_eq!(code_name, "ExecFailed");
+                assert!(message.contains("exit 1"), "got: {message}");
+            }
+            other => panic!("expected ExecFailed, got {other:?}"),
+        }
     }
 }

@@ -52,6 +52,21 @@ pub enum KernelRequest {
         block_id: BlockId,
         cid: String,
     },
+    /// N4: a granted scripted segment (`\exec`). The worker runs
+    /// `command` (no shell) under the first requested grant present in
+    /// its configured allowlist (deny-by-default — see
+    /// [`KernelWorker::with_exec_grants`]), enforcing `timeout_ms` and
+    /// `cap_bytes`. Exit 0 answers `BlockResponse::Exec` with stdout;
+    /// any failure answers a UK-4908/4909/4910 `Error`. Execution lives
+    /// in the worker, never in the editor process.
+    Exec {
+        block_id: BlockId,
+        command: String,
+        args: Vec<String>,
+        grants: Vec<String>,
+        timeout_ms: u64,
+        cap_bytes: usize,
+    },
     Shutdown,
     /// Test-only: injects a deterministic panic into the worker's
     /// request handling, so tests can pin the "a panicked request
@@ -78,7 +93,8 @@ impl KernelRequest {
             | KernelRequest::CloseModel { block_id, .. }
             | KernelRequest::DidCreate { block_id, .. }
             | KernelRequest::ContentPublish { block_id, .. }
-            | KernelRequest::ContentResolve { block_id, .. } => Some(*block_id),
+            | KernelRequest::ContentResolve { block_id, .. }
+            | KernelRequest::Exec { block_id, .. } => Some(*block_id),
             KernelRequest::CloseModelById { model_id } => Some(*model_id),
             KernelRequest::Shutdown => None,
             #[cfg(test)]
@@ -95,10 +111,30 @@ pub struct KernelClient {
 
 impl KernelClient {
     pub fn new() -> Self {
+        // N4: the worker's exec allowlist comes from the environment,
+        // default empty = deny everything (a document with `\exec`
+        // segments stays inert until an operator opts in).
+        let grants = std::env::var("MATHED_EXEC_GRANTS")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Self::new_with_grants(&grants)
+    }
+
+    /// Construct a client whose worker's exec allowlist is `grants`
+    /// (grant names only — the command vocabulary is fixed data in the
+    /// worker). Test/embedding hook; the default constructor reads
+    /// `MATHED_EXEC_GRANTS` instead.
+    pub fn new_with_grants(grants: &[String]) -> Self {
         let (tx, worker_rx) = unbounded::<KernelRequest>();
         let (worker_tx, rx) = unbounded::<BlockResponse>();
 
         let mut worker = KernelWorker::new(worker_tx);
+        worker.with_exec_grants(grants);
         let worker_handle = thread::spawn(move || {
             worker.run(worker_rx);
         });

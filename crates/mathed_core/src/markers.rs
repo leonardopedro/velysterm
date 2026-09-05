@@ -144,6 +144,13 @@ pub enum PropKind {
     /// markup is spliced after the body (T3 seam). See
     /// [`PropKind::is_template`].
     Template,
+    /// N4: a granted scripted segment — `\exec(#s,#f, grants:
+    /// "readonly", name: "…")`. The body is a command line (no
+    /// shell) run by the kernel worker under the named grant,
+    /// deny-by-default; stdout renders in the block's output region,
+    /// failures surface a UK-49xx code. Execution lives in the
+    /// worker, never in the editor process.
+    Exec,
 }
 
 impl PropKind {
@@ -172,6 +179,9 @@ impl PropKind {
             "layout" => Self::Layout,
             // T2: `\template` / `\tpl` (see [`PropKind::Template`]).
             "template" | "tpl" => Self::Template,
+            // N4: `\exec` — a granted scripted segment (see
+            // [`PropKind::Exec`]).
+            "exec" => Self::Exec,
             _ => Self::Other,
         }
     }
@@ -214,6 +224,7 @@ impl PropKind {
                 | Self::Prob
                 | Self::Translator
                 | Self::Layout
+                | Self::Exec
         )
     }
 

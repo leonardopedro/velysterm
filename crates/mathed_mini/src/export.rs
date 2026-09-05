@@ -75,7 +75,7 @@ fn ascii_math_name(glyph: char) -> Option<&'static str> {
     mathed_core::completion::COMPLETIONS
         .iter()
         .filter(|e| e.ascii.starts_with('\\') && e.glyph.chars().count() == 1)
-        .filter(|e| e.glyph.chars().next() == Some(glyph))
+        .filter(|e| e.glyph.starts_with(glyph))
         .max_by_key(|e| e.ascii.len())
         .map(|e| e.ascii)
 }
@@ -564,6 +564,35 @@ mod tests {
         assert_eq!(block_runs[0]["timing_ms"], 12);
         assert_eq!(block_runs[0]["input_hash"], 7);
         assert_eq!(block_runs[0]["result"]["value"], 0.5);
+    }
+
+    #[test]
+    fn json_export_record_includes_exec_runs() {
+        // N4: a granted `\exec` completes and its run lands in the
+        // notebook record like any other op.
+        let doc = "= Cell\n\
+                   #1 echo hello #2 \\exec(#1,#2, grants: \"readonly\")";
+        let mut bridge = crate::kernel_bridge::KernelBridge::with_exec_grants(&["readonly"]);
+        bridge.refresh(doc);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            bridge.poll();
+            if bridge.run_log().iter().any(|e| e.op == "exec") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "exec run never completed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let out = export_json_with_runs(doc, bridge.run_log());
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let blocks = parsed["blocks"].as_array().unwrap();
+        let runs = blocks[0]["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 1, "one exec run recorded: {runs:?}");
+        assert_eq!(runs[0]["op"], "exec");
+        assert_eq!(runs[0]["result"]["string"], "hello\n");
     }
 
     #[test]

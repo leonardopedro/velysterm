@@ -1,7 +1,9 @@
 use crate::{BlockId, KernelRequest};
 use crossbeam_channel::{Receiver, Sender};
 use prob_kernel::Session;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use unfer_protocol::{Code, Diagnostic, Severity};
 
 #[derive(Debug)]
@@ -10,7 +12,40 @@ pub enum BlockResponse {
     Success(BlockId),
     Error(BlockId, Diagnostic),
     StringValue(BlockId, String),
+    /// N4: a granted `\exec` segment completed with exit 0; `stdout` is
+    /// rendered in the block's output region (StringValue-like).
+    Exec(BlockId, String),
 }
+
+/// N4: one audited `\exec` attempt. Every invocation — denied or
+/// allowed — is recorded so the worker keeps a bounded audit trail of
+/// what commands were asked for and why they ran or did not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecAuditEntry {
+    /// The grant the segment requested, if any.
+    pub grant: Option<String>,
+    /// The command basename the worker was asked to run.
+    pub command: String,
+    /// `ok`, `grant-denied`, `command-denied`, `failed`, `timed-out`.
+    pub outcome: &'static str,
+}
+
+/// N4: the v1 grant vocabularies — data, not code. `readonly` is safe
+/// builtins only (and args may not carry shell metacharacters: the
+/// worker never runs through a shell, and `readonly` additionally
+/// refuses metacharacter args outright); `compute` is hosted numerical
+/// tools. The worker's *allowlist* (which grants are enabled) is
+/// configured separately and defaults to empty = deny everything.
+pub const EXEC_GRANT_VOCABULARIES: &[(&str, &[&str])] = &[
+    (
+        "readonly",
+        &[
+            "echo", "cat", "head", "tail", "wc", "grep", "ls", "pwd", "printf", "true", "false",
+            "sleep",
+        ],
+    ),
+    ("compute", &["bc"]),
+];
 
 pub struct KernelWorker {
     sessions: HashMap<BlockId, Session>,
@@ -18,9 +53,18 @@ pub struct KernelWorker {
     consensus: unfer_consensus::ConsensusNode,
     keypair: unfer_consensus::Keypair,
     did: Option<String>,
+    /// N4: enabled exec grant names (deny-by-default; set via
+    /// `MATHED_EXEC_GRANTS` by the client or `with_exec_grants`).
+    exec_grants: Vec<String>,
+    /// N4: bounded audit trail of exec attempts (oldest drained).
+    exec_audit: VecDeque<ExecAuditEntry>,
 }
 
 impl KernelWorker {
+    /// How many exec attempts the audit trail keeps (bounded queue
+    /// convention).
+    const MAX_EXEC_AUDIT: usize = 64;
+
     pub fn new(tx: Sender<BlockResponse>) -> Self {
         Self {
             sessions: HashMap::new(),
@@ -30,7 +74,20 @@ impl KernelWorker {
             )),
             keypair: unfer_consensus::Keypair::generate(),
             did: None,
+            exec_grants: Vec::new(),
+            exec_audit: VecDeque::new(),
         }
+    }
+
+    /// Enable exec grants (N4). The default is deny-everything: no
+    /// `\exec` segment runs until its grant is named here.
+    pub fn with_exec_grants(&mut self, grants: &[String]) {
+        self.exec_grants = grants.to_vec();
+    }
+
+    /// The bounded audit trail of exec attempts, oldest first.
+    pub fn exec_audit(&self) -> &VecDeque<ExecAuditEntry> {
+        &self.exec_audit
     }
 
     fn bad_handle(block_id: BlockId) -> BlockResponse {
@@ -262,6 +319,14 @@ impl KernelWorker {
                     ));
                 }
             },
+            KernelRequest::Exec {
+                block_id,
+                command,
+                args,
+                grants,
+                timeout_ms,
+                cap_bytes,
+            } => self.handle_exec(block_id, command, args, grants, timeout_ms, cap_bytes),
             KernelRequest::Shutdown => {
                 unreachable!("run() breaks on Shutdown before dispatching")
             }
@@ -271,6 +336,235 @@ impl KernelWorker {
             }
         }
     }
+
+    /// N4: run one granted `\exec` segment. No shell is ever involved;
+    /// grants are validated against the configured allowlist and the
+    /// fixed v1 vocabularies, the process runs under a timeout and an
+    /// output cap, and every attempt is audited. All failures answer a
+    /// UK-49xx `Error`; exit 0 answers [`BlockResponse::Exec`] with
+    /// stdout.
+    fn handle_exec(
+        &mut self,
+        block_id: BlockId,
+        command: String,
+        args: Vec<String>,
+        grants: Vec<String>,
+        timeout_ms: u64,
+        cap_bytes: usize,
+    ) {
+        // 1. Grant check: the first requested grant present in the
+        // configured allowlist wins; none configured = deny everything.
+        let Some(grant_ref) = grants
+            .iter()
+            .find(|g| self.exec_grants.iter().any(|a| a == *g))
+        else {
+            self.audit_exec(grants.first().cloned(), &command, "grant-denied");
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_GRANT_DENIED,
+                    format!(
+                        "exec grant denied: the segment asked for {grants:?} but the \
+                         worker allowlist is deny-by-default; grant the segment \
+                         (MATHED_EXEC_GRANTS) or remove it"
+                    ),
+                    Severity::Error,
+                )
+                .with_hint(unfer_protocol::RepairHint::new(
+                    unfer_protocol::HintKind::SetParam,
+                    "exec.grants",
+                    "add the requested grant to the worker allowlist \
+                     (MATHED_EXEC_GRANTS) or remove the segment",
+                )),
+            ));
+            return;
+        };
+        let grant: &str = grant_ref.as_str();
+
+        // 2. Vocabulary check: the command must be in the grant's
+        // allowed list (fixed data, not code).
+        let allowed = EXEC_GRANT_VOCABULARIES
+            .iter()
+            .find(|(name, _)| *name == grant)
+            .map(|(_, cmds)| *cmds)
+            .unwrap_or(&[]);
+        let basename = command.rsplit('/').next().unwrap_or(command.as_str());
+        if !allowed.contains(&basename) {
+            self.audit_exec(Some(grant.to_string()), &command, "command-denied");
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_COMMAND_DENIED,
+                    format!(
+                        "exec command denied: {basename:?} is not in the {grant:?} \
+                         vocabulary {allowed:?}; use an allowed command or request a \
+                         broader grant"
+                    ),
+                    Severity::Error,
+                ),
+            ));
+            return;
+        }
+
+        // 3. `readonly` refuses shell-shaped args (metacharacters):
+        // the grant is for safe builtins with literal arguments only.
+        if grant == "readonly"
+            && args
+                .iter()
+                .any(|a| a.chars().any(|c| "|&;<>$`\\()*?[]{}#~!".contains(c)))
+        {
+            self.audit_exec(Some(grant.to_string()), &command, "command-denied");
+            let _ = self.tx.send(BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_COMMAND_DENIED,
+                    "exec command denied: readonly args may not contain shell \
+                     metacharacters (| & ; < > $ ` \\ ( ) * ? [ ] { } # ~ !)"
+                        .to_string(),
+                    Severity::Error,
+                ),
+            ));
+            return;
+        }
+
+        // 4. Run under timeout + cap. The child is polled so a
+        // non-exiting process is killed at the deadline; pipes are
+        // drained only after exit, so draining cannot hang.
+        let started = Instant::now();
+        let mut child = match Command::new(&command)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                self.audit_exec(Some(grant.to_string()), &command, "failed");
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::EXEC_FAILED,
+                        format!("exec launch failed: {e}"),
+                        Severity::Error,
+                    ),
+                ));
+                return;
+            }
+        };
+        let deadline = started + Duration::from_millis(timeout_ms.max(1));
+        let timed_out = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break false,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        break true;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => {
+                    self.audit_exec(Some(grant.to_string()), &command, "failed");
+                    let _ = self.tx.send(BlockResponse::Error(
+                        block_id,
+                        Diagnostic::new(
+                            Code::EXEC_FAILED,
+                            format!("exec wait failed: {e}"),
+                            Severity::Error,
+                        ),
+                    ));
+                    return;
+                }
+            }
+        };
+        // The child has exited (or was killed): draining the pipes now
+        // cannot hang.
+        let output = child.wait_with_output();
+        match output {
+            Ok(out) if timed_out => {
+                let captured = truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes);
+                self.audit_exec(Some(grant.to_string()), &command, "timed-out");
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::EXEC_FAILED,
+                        format!(
+                            "exec timed out after {timeout_ms}ms{}",
+                            if captured.trim().is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (captured: {})", captured.trim())
+                            }
+                        ),
+                        Severity::Error,
+                    ),
+                ));
+            }
+            Ok(out) if out.status.success() => {
+                let stdout = truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes);
+                self.audit_exec(Some(grant.to_string()), &command, "ok");
+                let _ = self.tx.send(BlockResponse::Exec(block_id, stdout));
+            }
+            Ok(out) => {
+                let code = out.status.code().unwrap_or(-1);
+                let stderr = truncate(&String::from_utf8_lossy(&out.stderr), cap_bytes);
+                self.audit_exec(Some(grant.to_string()), &command, "failed");
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::EXEC_FAILED,
+                        format!(
+                            "exec failed (exit {code}): {}",
+                            if stderr.trim().is_empty() {
+                                "(no stderr)".to_string()
+                            } else {
+                                stderr.trim().to_string()
+                            }
+                        ),
+                        Severity::Error,
+                    ),
+                ));
+            }
+            Err(e) => {
+                self.audit_exec(Some(grant.to_string()), &command, "failed");
+                let _ = self.tx.send(BlockResponse::Error(
+                    block_id,
+                    Diagnostic::new(
+                        Code::EXEC_FAILED,
+                        format!("exec output read failed: {e}"),
+                        Severity::Error,
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Append one exec attempt to the bounded audit trail.
+    fn audit_exec(&mut self, grant: Option<String>, command: &str, outcome: &'static str) {
+        self.exec_audit.push_back(ExecAuditEntry {
+            grant,
+            command: command.to_string(),
+            outcome,
+        });
+        if self.exec_audit.len() > Self::MAX_EXEC_AUDIT {
+            self.exec_audit.pop_front();
+        }
+    }
+}
+
+/// Truncate `s` to at most `cap` bytes at a char boundary, appending a
+/// marker when anything was cut.
+fn truncate(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut t = s[..end].to_string();
+    t.push_str("…(truncated)");
+    t
 }
 
 impl KernelWorker {
@@ -295,9 +589,16 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            // Deny-by-default, like the production allowlist.
+            Self::with_grants(&[])
+        }
+
+        fn with_grants(grants: &[&str]) -> Self {
             let (req_tx, req_rx) = unbounded::<KernelRequest>();
             let (resp_tx, resp_rx) = unbounded::<BlockResponse>();
-            let worker = KernelWorker::new(resp_tx.clone());
+            let mut worker = KernelWorker::new(resp_tx.clone());
+            let grants: Vec<String> = grants.iter().map(|s| s.to_string()).collect();
+            worker.with_exec_grants(&grants);
             // Spawn the worker on a thread so it processes
             // sequentially without blocking the test.
             std::thread::spawn(move || {
@@ -690,5 +991,179 @@ mod tests {
         handle.join().unwrap();
         // Worker drops its own internal tx after loop exit; resp_rx
         // now is disconnected.
+    }
+
+    // --- N4: granted `\exec` scripted segments ---
+
+    fn exec_request(block_id: u64, command: &str, args: &[&str], grant: &str) -> KernelRequest {
+        KernelRequest::Exec {
+            block_id,
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            grants: vec![grant.to_string()],
+            timeout_ms: 1000,
+            cap_bytes: 4096,
+        }
+    }
+
+    #[test]
+    fn exec_grant_denied_returns_uk4908_with_hint() {
+        // Deny-by-default allowlist: no grant is configured.
+        let h = Harness::new();
+        let resp = h.send(exec_request(1, "echo", &["hi"], "readonly"));
+        match resp {
+            BlockResponse::Error(id, diag) => {
+                assert_eq!(id, 1);
+                assert_eq!(diag.code, Code::EXEC_GRANT_DENIED);
+                assert!(diag.hints.iter().any(|h| h.target == "exec.grants"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_command_outside_vocabulary_returns_uk4909() {
+        let h = Harness::with_grants(&["readonly"]);
+        // `rm` is not a readonly builtin.
+        let resp = h.send(exec_request(2, "rm", &["-rf"], "readonly"));
+        match resp {
+            BlockResponse::Error(id, diag) => {
+                assert_eq!(id, 2);
+                assert_eq!(diag.code, Code::EXEC_COMMAND_DENIED);
+                assert!(diag.message.contains("rm"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_readonly_metachar_args_are_refused() {
+        let h = Harness::with_grants(&["readonly"]);
+        let resp = h.send(exec_request(3, "echo", &["a|b"], "readonly"));
+        match resp {
+            BlockResponse::Error(_, diag) => {
+                assert_eq!(diag.code, Code::EXEC_COMMAND_DENIED);
+                assert!(diag.message.contains("metacharacters"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_success_returns_stdout() {
+        let h = Harness::with_grants(&["readonly"]);
+        let resp = h.send(exec_request(4, "echo", &["hello"], "readonly"));
+        match resp {
+            BlockResponse::Exec(id, out) => {
+                assert_eq!(id, 4);
+                assert_eq!(out.trim(), "hello");
+            }
+            other => panic!("expected Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_nonzero_exit_returns_uk4910_with_code() {
+        let h = Harness::with_grants(&["readonly"]);
+        // `false` exits 1 with no stderr.
+        let resp = h.send(exec_request(5, "false", &[], "readonly"));
+        match resp {
+            BlockResponse::Error(_, diag) => {
+                assert_eq!(diag.code, Code::EXEC_FAILED);
+                assert!(diag.message.contains("exit 1"), "got: {}", diag.message);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_timeout_kills_and_returns_uk4910() {
+        let h = Harness::with_grants(&["readonly"]);
+        let start = std::time::Instant::now();
+        let resp = h.send(KernelRequest::Exec {
+            block_id: 6,
+            command: "sleep".to_string(),
+            args: vec!["30".to_string()],
+            grants: vec!["readonly".to_string()],
+            timeout_ms: 200,
+            cap_bytes: 4096,
+        });
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "timeout did not kill the child promptly"
+        );
+        match resp {
+            BlockResponse::Error(_, diag) => {
+                assert_eq!(diag.code, Code::EXEC_FAILED);
+                assert!(diag.message.contains("timed out"), "got: {}", diag.message);
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_output_cap_truncates_stdout() {
+        let h = Harness::with_grants(&["readonly"]);
+        // `head -c 500 /dev/zero` emits 500 bytes of NULs — more than
+        // the 100-byte cap (NULs become U+FFFD under from_utf8_lossy,
+        // which is fine: the cap counts bytes before conversion).
+        let resp = h.send(KernelRequest::Exec {
+            block_id: 7,
+            command: "head".to_string(),
+            args: vec!["-c".to_string(), "500".to_string(), "/dev/zero".to_string()],
+            grants: vec!["readonly".to_string()],
+            timeout_ms: 1000,
+            cap_bytes: 100,
+        });
+        match resp {
+            BlockResponse::Exec(_, out) => {
+                assert!(out.ends_with("…(truncated)"), "got: {out:?}");
+                assert!(out.len() < 150, "cap not enforced: {} bytes", out.len());
+            }
+            other => panic!("expected Exec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_audit_records_denied_and_ok_attempts() {
+        // Drive the worker directly (no thread) so the audit trail is
+        // inspectable after each attempt.
+        let (tx, _rx) = unbounded::<BlockResponse>();
+        let mut w = KernelWorker::new(tx);
+        w.with_exec_grants(&["readonly".to_string()]);
+        w.handle_exec(
+            1,
+            "rm".to_string(),
+            vec![],
+            vec!["readonly".to_string()],
+            1000,
+            4096,
+        );
+        w.handle_exec(
+            2,
+            "echo".to_string(),
+            vec!["hi".to_string()],
+            vec!["readonly".to_string()],
+            1000,
+            4096,
+        );
+        let audit = w.exec_audit();
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0].outcome, "command-denied");
+        assert_eq!(audit[0].command, "rm");
+        assert_eq!(audit[1].outcome, "ok");
+
+        // A deny-all worker records the grant denial too.
+        let (tx2, _rx2) = unbounded::<BlockResponse>();
+        let mut w2 = KernelWorker::new(tx2);
+        w2.handle_exec(
+            3,
+            "echo".to_string(),
+            vec![],
+            vec!["readonly".to_string()],
+            1000,
+            4096,
+        );
+        assert_eq!(w2.exec_audit()[0].outcome, "grant-denied");
     }
 }
