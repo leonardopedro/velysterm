@@ -379,6 +379,33 @@ impl App {
         }
     }
 
+    /// Run every block (Ctrl+Shift+Enter, N-series N5): the
+    /// notebook "run all" affordance.
+    fn run_all_blocks(&mut self) {
+        let text = self.doc.text();
+        let n = self.block_index.blocks.len();
+        let mut any = false;
+        for i in 0..n {
+            any |= self.bridge.run_block(text, i);
+        }
+        if any {
+            self.invalidate_annotations();
+        }
+        self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
+        self.request_redraw();
+    }
+
+    /// Clear displayed outputs (Ctrl+Shift+K, N-series N5): the
+    /// notebook "clear outputs" affordance — regions only, the doc
+    /// text and the run log (the reproducibility record) are
+    /// untouched.
+    fn clear_outputs(&mut self) {
+        self.bridge.clear_outputs();
+        self.region_cache.clear();
+        self.invalidate_annotations();
+        self.request_redraw();
+    }
+
     /// Run the block containing the caret (Ctrl+Enter, N-series
     /// N2): the notebook "run cell" affordance — re-issues the
     /// block's kernel requests even when nothing changed, then
@@ -639,6 +666,11 @@ impl App {
             "a" | "A" => {
                 self.select_all();
                 self.request_redraw();
+                true
+            }
+            // N5: clear outputs (Ctrl+Shift+K) — region only.
+            "k" | "K" if self.mods.shift_key() => {
+                self.clear_outputs();
                 true
             }
             "m" | "M" => {
@@ -1853,7 +1885,10 @@ impl ApplicationHandler<UserEvent> for App {
                         self.push_a11y_update();
                     }
                     Key::Named(NamedKey::Enter) => {
-                        if self.mods.control_key() {
+                        if self.mods.control_key() && self.mods.shift_key() {
+                            // Run every block (N-series N5).
+                            self.run_all_blocks();
+                        } else if self.mods.control_key() {
                             // Run the caret's block (N-series N2).
                             self.run_current_block();
                         } else {

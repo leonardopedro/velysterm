@@ -116,6 +116,14 @@ pub struct TransformOptions {
     /// revealed). At a shared insertion point template output
     /// (content) is spliced *before* kernel annotations (results).
     pub template_splices: HashMap<usize, String>,
+    /// Block output regions (N-series N5, `--with-outputs`): Typst
+    /// markup keyed by an **arbitrary doc offset** (a block's end,
+    /// from `split_blocks`) and spliced at that position, pinned
+    /// like the other splices. Unlike `annotations`/`template_splices`
+    /// this is not tied to a segment body — the caller (report
+    /// export) renders each block's computed region beneath its
+    /// content. Derived state: never written into the doc text.
+    pub block_splices: HashMap<usize, String>,
     /// Translator error messages keyed by the translator segment's
     /// body **start** offset (P5 #28). When present, the
     /// expanded translator panel shows the error message in red
@@ -392,6 +400,26 @@ pub fn to_render_text_range(
     // revealed (caret/selection over it) — the raw token wins in
     // that case so the user sees/edits the original
     // source instead of the computed annotation.
+    // Block output regions (N-series N5): markup keyed by arbitrary
+    // doc offsets (block ends), spliced at that position. No segment
+    // involved — any char-boundary offset in range works; the offset
+    // becomes a window bound so the splice fires exactly once.
+    let block_splice_points: Vec<(usize, &str)> = if opts.block_splices.is_empty() {
+        Vec::new()
+    } else {
+        let mut points: Vec<(usize, &str)> = opts
+            .block_splices
+            .iter()
+            .filter(|(pos, _)| range.start <= **pos && **pos <= range.end)
+            .map(|(pos, markup)| (*pos, markup.as_str()))
+            .collect();
+        points.sort_by_key(|(pos, _)| *pos);
+        for (pos, _) in &points {
+            bounds.push(*pos);
+        }
+        points
+    };
+
     let annotation_points: Vec<(usize, &str)> = if opts.annotations.is_empty() {
         Vec::new()
     } else {
@@ -466,6 +494,16 @@ pub fn to_render_text_range(
     }
     bounds.sort_unstable();
     bounds.dedup();
+    // A splice at exactly `range.end` (e.g. a block output region at
+    // the very end of the document) would be the last window's *end*,
+    // never a *start* — append a duplicate end so the final
+    // (zero-width) window fires the splice. Only when a block splice
+    // sits exactly there, so every other render is untouched.
+    if block_splice_points.iter().any(|(pos, _)| *pos == range.end)
+        && bounds.last() == Some(&range.end)
+    {
+        bounds.push(range.end);
+    }
 
     // 4. Emit chunks.
     let mut out = String::new();
@@ -528,6 +566,15 @@ pub fn to_render_text_range(
         // Template output first, then kernel annotations, at a
         // shared insertion point (content before results).
         for (pos, markup) in &template_points {
+            if *pos == start {
+                pin_splice_point(start, &mut out, &mut map);
+                out.push_str(markup);
+            }
+        }
+        // Block output regions come after content, before inline
+        // kernel annotations (results), mirroring the template/
+        // annotation order at a shared point.
+        for (pos, markup) in &block_splice_points {
             if *pos == start {
                 pin_splice_point(start, &mut out, &mut map);
                 out.push_str(markup);

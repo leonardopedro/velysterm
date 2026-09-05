@@ -15,6 +15,7 @@
 //! below its block in the compositing loop, cite-popup style.
 
 use imaging::RgbaImage;
+use std::collections::HashMap;
 
 use crate::kernel_bridge::KernelResult;
 use crate::render::{RenderError, render_markup};
@@ -32,22 +33,29 @@ pub fn stale_banner() -> String {
 /// document order. Computed values and string results are green (the
 /// same tint the inline annotations use); errors show the UK-####
 /// code, the message, and the first repair hint in red.
-pub fn region_markup(outputs: &[(usize, KernelResult)]) -> String {
-    // Document order, whatever the caller's order: sorting here
-    // keeps the region total even if a future caller hands us an
-    // unsorted slice (`block_outputs` already sorts, so this is
-    // normally a no-op).
+/// Shared line builder: one line per result, in document order
+/// (offset-sorted, whatever the caller's order — `block_outputs`
+/// already sorts, so the sort is normally a no-op but keeps the
+/// region total). Each line carries its timing annotation when one is
+/// supplied (N5 timing display: "· N ms" from the run log).
+fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>) -> Vec<String> {
     let mut sorted: Vec<(usize, KernelResult)> =
         outputs.iter().map(|(k, r)| (*k, r.clone())).collect();
     sorted.sort_by_key(|(k, _)| *k);
     let mut lines: Vec<String> = Vec::with_capacity(outputs.len());
-    for (_, result) in &sorted {
+    for (offset, result) in &sorted {
+        let timing = timings
+            .get(offset)
+            .map(|ms| format!(" · {ms} ms"))
+            .unwrap_or_default();
         let line = match result {
             KernelResult::Value(p) => {
                 // Escape `=` so Typst does not read it as a heading.
-                format!("#text(rgb(\"#138000\"))[\\\\= {p:.4}]")
+                format!("#text(rgb(\"#138000\"))[\\\\= {p:.4}{timing}]")
             }
-            KernelResult::StringValue(s) => format!("#text(rgb(\"#138000\"))[{s}]"),
+            KernelResult::StringValue(s) => {
+                format!("#text(rgb(\"#138000\"))[{s}{timing}]")
+            }
             KernelResult::Error {
                 code_name,
                 message,
@@ -59,12 +67,28 @@ pub fn region_markup(outputs: &[(usize, KernelResult)]) -> String {
                 } else {
                     format!(" — {hint}")
                 };
-                format!("#text(rgb(\"#c00000\"))[{code_name}: {message}{hint_part}]")
+                format!("#text(rgb(\"#c00000\"))[{code_name}: {message}{hint_part}{timing}]")
             }
         };
         lines.push(line);
     }
-    lines.join("\n")
+    lines
+}
+
+pub fn region_markup(outputs: &[(usize, KernelResult)]) -> String {
+    region_lines(outputs, &HashMap::new()).join("\n")
+}
+
+/// [`region_markup`] with per-result timing annotations (N-series N5
+/// timing display): each line gets "· N ms" from the bridge's run
+/// log. Used by the report export (`--with-outputs`) and the editor
+/// when timings are available; the plain form stays byte-identical
+/// for callers that pass no timings.
+pub fn region_markup_with_timings(
+    outputs: &[(usize, KernelResult)],
+    timings: &HashMap<usize, u64>,
+) -> String {
+    region_lines(outputs, timings).join("\n")
 }
 
 /// Render a block output region to an image at `width_pt` (the doc
@@ -142,6 +166,20 @@ mod tests {
             "repair hint: {m}"
         );
         assert!(m.contains("#c00000"), "red tint: {m}");
+    }
+
+    #[test]
+    fn region_markup_with_timings_appends_ms_per_line() {
+        let outputs = vec![(10, KernelResult::Value(0.5))];
+        let mut timings = std::collections::HashMap::new();
+        timings.insert(10, 12);
+        let m = region_markup_with_timings(&outputs, &timings);
+        assert!(m.contains("0.5000 · 12 ms"), "timing line: {m}");
+        // The plain form is unchanged (no timing annotations).
+        assert!(
+            !region_markup(&outputs).contains("ms"),
+            "plain form stays plain"
+        );
     }
 
     #[test]

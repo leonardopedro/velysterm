@@ -382,6 +382,61 @@ pub fn export_typst_template(
     doc_text: &str,
     extra_ctx_json: Option<&str>,
 ) -> Result<String, String> {
+    render_doc(doc_text, extra_ctx_json, std::collections::HashMap::new())
+}
+
+/// N5: `--export-typst --with-outputs` — render the document with each
+/// block's computed output region spliced beneath its content (the
+/// printable notebook page). Regions are **derived state**: the bridge
+/// runs the live kernel statements to completion, then each region's
+/// markup is spliced at its block's end offset via
+/// `TransformOptions.block_splices` — never written into the doc text.
+/// A document without kernel statements renders byte-identically to
+/// plain `--export-typst` (no regions to splice).
+pub fn export_typst_with_outputs(doc_text: &str) -> Result<String, String> {
+    let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+    let mut bridge = crate::kernel_bridge::KernelBridge::new();
+    bridge.refresh(doc_text);
+    // Settle best-effort: a hung worker must not hang the export, so
+    // the wait is bounded and partial results still render.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !bridge.is_idle() {
+        bridge.poll();
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let mut block_splices = std::collections::HashMap::new();
+    for (bi, r) in block_ranges.iter().enumerate() {
+        let outputs = bridge.block_outputs(bi);
+        if outputs.is_empty() {
+            continue;
+        }
+        let timings: std::collections::HashMap<usize, u64> = outputs
+            .iter()
+            .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
+            .collect();
+        let markup = crate::output_region::region_markup_with_timings(&outputs, &timings);
+        block_splices.insert(
+            r.end,
+            format!("// ---- block {bi} output region ----\n{markup}\n"),
+        );
+    }
+    render_doc(doc_text, None, block_splices)
+}
+
+/// Shared template render: evaluate every `\template` against the
+/// derived context (with the caller's overlay), splice the results at
+/// the T3 seam, and — for `--with-outputs` — splice each block's
+/// computed region at its end offset. `block_splices` is empty for
+/// the plain template export, so that path stays byte-identical to
+/// the T4 fixture.
+fn render_doc(
+    doc_text: &str,
+    extra_ctx_json: Option<&str>,
+    block_splices: std::collections::HashMap<usize, String>,
+) -> Result<String, String> {
     let (scan, segments, _, idx) = crate::kernel_bridge::scan_pipeline(doc_text);
 
     // DocumentContext → value, with the caller's overlay merged at
@@ -430,6 +485,7 @@ pub fn export_typst_template(
         &segments,
         &TransformOptions {
             template_splices: splices,
+            block_splices,
             ..Default::default()
         },
     );
@@ -669,10 +725,16 @@ mod tests {
     fn stub_rules_bin(script: &str) -> std::path::PathBuf {
         use std::io::Write as _;
         let dir = std::env::temp_dir();
+        // Content-hashed name: tests run in parallel, and two stubs
+        // with equal script lengths used to collide (overwrite each
+        // other mid-run).
+        use std::hash::{Hash as _, Hasher as _};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        script.hash(&mut h);
         let path = dir.join(format!(
-            "mathed_rules_stub_{}_{}.sh",
+            "mathed_rules_stub_{}_{:x}.sh",
             std::process::id(),
-            script.len()
+            h.finish()
         ));
         let mut f = std::fs::File::create(&path).expect("create stub");
         f.write_all(script.as_bytes()).expect("write stub");
@@ -780,6 +842,43 @@ mod tests {
             "// Exported from mathed_mini (rendered template)",
         );
         assert_eq!(templated, expected, "template-free export must not change");
+    }
+
+    #[test]
+    fn with_outputs_splices_regions_under_blocks() {
+        // N5: a model + prob document exports with each block's
+        // computed region beneath its content.
+        let doc = "= Cell\n\
+                   #1 a #2 \\model(#1,#2)\n\
+                   #3 vac #4 \\prob(#3,#4)";
+        let out = export_typst_with_outputs(doc).expect("with-outputs export");
+        assert!(
+            out.contains("// ---- block 0 output region ----"),
+            "region banner spliced under the block: {out}"
+        );
+        assert!(out.contains("#138000"), "green value tint: {out}");
+        assert!(
+            out.contains("\\= 1.0000"),
+            "computed value in region: {out}"
+        );
+        assert!(out.contains("· "), "timing annotation present: {out}");
+    }
+
+    #[test]
+    fn with_outputs_matches_plain_export_without_kernel_statements() {
+        // No kernel statements → no regions → byte-identical to the
+        // plain export (the T4 fixture pin holds for the report path).
+        let doc = "= Title\n\nPlain $E=mc^2$ text.\n";
+        let plain = export_typst(doc);
+        let with_outputs = export_typst_with_outputs(doc).expect("no-kernel export");
+        let expected = plain.replace(
+            "// Exported from mathed_mini",
+            "// Exported from mathed_mini (rendered template)",
+        );
+        assert_eq!(
+            with_outputs, expected,
+            "without kernel statements the report path is the plain export"
+        );
     }
 
     #[test]

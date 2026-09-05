@@ -50,7 +50,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--export-typst" => {
                 let path = rest.first().ok_or("--export-typst requires a file path")?;
-                let out = mathed_mini::export::export_typst(initial);
+                // N5: `--with-outputs` renders each block's computed
+                // output region beneath its content (the printable
+                // notebook page).
+                let with_outputs = rest.iter().any(|a| a == "--with-outputs");
+                let out = if with_outputs {
+                    mathed_mini::export::export_typst_with_outputs(initial).map_err(|e| {
+                        std::io::Error::other(format!("with-outputs export failed: {e}"))
+                    })?
+                } else {
+                    mathed_mini::export::export_typst(initial)
+                };
                 std::fs::write(path, out)?;
                 eprintln!("Exported Typst to {path}");
                 return Ok(());

@@ -951,6 +951,34 @@ impl KernelBridge {
         &self.run_log
     }
 
+    /// N5: clear displayed outputs (region only) — the notebook
+    /// "clear outputs" affordance. The doc text and the run log (the
+    /// reproducibility record) are untouched. Because the dispatch
+    /// hashes are unchanged, the next refresh does not re-run
+    /// anything — regions stay empty until the block is re-run.
+    pub fn clear_outputs(&mut self) {
+        self.results.clear();
+        self.last_result_hashes.clear();
+    }
+
+    /// N5: most recent client-observed round-trip time (ms) for the
+    /// result at `offset`, from the run log (the bounded
+    /// reproducibility record). `None` when the offset has no run yet.
+    pub fn timing_of(&self, offset: usize) -> Option<u64> {
+        self.run_log
+            .iter()
+            .rev()
+            .find(|e| e.offset == offset)
+            .map(|e| e.timing_ms)
+    }
+
+    /// N5: `true` when every submitted request has been answered —
+    /// used by report export (`--with-outputs`) to settle the bridge
+    /// before rendering regions.
+    pub fn is_idle(&self) -> bool {
+        self.pending.is_empty()
+    }
+
     /// Append one completed run to the notebook record. Skipped for
     /// responses without a displayed result (model `Success`), and
     /// bounded by [`Self::MAX_RUN_LOG`].
