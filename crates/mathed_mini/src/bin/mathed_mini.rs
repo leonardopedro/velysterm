@@ -81,7 +81,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--export-ascii" => {
                 let path = rest.first().ok_or("--export-ascii requires a file path")?;
-                let out = mathed_mini::export::export_ascii(initial);
+                // U7: optional `--mappings <json>` — per-document
+                // `glyph → ascii form` overrides for the export
+                // (glyph keys must be single chars).
+                let mut mappings = std::collections::HashMap::new();
+                if let Some(i) = rest.iter().position(|a| a == "--mappings") {
+                    let json = rest.get(i + 1).ok_or("--mappings requires a JSON object")?;
+                    let v: serde_json::Value = serde_json::from_str(json)
+                        .map_err(|e| format!("--mappings is not valid JSON: {e}"))?;
+                    let serde_json::Value::Object(map) = v else {
+                        return Err("--mappings must be a JSON object".into());
+                    };
+                    for (k, val) in map {
+                        let mut cs = k.chars();
+                        let g = cs
+                            .next()
+                            .filter(|_| cs.next().is_none())
+                            .ok_or(format!("--mappings key `{k}` must be a single char"))?;
+                        let ascii_form = val
+                            .as_str()
+                            .ok_or(format!("--mappings value for `{k}` must be a string"))?;
+                        mappings.insert(g, ascii_form.to_string());
+                    }
+                }
+                let out = mathed_mini::export::export_ascii_with_mappings(initial, &mappings);
                 std::fs::write(path, out)?;
                 eprintln!("Exported ASCII-only Typst to {path}");
                 return Ok(());

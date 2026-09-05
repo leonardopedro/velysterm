@@ -616,7 +616,7 @@ mod tests {
     fn mixed_doc_cluster_boundaries_are_char_boundaries() {
         let text = "x\u{301} \u{1F1E9}\u{1F1EA} \u{1F44D}\u{1F3FD} \u{1F469}\u{200D}\u{1F52C} z";
         for at in 0..=text.len() {
-            let prev = prev_cluster_boundary(&text, at);
+            let prev = prev_cluster_boundary(text, at);
             assert!(
                 text.is_char_boundary(prev),
                 "cluster boundary {prev} must be a char boundary (at {at})"

@@ -28,6 +28,7 @@ pub mod rfc1751;
 pub mod search;
 pub mod semantics;
 pub mod sync;
+pub mod tables;
 pub mod transform;
 pub mod wordnav;
 

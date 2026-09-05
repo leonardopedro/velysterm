@@ -26,6 +26,26 @@ pub fn export_typst(doc_text: &str) -> String {
 /// canonical; this export is a lossy-by-design but always-total
 /// projection for ASCII-only pipelines.
 pub fn export_ascii(doc_text: &str) -> String {
+    export_ascii_inner(doc_text, &std::collections::HashMap::new())
+}
+
+/// U7: `export_ascii` with per-document `glyph → ascii form`
+/// overrides (the `--mappings` seam). Overrides win over the
+/// canonical `mathed_core::tables` entries.
+pub fn export_ascii_with_mappings(
+    doc_text: &str,
+    mappings: &std::collections::HashMap<char, String>,
+) -> String {
+    export_ascii_inner(doc_text, mappings)
+}
+
+/// The shared loop. Non-ASCII glyphs inside math map through the
+/// canonical table (U7: `mathed_core::tables::ascii_of_overridden`),
+/// else an explicit `\u{...}` flag — never a silent drop.
+fn export_ascii_inner(
+    doc_text: &str,
+    mappings: &std::collections::HashMap<char, String>,
+) -> String {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
     let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
@@ -55,29 +75,16 @@ pub fn export_ascii(doc_text: &str) -> String {
             out.push(c);
             continue;
         }
-        if in_math && let Some(name) = ascii_math_name(c) {
-            out.push_str(name);
+        if in_math
+            && let Some(name) = mathed_core::tables::ascii_of_overridden(c, mappings)
+        {
+            out.push_str(&name);
         } else {
             // Explicit, round-trippable flag — never a silent drop.
             out.push_str(&format!("\\u{{{:X}}}", c as u32));
         }
     }
     out
-}
-
-/// Inverted U2 table: glyph → ASCII backslash-name, restricted to
-/// entries whose ASCII form is a valid Typst math escape (starts
-/// with `\`). Operator forms (`->` for `→`) are NOT valid Typst
-/// math, so those glyphs fall back to `\u{...}`. A glyph with
-/// several names maps to the longest (the table is currently
-/// injective, so this is the single entry).
-fn ascii_math_name(glyph: char) -> Option<&'static str> {
-    mathed_core::completion::COMPLETIONS
-        .iter()
-        .filter(|e| e.ascii.starts_with('\\') && e.glyph.chars().count() == 1)
-        .filter(|e| e.glyph.starts_with(glyph))
-        .max_by_key(|e| e.ascii.len())
-        .map(|e| e.ascii)
 }
 
 pub fn export_json(doc_text: &str) -> String {
@@ -789,6 +796,26 @@ mod tests {
     }
 
     // ── U4: --export-ascii interchange projection ──────────────
+
+    #[test]
+    fn ascii_export_with_mappings_uses_overrides() {
+        // U7: the --mappings seam wins over the canonical table: a
+        // glyph that has no inverse (operator forms) maps through
+        // the override instead of the \u{...} fallback.
+        let doc = "$\\to \u{2192}$"; // an ASCII \to plus the → glyph
+        let plain = export_ascii(doc);
+        assert!(
+            plain.contains("\\u{2192}"),
+            "without mappings → falls back to the flag: {plain}"
+        );
+        let mut m = std::collections::HashMap::new();
+        m.insert('\u{2192}', "\\to".to_string());
+        let mapped = export_ascii_with_mappings(doc, &m);
+        assert!(
+            mapped.contains("\\to") && !mapped.contains("\\u{2192}"),
+            "override replaced the flag: {mapped}"
+        );
+    }
 
     #[test]
     fn ascii_export_is_total_and_ascii_only() {
