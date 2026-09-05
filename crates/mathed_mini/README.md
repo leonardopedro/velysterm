@@ -110,8 +110,11 @@ the doc stays the source of truth).
   typst_imaging into one scrollable overlay image (↑/↓ scroll, Esc
   closes); the headless form is `--doc-image <doc> [--grants g]
   --out page.png`. The preview raster is memoized like the other
-  overlays (content-keyed: doc text + live results + window width),
-  so idle frames are pure blits.
+  overlays (content-keyed: doc text + live results — it renders at
+  a fixed width, so resizing never recompiles it), so idle frames
+  are pure blits; and once you have ever opened it, the raster is
+  prefetched while the editor is quiet (F4, 400ms debounce), so
+  Ctrl+R re-opens as a blit instead of a compile.
 - **Paginated A4 export** — `--pages-image <doc> [--grants g]
   --out base` writes one PNG per page (`base.1.png`, …). The page
   breaks come from **Typst's own page model**
@@ -125,9 +128,6 @@ the doc stays the source of truth).
   (alpha composited over white). This Typst has no native PDF
   *export* (only a PDF image loader), so the container is written
   here — the page breaks are still Typst's own pagination.
-  On overlay close, the editor prints the content-keyed memo hit
-  rate (`[mathed_mini] overlay memo: N hits / M compiles`) so the
-  eviction/width policy can be tuned with data.
 - **Headless region screenshot** — `--region-image <doc>
   [--grants g] --out page.png` runs every block and rasterizes each
   block's output region through the same typst_imaging pipeline into
@@ -144,15 +144,29 @@ the doc stays the source of truth).
   lexer would read them as label/ref openers (followed by an
   identifier char), so prose renders literally while `a < b`
   comparisons stay untouched.
-- **Overlay rasters are memoized** — the kernel menu, media catalog,
-  help and template preview cache their raster by (content, window
-  width) and recompile only when either changes: a caret-blink
-  redraw of an open overlay is a pure blit. Typst's own comemo
-  memoization is scoped to one compile pass, so this content-keyed
-  memo at the draw seam is the extension point (same derived-state
-  contract as the cached block/footer layouts). The template
-  preview's once 12-line strip now shows its full text, scrollable
-  with ↑/↓.
+- **Memoization is grounded in Typst's own cache and extended only
+  at the seams it never covers.** Typst memoizes with comemo per
+  compile pass — that stays untouched. On top of it: **(F1)** the
+  library and every embedded font are loaded **once per process**
+  and shared by every `MiniWorld` (each compile used to re-parse
+  all fonts — block layouts, footer, overlays, preedit lines,
+  previews and exports all pay it); **(F2)** each block's laid-out
+  page is cached under the fingerprint of everything its render
+  consumed — its doc slice, its reveal ranges, the kernel
+  annotations/errors inside it, and the window width — so an edit
+  in one block or a kernel result elsewhere keeps every other
+  block's raster (three manual cache clears collapsed into one
+  content-keyed mechanism); and the overlays (kernel menu, media
+  catalog, help, template preview, doc preview) live in one
+  content-keyed store that keeps **per-width** rasters under an LRU
+  byte budget — resizing back to a width you've seen is a hit, and
+  width churn cannot grow memory without bound. A caret-blink
+  redraw of an open overlay is a pure blit; the template preview's
+  once 12-line strip now shows its full text, scrollable with ↑/↓.
+  On overlay close the editor prints the accounting —
+  `[mathed_mini] overlay memo: N hits / M compiles / E evicted
+  (pct% hit rate)` — so eviction/width policy can be tuned with
+  data.
 
 ## Input + interchange (U-series)
 

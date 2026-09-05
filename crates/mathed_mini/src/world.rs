@@ -7,12 +7,14 @@
 //! there is no package/file I/O — imports are intentionally
 //! unsupported in this minimal frontend.
 
+use std::sync::OnceLock;
 use typst::comemo::Track;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::engine::{Engine, Route, Sink, Traced};
 use typst::foundations::{Bytes, Content, Datetime, Duration, StyleChain, Value};
 use typst::introspection::{EmptyIntrospector, Locator};
 use typst::layout::{Frame, Region};
+
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::{LazyHash, Protected};
@@ -74,22 +76,48 @@ fn load_fonts() -> (FontBook, Vec<Font>) {
     (book, fonts)
 }
 
-/// A standalone Typst world holding one in-memory source document.
-pub struct MiniWorld {
+/// The process-wide shared Typst environment: the standard library,
+/// the font book, and every font parsed once. Typst's own cache
+/// (comemo memoization, activated per compile pass inside
+/// `typst::compile`) is scoped to one pass and never covers *world
+/// construction* — every [`MiniWorld::new`] used to re-parse every
+/// embedded font and rebuild the library from scratch. Sharing the
+/// loaded environment here extends the memoization to that seam:
+/// worlds become a [`Source`] clone each, and the library/fonts are
+/// prepared exactly once per process, on first use.
+struct SharedWorld {
     library: LazyHash<Library>,
     book: LazyHash<FontBook>,
     fonts: Vec<Font>,
+}
+
+static SHARED_WORLD: OnceLock<SharedWorld> = OnceLock::new();
+
+/// The one shared environment, initialized on first world creation.
+fn shared_world() -> &'static SharedWorld {
+    SHARED_WORLD.get_or_init(|| {
+        let (book, fonts) = load_fonts();
+        SharedWorld {
+            library: LazyHash::new(Library::default()),
+            book: LazyHash::new(book),
+            fonts,
+        }
+    })
+}
+
+/// A standalone Typst world holding one in-memory source document.
+pub struct MiniWorld {
+    shared: &'static SharedWorld,
     main: Source,
 }
 
 impl MiniWorld {
-    /// Create a world rendering the given Typst markup.
+    /// Create a world rendering the given Typst markup. Cheap: the
+    /// library/font environment is shared process-wide (loaded once),
+    /// only the source document is new.
     pub fn new(markup: impl Into<String>) -> Self {
-        let (book, fonts) = load_fonts();
         Self {
-            library: LazyHash::new(Library::default()),
-            book: LazyHash::new(book),
-            fonts,
+            shared: shared_world(),
             main: Source::detached(markup),
         }
     }
@@ -194,11 +222,11 @@ fn report(errors: &[SourceDiagnostic]) {
 
 impl World for MiniWorld {
     fn library(&self) -> &LazyHash<Library> {
-        &self.library
+        &self.shared.library
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.book
+        &self.shared.book
     }
 
     fn main(&self) -> FileId {
@@ -229,7 +257,7 @@ impl World for MiniWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index).cloned()
+        self.shared.fonts.get(index).cloned()
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
@@ -244,6 +272,29 @@ mod tests {
     /// A 1×1 opaque red PNG, base64-encoded (Jupyter's payload
     /// convention for `image/png`).
     const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn all_worlds_share_one_font_environment() {
+        // F1: world construction is the seam Typst's per-compile
+        // comemo cache never covers — every `MiniWorld::new` used to
+        // re-parse every embedded font and rebuild the library. Now
+        // the loaded environment is shared process-wide: worlds are
+        // cheap and the fonts/book/library are prepared exactly once.
+        let w1 = MiniWorld::new("a");
+        let w2 = MiniWorld::new("b");
+        assert!(
+            std::ptr::eq(w1.shared, w2.shared),
+            "every world borrows the same shared environment"
+        );
+        assert!(!w1.shared.fonts.is_empty(), "shared environment has fonts");
+        // The two worlds resolve the same font slot.
+        let f0 = w1.font(0);
+        assert_eq!(
+            f0.as_ref().map(|f| f.info().family.clone()),
+            w2.font(0).map(|f| f.info().family.clone())
+        );
+        assert!(f0.is_some(), "font slot 0 resolves");
+    }
 
     #[test]
     fn decode_data_url_only_accepts_base64_payloads() {

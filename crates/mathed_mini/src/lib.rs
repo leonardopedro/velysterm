@@ -25,6 +25,7 @@ pub mod kernel_bridge;
 pub mod kernel_menu;
 pub mod marker_overlay;
 pub mod media_menu;
+pub mod memo;
 pub mod output_region;
 pub mod pdf;
 pub mod references_panel;
