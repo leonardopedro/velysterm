@@ -1,20 +1,25 @@
 # mathed as a template language — implementation plan
 
-> **Status:** Phases 1–3 EXECUTED (2026-09-04/05): U1 + T1–T4 (phase 1),
-> N1–N3 ∥ U2–U4 (phase 2), and T5 (phase 3) all shipped and green —
-> mathed_core 173 / mathed_mini 162 tests, Bevy `mathed` checks clean,
-> `verify-invariants` 9/9 (commits in the as-built logs, §6). N4 is **IN
-> PROGRESS**: its `[SYNC]` UK codes are staged in unfer's `codes.rs`
-> (uncommitted); the agent op + velysterm side remain. This document
+> **Status:** Phases 1–5 EXECUTED (2026-09-04/05) — the whole starter
+> scope is shipped, green, and pushed (velysterm `a0bcc65..e8e8f27`,
+> unfer `d21cebf..d677d1f`; commits in the as-built logs, §6): U1 +
+> T1–T4 (phase 1), N1–N3 ∥ U2–U4 (phase 2), T5 (phase 3), N4 with its
+> `[SYNC]` half (phase 4), and the T6/U5/N5–N6 docs & invariants sweep
+> (phase 5). Ground truth today: mathed_core **174** / mathed_mini
+> **172** / kernel_client **24** tests, Bevy `mathed` checks clean,
+> `verify-invariants` **18/18**, both trees clean. This document
 > is the **master entry point** for the full mathed language vision and the
-> authoritative plan for its starter scope: evolving the *existing* mathed
+> authoritative record of its starter scope: evolving the *existing* mathed
 > document pipeline (`mathed_core` + `mathed_mini`, Plan C C1–C16 green)
-> into a **Typst template language** (Jinja/ERB/XSLT class). Stages T1–T5
+> into a **Typst template language** (Jinja/ERB/XSLT class). Stages T1–T6
 > below are marked ✅ DONE and describe what shipped (as built, with
-> deviations called out); T6 is the remaining starter work. The full
-> plan — all three arcs — is §6 (roadmap) plus the sibling plans
-> `PLAN_mathed_utf8_ascii.md` (U-series) and
-> `PLAN_mathed_document_computing.md` (N-series).
+> deviations called out). The full plan — all three arcs — is §6
+> (roadmap) plus the sibling plans `PLAN_mathed_utf8_ascii.md`
+> (U-series) and `PLAN_mathed_document_computing.md` (N-series); **the
+> next development phase — mathed beyond the starter, toward genuine
+> alternatives to template languages / UTF-8-as-ASCII / bash / Jupyter
+> notebooks — is planned in full in
+> `PLAN_mathed_full_vision.md`** (T7–T10, U6–U8, N7–N10).
 >
 > Constraint honored throughout: **improve, don't build new.** Every stage
 > below extends a named existing surface (marker grammar, `SemanticIndex`,
@@ -355,7 +360,14 @@ Template-Haskell matchers already staged — not a new matcher:
 tests pass (contraction-summary rewrite; `Eql`-bound fragment selection);
 `--render-typst` works with and without the binary present.
 
-### Stage T6 — docs + invariants
+### Stage T6 — docs + invariants ✅ DONE (`e2cdc7d`)
+
+> As built: DESIGN.md "Template language" subsection; verify-invariants
+> grew 9 mathed greps (`is_template`, `DocumentContext`,
+> `--render-typst`, plus the U/N surfaces — 18/18 green); the companion
+> report (`fixtures/template_report.mathed`) rendered and checked in,
+> parse-pinned by a `typst::syntax::parse` test (+1 mini); README
+> documents the notebook model.
 
 1. `docs/mathed/DESIGN.md`: new subsection "Template language" under the
    document-model section (document the three roles: content/data/code and
@@ -415,8 +427,9 @@ All three share the same surfaces — they are three views of one model:
 | 2 — notebook cells | N1 → N3 | T3 seam, existing `KernelBridge` | ✅ EXECUTED — block output regions, run-block + hash staleness, run log (commits in the as-built log below) |
 | 2 — Unicode surface | U2 → U4 | — (independent) | ✅ EXECUTED — completion engine, cluster-aware editing, ASCII export (commits below). U1 (boundary fuzz) was pulled forward into phase 1 |
 | 3 — egison rules | T5 | T4 (fixture), existing nix Haskell env | ✅ EXECUTED — dev-machine `mathed-rules` source + goldens + scripts; Rust seam degrades to identity |
-| 4 — scripted execution | N4 | N1–N3 | ⏳ IN PROGRESS — `[SYNC]` UK codes 4908–4910 staged in unfer (uncommitted); agent op + velysterm side remain |
-| 5 — docs & invariants | T6, U5, N5–N6 | everything above | Remaining — each sweeps its arc's DESIGN.md subsection + `verify-invariants` greps |
+| 4 — scripted execution | N4 | N1–N3 | ✅ EXECUTED — `[SYNC]` half `d677d1f` (unfer): `exec` op in AGENT_OPS/SESSION_OPS, UK-4908/4909/4910, PROTOCOL.md allowlist; velysterm half `82620e5` (grants, audit, `\exec` segments) |
+| 5 — docs & invariants | T6, U5, N5–N6 | everything above | ✅ EXECUTED — `9391f19` (N5), `e2cdc7d` (docs sweep), `e8e8f27` (final sweep); verify-invariants 18/18 |
+| 6 — beyond the starter | T7–T10, U6–U8, N7–N10 | everything above | **PLANNED — `PLAN_mathed_full_vision.md`**: template maturity (layouts, filters, egison rule engine), Unicode completion (grapheme clusters, canonical tables), computing depth (pipes, headless record, rich outputs, `.ipynb`); N7-1 is the only `[SYNC]` step (additive `stdin` on the exec op) |
 
 Rules that hold for every stage (Plan C parallel-execution rules):
 
@@ -493,13 +506,50 @@ never persist in the doc text; no editor-side process execution.
   (identity when the binary is absent, +2 mini).
 
 Totals after phases 1–3: mathed_core 173 tests, mathed_mini 162, Bevy
-`mathed` checks clean, `verify-invariants` 9/9 — the baselines for every
-remaining stage (N4, T6, U5, N5–N6; trajectories recalibrated in §5 and
-the sibling plans). N4 is IN PROGRESS: its `[SYNC]` UK codes 4908–4910
-(`EXEC_GRANT_DENIED`, `EXEC_COMMAND_DENIED`, `EXEC_FAILED`) are staged in
-`../unfer/unfer_protocol/src/codes.rs` but **uncommitted** — the agent op,
-PROTOCOL.md section, `PropKind::Exec`, dispatch, and tests remain.
-U1's original planned deltas are kept for the record in the U plan.
+`mathed` checks clean, `verify-invariants` 9/9 — the baselines for the
+remaining starter stages (N4, T6, U5, N5–N6; trajectories recalibrated
+in §5 and the sibling plans). U1's original planned deltas are kept for
+the record in the U plan.
+
+### As-built log (phases 4–5 executed 2026-09-05, commits on velysterm main)
+
+- `d677d1f` **N4 `[SYNC]` half** (unfer): `exec` registered in
+  `AGENT_OPS`/`SESSION_OPS`; UK-4908/4909/4910
+  (`EXEC_GRANT_DENIED`/`EXEC_COMMAND_DENIED`/`EXEC_FAILED`) committed
+  with the previously staged codes; PROTOCOL.md documents the op, the
+  deny-by-default `MATHED_EXEC_GRANTS` allowlist, and the v1
+  `readonly`/`compute` vocabularies.
+- `82620e5` **N4 velysterm half** (core 174 / mini 167):
+  `PropKind::Exec` + `grants:` named arg collected into `SemanticIndex`,
+  `statement_to_exec_request` dispatch, `KernelRequest::Exec` through
+  the worker (no shell, grant + vocabulary + metachar validation,
+  timeout + output cap, bounded audit trail); bridge dispatches on
+  (command, grants) hash change, `run_block` re-runs in-block execs,
+  stdout renders in the output region, exec runs land in the export
+  record. Smoke proved both paths: with `MATHED_EXEC_GRANTS=readonly`
+  the exec runs; without it, `error:ExecGrantDenied`.
+- `9391f19` **N5** (mini 170): `Ctrl+Shift+Enter` run-all,
+  `Ctrl+Shift+K` clear-outputs, per-result `· N ms` timing,
+  `--export-typst --with-outputs` (block regions spliced via a new
+  `TransformOptions.block_splices` keyed by arbitrary doc offsets;
+  doc-end splices get a final zero-width window). Also fixed a
+  parallel-test race in the T5 stub-binary tests (content-hashed
+  filenames instead of `script.len()`).
+- `e2cdc7d` **Docs & invariants sweep (T6 + U5 + N6)**: DESIGN.md
+  gains the three language-surface subsections; verify-invariants
+  grows 9 mathed greps (18/18) and the op-count header catches up to
+  39; T6's `fixtures/template_report.mathed` rendered + checked in
+  (parse-pinned, +1 mini); N6's `fixtures/experiment.mathed`
+  (model + prob + readonly exec); README documents the notebook model.
+- `e8e8f27` **Final sweep**: workspace clippy 0 warnings across all
+  targets, fmt clean, 27 test targets green (mini 172),
+  verify-invariants 18/18; resurrected a T2-era comment-swallowed
+  `#[test]` (dead test now live).
+
+Totals after phases 1–5: mathed_core **174**, mathed_mini **172**,
+kernel_client **24**, Bevy `mathed` checks clean, `verify-invariants`
+**18/18** — the baselines for the full-vision plan
+(`PLAN_mathed_full_vision.md`).
 
 ## 7. Non-goals and risks
 
@@ -528,3 +578,5 @@ U1's original planned deltas are kept for the record in the U plan.
 | T4 | `crates/mathed_mini/src/export.rs`, `bin/mathed_mini.rs`, test fixtures |
 | T5 | `tools/mathed_rules/` (Haskell, fock_match-style) + README |
 | T6 | `docs/mathed/DESIGN.md`, `scripts/verify-invariants` |
+
+> Next phase: `PLAN_mathed_full_vision.md` (T7–T10, U6–U8, N7–N10).

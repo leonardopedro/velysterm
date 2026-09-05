@@ -1,11 +1,15 @@
 # mathed as a bash/Jupyter-class document-computing environment — implementation plan (N-series)
 
-> **Status:** N1–N3 EXECUTED (2026-09-05, commits in the stages below) —
-> block output regions, run-block + staleness, and the run log are
-> shipped and green. N4 is **IN PROGRESS**: its `[SYNC]` UK codes are
-> staged in unfer (uncommitted); the agent op + velysterm side remain.
-> N5–N6 remain planned. Current baselines: mathed_core 173 /
-> mathed_mini 162 tests. Arc 3 of
+> **Status:** N1–N6 EXECUTED (2026-09-05, commits in the stages below)
+> — block output regions, run-block + staleness, the run log, scripted
+> `\exec` segments (both halves, incl. the `[SYNC]` op `d677d1f`),
+> notebook polish + `--with-outputs`, and the docs sweep are all
+> shipped and green. Current baselines: mathed_core 174 / mathed_mini
+> 172 / kernel_client 24 tests, verify-invariants 18/18.
+> **Next phase — mathed beyond the starter — is planned in
+> `PLAN_mathed_full_vision.md`** (N7–N10: stdin piping + `data`
+> vocabulary, headless `--run-all` record, rich outputs, `.ipynb`
+> projection). Arc 3 of
 > the mathed language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
 > and the roadmap section): a document whose **blocks are cells**, whose
 > semantic segments are **live computations with inline outputs**, and
@@ -165,15 +169,18 @@ model dims dependent outputs until Ctrl+Enter.
 **Acceptance:** `cargo test -p mathed_mini --lib`; `--export-json` on
 the fixture shows one `blocks` entry per region with timing and hashes.
 
-### Stage N4 — Scripted segments: `\exec` via a granted worker op ⏳ IN PROGRESS
+### Stage N4 — Scripted segments: `\exec` via a granted worker op ✅ DONE (`d677d1f` + `82620e5`)
 
-> **Partial (2026-09-05):** step 1's UK codes are staged — `4908`
-> `EXEC_GRANT_DENIED`, `4909` `EXEC_COMMAND_DENIED`, `4910`
-> `EXEC_FAILED` added to `../unfer/unfer_protocol/src/codes.rs`
-> (**uncommitted**; verified next-free against `SWIZZLE_IMPOSSIBLE` 4907
-> and `CONSENSUS_NOT_READY` 6001). The rest of step 1 — the agent op,
-> allowlist config, timeout/cap enforcement, audit, PROTOCOL.md section
-> — and all of step 2 are not started. The plan below is unchanged.
+> As built: the `[SYNC]` half committed `d677d1f` on unfer — `exec` in
+> `AGENT_OPS`/`SESSION_OPS`, UK-4908/4909/4910, PROTOCOL.md allowlist
+> section (deny-by-default `MATHED_EXEC_GRANTS`, v1
+> `readonly`/`compute` vocabularies). Velysterm half `82620e5` (core
+> 174 / mini 167): `PropKind::Exec` + `grants:` named arg, dispatch,
+> `KernelRequest::Exec` through the worker (no shell, grant +
+> vocabulary + metachar validation, timeout + output cap, bounded
+> audit), bridge dispatch on (command, grants) hash change, stdout in
+> the N1 region, exec runs in the export record. Smoke proved both
+> paths (with grants the exec runs; without, `error:ExecGrantDenied`).
 
 The bash role. Two coordinated halves; the first is a `[SYNC]` step
 (touches unfer), the second is velysterm-only.
@@ -207,7 +214,15 @@ document with a readonly `\exec` runs end-to-end on a dev machine with
 the agent allowlist set, and fails with the UK code when the grant is
 removed.
 
-### Stage N5 — Notebook polish + report export (mathed_mini)
+### Stage N5 — Notebook polish + report export (mathed_mini) ✅ DONE (`9391f19`)
+
+> As built: run-all (`Ctrl+Shift+Enter`), clear-outputs
+> (`Ctrl+Shift+K`, region only), per-result `· N ms` timing,
+> `--export-typst --with-outputs` via a new
+> `TransformOptions.block_splices` (arbitrary doc offsets; doc-end
+> splices get a final zero-width window); plain export stays
+> byte-identical (pinned). Also fixed a parallel-test race in the T5
+> stub-binary tests (content-hashed filenames).
 
 1. Region affordances: run-all-blocks; clear outputs (region only, doc
    untouched); timing display from `RunEntry.timing_ms` (bounded 64-queue
@@ -224,7 +239,13 @@ removed.
 **Acceptance:** `cargo test -p mathed_mini --lib`; report fixture
 compiles in the Typst world.
 
-### Stage N6 — Docs + invariants
+### Stage N6 — Docs + invariants ✅ DONE (`e2cdc7d`)
+
+> As built: DESIGN.md "Document computing" subsection;
+> verify-invariants greps (`\exec`, `run_block`, `output_region`,
+> `--with-outputs` — 18/18 green); the reproducible experiment
+> `fixtures/experiment.mathed` (model + prob + readonly exec) checked
+> in.
 
 1. `docs/mathed/DESIGN.md`: "Document computing" subsection — blocks as
    cells, output regions as derived state, staleness by hash, exec as a
@@ -246,9 +267,14 @@ frontends share).
 
 **As built (phases 1–2):** phase 1 raised mathed_mini to 141; N1–N3 then
 shipped at 146 / 150 / 154 (+5/+4/+4, richer than the +4/+3/+2 plan), and
-U2/U4/T5 raised the current baseline to **162**. The remaining stages
-land at 162 → 167 (N4 +5) → 169 (N5 +2); kernel_client 36 → +N4's
-client tests. Deltas unchanged.
+U2/U4/T5 raised the current baseline to **162**. N4 landed at 167 (+5,
+as planned); N5 at 170 (+3, richer than the +2 plan); the docs sweep and
+final cleanup took mini to **172** and core to **174**; kernel_client
+**24** (exec client tests included). Deltas unchanged.
+
+> Next phase: `PLAN_mathed_full_vision.md` — N7 (pipes + `data`
+> vocabulary), N8 (headless `--run-all` record), N9 (rich outputs),
+> N10 (`.ipynb` projection).
 
 ## 3. Non-goals and risks
 

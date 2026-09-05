@@ -1,10 +1,14 @@
 # mathed as a UTF-8 extension of ASCII — implementation plan (U-series)
 
-> **Status:** U1–U4 EXECUTED (2026-09-04/05, commits in the stages below)
-> — boundary fuzz, ASCII→Unicode completion, cluster-aware editing, and
-> the ASCII interchange export are all shipped and green. Only U5 (docs
-> + invariants) remains; current baselines are mathed_core 173 /
-> mathed_mini 162 tests. Arc 2 of
+> **Status:** U1–U5 EXECUTED (2026-09-04/05, commits in the stages
+> below) — boundary fuzz, ASCII→Unicode completion, cluster-aware
+> editing, the ASCII interchange export, and the docs + invariants
+> sweep are all shipped and green (U5: `e2cdc7d`, DESIGN.md encoding
+> subsection + verify-invariants greps). Current baselines: mathed_core
+> 174 / mathed_mini 172 tests. **Next phase — mathed beyond the
+> starter — is planned in `PLAN_mathed_full_vision.md`** (U6–U8: full
+> grapheme-cluster editing, one canonical mapping table, the Unicode
+> contract on the output pipeline). Arc 2 of
 > the mathed language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
 > and the roadmap section): the mathed text format is **UTF-8 — a strict
 > superset of ASCII** — in which mathematics is first-class: the ASCII
@@ -222,7 +226,11 @@ ASCII-only Typst source.
 **Acceptance:** `cargo test -p mathed_mini --lib`; the fixture document
 exports to a `.typ` containing only ASCII bytes.
 
-### Stage U5 — docs + invariants
+### Stage U5 — docs + invariants ✅ DONE (`e2cdc7d`)
+
+> As built: DESIGN.md "Encoding contract" subsection; verify-invariants
+> greps for `completion_at` + `--export-ascii` (plus the T/N surfaces —
+> 18/18 green); README notes the input table's home.
 
 1. `docs/mathed/DESIGN.md`: "Encoding contract" subsection (the three
    properties of §1; byte-offset rule; ASCII export is a projection).
@@ -244,8 +252,11 @@ raised the baseline to core 164 / mini 141. The U-series then shipped at
 **core 173 / mini 162**: U2 core +6 (164→170, richer than the +4 plan)
 and mini +3 (154→157), U3 core +3 (170→173, exactly the +3 plan), U4
 mini +3 (157→160, the +3 plan); the extra mini tests came from the U2
-controller state machine. U5 adds docs only (0 tests). Current baselines:
-**core 173 / mini 162**.
+controller state machine. U5 adds docs only (0 tests). Phases 4–5 (N4–N6,
+T6) raised the final baselines to **core 174 / mini 172**.
+
+> Next phase: `PLAN_mathed_full_vision.md` — U6 (grapheme clusters),
+> U7 (canonical `tables.rs`), U8 (output-pipeline Unicode contract).
 
 ## 4. Non-goals and risks
 
