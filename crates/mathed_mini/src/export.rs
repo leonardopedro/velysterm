@@ -1140,6 +1140,44 @@ mod tests {
     }
 
     #[test]
+    fn template_render_composes_with_ascii_export() {
+        // U8: the output pipeline composes — a templated render
+        // followed by the ASCII projection is ASCII-only bytes, so
+        // template output never breaks the interchange guarantee.
+        let doc = concat!(
+            "= Report\n\n",
+            "#1 $\u{2192}$ #2 \\prob(#1,#2)\n\n",
+            "#3 #let render(ctx) = ctx.at(\"body\") #4 ",
+            "\\base(#3,#4, name: pass)",
+        );
+        let rendered = preview_template(doc).expect("render");
+        let ascii = export_ascii(&rendered);
+        assert!(
+            ascii.is_ascii(),
+            "rendered + ascii export stays ASCII-only: {ascii}"
+        );
+    }
+
+    #[test]
+    fn spliced_template_output_keeps_doc_clusters_intact() {
+        // U8: template output spliced into a multibyte doc leaves
+        // the doc's grapheme clusters whole (the splice lands on a
+        // cluster boundary; the transform's debug assertion pins
+        // this in debug builds).
+        let family = "\u{1F469}\u{200D}\u{1F52C}"; // 👩‍🔬
+        let doc = concat!(
+            "= Title\n\n",
+            "#1 #let render(ctx) = \"#box[t]\" #2 \\template(#1,#2, name: e)\n\n",
+            "#3 #let render(ctx) = ctx.at(\"body\") #4 \\base(#3,#4, name: wrap)\n\n",
+            family,
+            "\n",
+        );
+        let out = preview_template(doc).expect("render");
+        assert!(out.contains(family), "doc clusters intact: {out}");
+        assert!(out.contains("#box[t]"), "template output present: {out}");
+    }
+
+    #[test]
     fn preview_template_returns_base_composed_output() {
         // T9: the headless preview is the same pipeline
         // --render-typst uses: the base wraps body + templates.

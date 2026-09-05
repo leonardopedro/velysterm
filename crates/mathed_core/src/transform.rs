@@ -192,6 +192,20 @@ pub fn to_render_text(
     to_render_text_range(doc_text, scan, segments, 0..doc_text.len(), opts)
 }
 
+/// U8: whether `pos` is a grapheme-cluster boundary in `text` — the
+/// splice contract (splices must never split a composed character).
+/// Used only in debug assertions; release builds compile the check
+/// out, so the keystroke path pays nothing (C14 budget).
+fn is_grapheme_boundary(text: &str, pos: usize) -> bool {
+    let pos = pos.min(text.len());
+    if !text.is_char_boundary(pos) {
+        return false;
+    }
+    unicode_segmentation::GraphemeCursor::new(pos, text.len(), true)
+        .is_boundary(text, 0)
+        .unwrap_or(true)
+}
+
 /// Like [`to_render_text`] but restricted to one block: only
 /// `doc_text[range]` is emitted. Tokens must not straddle `range`
 /// boundaries (the block splitter guarantees this); visual segment
@@ -373,7 +387,11 @@ pub fn to_render_text_range(
     // Template splices (T-series): markup produced by `\template`
     // expansion, spliced in just after a segment's body — same
     // rule as the inline annotations below (keyed by body start,
-    // insertion at `span.end`, suppressed while revealed).
+    // insertion at `span.end`, suppressed while revealed). U8:
+    // template output is **trusted author markup** (raw, never
+    // escaped), and the splice offset is pinned to a grapheme-
+    // cluster boundary in debug builds so a splice can never split
+    // a composed character.
     let template_points: Vec<(usize, &str)> = if opts.template_splices.is_empty() {
         Vec::new()
     } else {
@@ -388,6 +406,7 @@ pub fn to_render_text_range(
                     return None;
                 }
                 let markup = opts.template_splices.get(&span.start)?;
+                debug_assert!(is_grapheme_boundary(doc_text, span.end));
                 bounds.push(span.end);
                 Some((span.end, markup.as_str()))
             })
@@ -411,7 +430,10 @@ pub fn to_render_text_range(
             .block_splices
             .iter()
             .filter(|(pos, _)| range.start <= **pos && **pos <= range.end)
-            .map(|(pos, markup)| (*pos, markup.as_str()))
+            .map(|(pos, markup)| {
+                debug_assert!(is_grapheme_boundary(doc_text, *pos));
+                (*pos, markup.as_str())
+            })
             .collect();
         points.sort_by_key(|(pos, _)| *pos);
         for (pos, _) in &points {
@@ -434,6 +456,7 @@ pub fn to_render_text_range(
                     return None;
                 }
                 let markup = opts.annotations.get(&span.start)?;
+                debug_assert!(is_grapheme_boundary(doc_text, span.end));
                 bounds.push(span.end);
                 Some((span.end, markup.as_str()))
             })
@@ -2437,5 +2460,49 @@ mod tests {
             "revealed segment must show raw source, not the splice: {}",
             out.text
         );
+    }
+
+    // U8: the splice contract — a splice offset is always a
+    // grapheme-cluster boundary, so splicing never splits a composed
+    // character, and the doc's multibyte runs survive the render
+    // whole.
+    #[test]
+    fn splice_points_are_grapheme_boundaries() {
+        use crate::markers::{resolve_segments, scan};
+        let family = "\u{1F469}\u{1F3FB}\u{200D}\u{1F52C}"; // 👩🏼‍🔬
+        let doc = format!(
+            "#1 {family} $x$ #2 \\prob(#1,#2)\n\n#3 e\u{301} #4 \\model(#3,#4)\n"
+        );
+        let scan = scan(&doc);
+        let segments = resolve_segments(&scan);
+        // Splice at each kernel statement's body end: annotation +
+        // template splices both key off the same span.
+        let mut annotations = std::collections::HashMap::new();
+        let mut template_splices = std::collections::HashMap::new();
+        let mut splice_offsets = Vec::new();
+        for seg in segments.iter().filter(|s| s.span.is_some()) {
+            let span = seg.span.as_ref().unwrap();
+            annotations.insert(span.start, " = 0.5".to_string());
+            template_splices.insert(span.start, "#box[s]\n".to_string());
+            splice_offsets.push(span.end);
+        }
+        let opts = TransformOptions {
+            annotations,
+            template_splices,
+            ..Default::default()
+        };
+        let out = to_render_text(&doc, &scan, &segments, &opts);
+        // Every splice offset is a cluster boundary — a splice can
+        // never split a composed character (the debug assertion in
+        // the transform fires on the same check).
+        for off in splice_offsets {
+            assert!(
+                is_grapheme_boundary(&doc, off),
+                "splice offset {off} must be a cluster boundary"
+            );
+        }
+        // The doc's multibyte runs survive the render whole.
+        assert!(out.text.contains(family), "ZWJ family intact: {}", out.text);
+        assert!(out.text.contains("e\u{301}"), "combining base intact: {}", out.text);
     }
 }
