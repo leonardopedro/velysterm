@@ -106,13 +106,20 @@ pub struct RunEntry {
     /// Hash of the inputs (model/prob bodies + translators) the
     /// request was submitted under.
     pub input_hash: u64,
-    /// The op that produced this run (`probability`, `federation`, or
-    /// `error:<code>`).
+    /// The op that produced this run (`probability`, `federation`,
+    /// `kernel`, or `error:<code>`).
     pub op: String,
     /// Client-observed round-trip time for the request, in ms.
     pub timing_ms: u64,
     /// The result (value / string / error).
     pub result: KernelResult,
+    /// The full Jupyter-shaped output list a `\kernel` run answered
+    /// (MIME preserved verbatim — stream/execute_result/error, in
+    /// wire order), so the record, the `.ipynb` projection, and the
+    /// template context can render every output faithfully instead
+    /// of only the folded text. Empty for every other op (prob/exec
+    /// results are single values, not output lists).
+    pub outputs: Vec<kernel_client::KernelOutput>,
 }
 
 /// Drives the probability kernel from document text.
@@ -1100,7 +1107,14 @@ impl KernelBridge {
     /// Append one completed run to the notebook record. Skipped for
     /// responses without a displayed result (model `Success`), and
     /// bounded by [`Self::MAX_RUN_LOG`].
-    fn log_run(&mut self, off: &usize, op: &str, timing_ms: Option<u64>, result: KernelResult) {
+    fn log_run(
+        &mut self,
+        off: &usize,
+        op: &str,
+        timing_ms: Option<u64>,
+        result: KernelResult,
+        outputs: Vec<kernel_client::KernelOutput>,
+    ) {
         let Some(block) = self.stmt_blocks.get(off).copied() else {
             return;
         };
@@ -1112,6 +1126,7 @@ impl KernelBridge {
             op: op.to_string(),
             timing_ms: timing_ms.unwrap_or(0),
             result,
+            outputs,
         });
         if self.run_log.len() > Self::MAX_RUN_LOG {
             let excess = self.run_log.len() - Self::MAX_RUN_LOG;
@@ -1237,7 +1252,7 @@ impl KernelBridge {
                     let r = KernelResult::Value(v);
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
-                    self.log_run(&(id as usize), "probability", elapsed_ms, r);
+                    self.log_run(&(id as usize), "probability", elapsed_ms, r, Vec::new());
                     changed = true;
                 }
                 // A model session was (re)defined: no displayed
@@ -1247,7 +1262,7 @@ impl KernelBridge {
                     let r = KernelResult::StringValue(s);
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
-                    self.log_run(&(id as usize), "federation", elapsed_ms, r);
+                    self.log_run(&(id as usize), "federation", elapsed_ms, r, Vec::new());
                     changed = true;
                 }
                 // N4: a granted `\exec` finished with exit 0; stdout
@@ -1257,18 +1272,20 @@ impl KernelBridge {
                     let r = KernelResult::StringValue(s);
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
-                    self.log_run(&(id as usize), "exec", elapsed_ms, r);
+                    self.log_run(&(id as usize), "exec", elapsed_ms, r, Vec::new());
                     changed = true;
                 }
                 // N11: a granted `\kernel` finished; its Jupyter-
                 // shaped outputs fold into the one result the region
                 // displays (streams as text, results as StringValue,
-                // any error output into the UK error).
+                // any error output into the UK error), and the full
+                // output list lands in the run log verbatim (MIME
+                // preserved for the record / ipynb / ctx).
                 BlockResponse::KernelExec(id, outputs) => {
                     let r = fold_kernel_outputs(&outputs);
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
-                    self.log_run(&(id as usize), "kernel", elapsed_ms, r);
+                    self.log_run(&(id as usize), "kernel", elapsed_ms, r, outputs);
                     changed = true;
                 }
                 BlockResponse::Error(id, diag) => {
@@ -1280,7 +1297,13 @@ impl KernelBridge {
                     };
                     self.results.insert(id as usize, r.clone());
                     self.record_fresh(&(id as usize));
-                    self.log_run(&(id as usize), &format!("error:{code_name}"), elapsed_ms, r);
+                    self.log_run(
+                        &(id as usize),
+                        &format!("error:{code_name}"),
+                        elapsed_ms,
+                        r,
+                        Vec::new(),
+                    );
                     changed = true;
                 }
             }
@@ -3100,5 +3123,95 @@ esac
         let log = bridge.run_log();
         assert_eq!(log.len(), 3);
         assert!(log.iter().all(|e| e.op == "kernel"), "kernel runs: {log:?}");
+    }
+
+    #[test]
+    fn kernel_run_log_keeps_full_outputs_with_mime() {
+        // Rich outputs: each kernel run's full Jupyter-shaped output
+        // list (stream / execute_result with its mime / error, in
+        // wire order) is preserved verbatim on the run-log entry —
+        // the export record, the `.ipynb` projection, and `ctx.kernel`
+        // render from it instead of only the folded text.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Cell\n",
+            "#1 stream #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: a)\n",
+            "#3 result #4 \\kernel(#3,#4, lang: \"mathed\", grants: \"kernel\", name: b)\n",
+            "#5 error #6 \\kernel(#5,#6, lang: \"mathed\", grants: \"kernel\", name: c)",
+        );
+        let mut bridge = KernelBridge::with_kernel_config(
+            &["kernel"],
+            &["mathed"],
+            Some(stub.to_str().expect("stub path")),
+        );
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+        let log = bridge.run_log();
+        assert_eq!(log.len(), 3, "three kernel runs: {log:?}");
+        // Match on the output content (not doc offsets — the stub
+        // replies are unique per body): the full list is verbatim.
+        let stream = log
+            .iter()
+            .find(|e| {
+                e.op == "kernel"
+                    && matches!(
+                        &e.outputs[..],
+                        [kernel_client::KernelOutput::Stream { text, .. }]
+                            if text == "kernel stream hi\n"
+                    )
+            })
+            .expect("stream run");
+        assert_eq!(
+            stream.outputs,
+            vec![kernel_client::KernelOutput::Stream {
+                name: "stdout".to_string(),
+                text: "kernel stream hi\n".to_string(),
+            }],
+            "stream output verbatim on the entry: {log:?}"
+        );
+        let result = log
+            .iter()
+            .find(|e| {
+                e.op == "kernel"
+                    && matches!(
+                        &e.outputs[..],
+                        [kernel_client::KernelOutput::Result { mime, .. }] if mime == "text/plain"
+                    )
+            })
+            .expect("result run");
+        assert_eq!(
+            result.outputs,
+            vec![kernel_client::KernelOutput::Result {
+                mime: "text/plain".to_string(),
+                data: "= 0.5".to_string(),
+            }],
+            "execute_result keeps its mime: {log:?}"
+        );
+        let err = log
+            .iter()
+            .find(|e| {
+                e.op == "kernel"
+                    && matches!(
+                        &e.outputs[..],
+                        [kernel_client::KernelOutput::Error { ename, .. }]
+                            if ename == "KernelFailed"
+                    )
+            })
+            .expect("error run");
+        assert_eq!(
+            err.outputs,
+            vec![kernel_client::KernelOutput::Error {
+                ename: "KernelFailed".to_string(),
+                evalue: "boom".to_string(),
+                traceback: Vec::new(),
+            }],
+            "error output verbatim: {log:?}"
+        );
+        // Every kernel entry carries its output list.
+        assert!(
+            log.iter()
+                .all(|e| e.op != "kernel" || !e.outputs.is_empty()),
+            "every kernel entry has outputs"
+        );
     }
 }

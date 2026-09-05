@@ -150,13 +150,28 @@ pub fn export_json_with_runs(doc_text: &str, runs: &[crate::kernel_bridge::RunEn
                 .iter()
                 .filter(|e| e.block == bi)
                 .map(|e| {
-                    serde_json::json!({
+                    let mut run = serde_json::json!({
                         "offset": e.offset,
                         "input_hash": e.input_hash,
                         "op": e.op,
                         "timing_ms": e.timing_ms,
                         "result": result_json(&e.result),
-                    })
+                    });
+                    // N-series rich outputs: a kernel run's full
+                    // Jupyter output list (MIME preserved, the raw
+                    // contract objects — `output_type`, `mime`,
+                    // `data` — verbatim) rides in the record, so
+                    // `--export-json` is faithful end-to-end (exec
+                    // runs fold to their result).
+                    if !e.outputs.is_empty() {
+                        run["outputs"] = serde_json::Value::Array(
+                            e.outputs
+                                .iter()
+                                .filter_map(|o| serde_json::to_value(o).ok())
+                                .collect(),
+                        );
+                    }
+                    run
                 })
                 .collect();
             serde_json::json!({
@@ -260,6 +275,38 @@ fn kernel_output(result: &crate::kernel_bridge::KernelResult) -> Option<serde_js
     }
 }
 
+/// One raw Jupyter-shaped [`KernelOutput`] as an nbformat output
+/// object (the faithful form — the record's kernel runs keep the
+/// module's full output list, so the `.ipynb` projection can carry
+/// every `stream`/`execute_result`/`error` in wire order with its
+/// MIME, instead of only the region's folded text).
+fn kernel_output_json(o: &kernel_client::KernelOutput) -> serde_json::Value {
+    use kernel_client::KernelOutput;
+    match o {
+        KernelOutput::Stream { name, text } => serde_json::json!({
+            "output_type": "stream",
+            "name": name,
+            "text": jup_lines(text),
+        }),
+        KernelOutput::Result { mime, data } => serde_json::json!({
+            "output_type": "execute_result",
+            "execution_count": null,
+            "metadata": {},
+            "data": { mime: jup_lines(data) },
+        }),
+        KernelOutput::Error {
+            ename,
+            evalue,
+            traceback,
+        } => serde_json::json!({
+            "output_type": "error",
+            "ename": ename,
+            "evalue": evalue,
+            "traceback": traceback,
+        }),
+    }
+}
+
 /// N10: one-way `.ipynb` projection (nbformat 4) of a mathed doc.
 /// Every line of each blank-line block becomes one cell, in document
 /// order: a heading line (`= …`) → a markdown cell (Typst `=`
@@ -321,7 +368,15 @@ pub fn export_ipynb_with_runs(
                 for off in &stmt_offs {
                     if let Some(rs) = runs_by_off.get(off) {
                         for e in rs {
-                            if let Some(o) = kernel_output(&e.result) {
+                            // Kernel runs keep their full output list
+                            // (MIME preserved) — emit every output
+                            // faithfully; other ops fall back to the
+                            // folded-result mapping.
+                            if e.op == "kernel" && !e.outputs.is_empty() {
+                                for o in &e.outputs {
+                                    outputs.push(kernel_output_json(o));
+                                }
+                            } else if let Some(o) = kernel_output(&e.result) {
                                 outputs.push(o);
                             }
                         }
@@ -824,6 +879,53 @@ fn render_doc(
         if !execs.is_empty() {
             ctx_value["exec"] = serde_json::Value::Array(execs);
         }
+        // Rich kernel outputs: every kernel run's full Jupyter output
+        // list (MIME preserved — the raw contract objects, whose keys
+        // are Typst identifiers) is exposed as `ctx.kernel`, a slice
+        // of `(name:, block:, outputs:)` — one entry per run, in wire
+        // order, so a template can wrap a text/plain or any-MIME
+        // result into a figure of its own choosing (the N9 role,
+        // generalized past NDJSON rows). Runs with no outputs (errors
+        // that surfaced as UK errors instead) stay out of ctx — the
+        // region and the record still carry them. Plain export passes
+        // no runs: no `kernel` key appears.
+        let kernel_names: std::collections::HashMap<usize, &str> = idx
+            .kernel_statements
+            .iter()
+            .filter(|s| s.kind == mathed_core::markers::PropKind::Kernel)
+            .filter_map(|s| s.name.as_deref().map(|n| (s.span.start, n)))
+            .collect();
+        let kernels: Vec<serde_json::Value> = exec_runs
+            .iter()
+            .filter(|e| e.op == "kernel")
+            .filter(|e| !e.outputs.is_empty())
+            .filter_map(|e| {
+                let outputs: Vec<serde_json::Value> = e
+                    .outputs
+                    .iter()
+                    .filter_map(|o| serde_json::to_value(o).ok())
+                    .collect();
+                // The contract objects must lower to Typst dicts
+                // (their keys are identifiers by construction); a
+                // payload that somehow would not stays out of ctx
+                // rather than failing the whole export.
+                if !outputs.iter().all(|o| {
+                    o.as_object()
+                        .is_some_and(|m| m.keys().all(|k| is_typst_ident(k)))
+                }) {
+                    return None;
+                }
+                let name = kernel_names.get(&e.offset).copied().unwrap_or("kernel");
+                Some(serde_json::json!({
+                    "name": if is_typst_ident(name) { name } else { "kernel" },
+                    "block": e.block,
+                    "outputs": outputs,
+                }))
+            })
+            .collect();
+        if !kernels.is_empty() {
+            ctx_value["kernel"] = serde_json::Value::Array(kernels);
+        }
     }
     let ctx_literal = ctx_to_typst_literal(&ctx_value)?;
 
@@ -1035,6 +1137,7 @@ mod tests {
             op: "probability".to_string(),
             timing_ms: 12,
             result: KernelResult::Value(0.5),
+            outputs: Vec::new(),
         }];
         let out = export_json_with_runs(doc, &runs);
         let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
@@ -1102,6 +1205,107 @@ mod tests {
     }
 
     #[test]
+    fn json_export_record_carries_kernel_outputs_verbatim() {
+        // Rich outputs: a kernel run's full Jupyter output list (MIME
+        // preserved — the raw contract objects) rides in the record's
+        // per-block `runs`; exec/prob runs (no output list) keep the
+        // old shape.
+        use crate::kernel_bridge::{KernelResult, RunEntry};
+        let doc = "= Cell\n\
+                   #1 x #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: k)\n";
+        let runs = vec![RunEntry {
+            block: 0,
+            offset: 22,
+            input_hash: 9,
+            op: "kernel".to_string(),
+            timing_ms: 3,
+            result: KernelResult::StringValue("= 0.5\n".to_string()),
+            outputs: vec![
+                kernel_client::KernelOutput::Stream {
+                    name: "stdout".to_string(),
+                    text: "hi\n".to_string(),
+                },
+                kernel_client::KernelOutput::Result {
+                    mime: "text/plain".to_string(),
+                    data: "= 0.5".to_string(),
+                },
+            ],
+        }];
+        let parsed: serde_json::Value =
+            serde_json::from_str(&export_json_with_runs(doc, &runs)).expect("valid JSON");
+        let block_runs = parsed["blocks"][0]["runs"].as_array().expect("runs");
+        assert_eq!(block_runs.len(), 1);
+        let run = &block_runs[0];
+        let outs = run["outputs"].as_array().expect("outputs array");
+        assert_eq!(outs.len(), 2, "both outputs preserved: {run}");
+        assert_eq!(outs[0]["output_type"], "stream");
+        assert_eq!(outs[0]["text"], "hi\n");
+        assert_eq!(outs[1]["output_type"], "execute_result");
+        assert_eq!(outs[1]["mime"], "text/plain", "mime preserved: {run}");
+        assert_eq!(outs[1]["data"], "= 0.5");
+        // The folded result is still there for the record's region
+        // shape (backward compatible).
+        assert_eq!(run["result"]["string"], "= 0.5\n");
+    }
+
+    #[test]
+    fn ipynb_kernel_run_emits_faithful_multi_output_cell() {
+        // Rich outputs: a kernel run's code cell carries every output
+        // in wire order (stream + execute_result with its mime), not
+        // only the folded text.
+        use crate::kernel_bridge::{KernelResult, RunEntry};
+        let doc = "#1 x #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: k)\n";
+        // The run must land on the kernel statement's real offset.
+        let scan = mathed_core::markers::scan(doc);
+        let segments = mathed_core::markers::resolve_segments(&scan);
+        let render = to_render_text(doc, &scan, &segments, &TransformOptions::default());
+        let mut idx = mathed_core::semantics::SemanticIndex::default();
+        idx.build_index(doc, &segments, &[&render]);
+        let offset = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == mathed_core::markers::PropKind::Kernel)
+            .expect("kernel statement")
+            .span
+            .start;
+        let runs = vec![RunEntry {
+            block: 0,
+            offset,
+            input_hash: 9,
+            op: "kernel".to_string(),
+            timing_ms: 3,
+            result: KernelResult::StringValue("hi\n= 0.5\n".to_string()),
+            outputs: vec![
+                kernel_client::KernelOutput::Stream {
+                    name: "stdout".to_string(),
+                    text: "hi\n".to_string(),
+                },
+                kernel_client::KernelOutput::Result {
+                    mime: "text/plain".to_string(),
+                    data: "= 0.5".to_string(),
+                },
+            ],
+        }];
+        let nb: serde_json::Value =
+            serde_json::from_str(&export_ipynb_with_runs(doc, &runs).expect("ipynb export"))
+                .expect("ipynb JSON");
+        let cell = &nb["cells"][0];
+        let outs = cell["outputs"].as_array().expect("outputs");
+        assert_eq!(
+            outs.len(),
+            2,
+            "one output object per KernelOutput: {outs:?}"
+        );
+        assert_eq!(outs[0]["output_type"], "stream");
+        assert_eq!(outs[0]["text"][0], "hi\n");
+        assert_eq!(outs[1]["output_type"], "execute_result");
+        assert_eq!(
+            outs[1]["data"]["text/plain"][0], "= 0.5\n",
+            "mime-tagged data in the cell: {outs:?}"
+        );
+    }
+
+    #[test]
     fn json_export_record_is_stable_for_fixed_trace() {
         use crate::kernel_bridge::{KernelResult, RunEntry};
         let doc = "= Cell\n\
@@ -1114,6 +1318,7 @@ mod tests {
             op: "probability".to_string(),
             timing_ms: 12,
             result: KernelResult::Value(0.5),
+            outputs: Vec::new(),
         }];
         // The same document + log must export to the same bytes
         // (deterministic record — reproducibility needs it).
@@ -1458,6 +1663,90 @@ mod tests {
             out.contains("#table("),
             "the region renders the same rows as a table: {out}"
         );
+    }
+
+    #[test]
+    fn ctx_kernel_exposes_kernel_outputs_to_templates() {
+        // Rich outputs: a kernel run's full output list (MIME
+        // preserved) reaches templates as ctx.kernel, so a template
+        // wraps it into a figure of its own choosing — the N9 exec-
+        // rows role generalized past NDJSON. The run here is a stub
+        // `\kernel` execution through the module backend.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Figure cell\n\n",
+            "#1 result #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: fig)\n\n",
+            "#3 #let render(ctx) = \"#figure[\" + str(ctx.at(\"kernel\").at(0).at(\"name\"))",
+            " + \" says \" + str(ctx.at(\"kernel\").at(0).at(\"outputs\").at(0).at(\"data\"))",
+            " + \"]\" #4 \\template(#3,#4, name: wrap)",
+        );
+        let out = export_typst_with_outputs_kernel_impl(
+            doc,
+            &["kernel"],
+            &["mathed"],
+            stub.to_str().expect("stub path"),
+        )
+        .expect("kernel figure export");
+        assert!(
+            out.contains("#figure[fig says = 0.5]"),
+            "template wrapped the kernel output (MIME payload) into a figure: {out}"
+        );
+    }
+
+    /// [`export_typst_with_outputs_impl`] with a `\kernel` module
+    /// backend configured (test hook mirroring
+    /// `KernelBridge::with_kernel_config`).
+    fn export_typst_with_outputs_kernel_impl(
+        doc_text: &str,
+        grants: &[&str],
+        langs: &[&str],
+        bin: &str,
+    ) -> Result<String, String> {
+        let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+        let mut bridge =
+            crate::kernel_bridge::KernelBridge::with_kernel_config(grants, langs, Some(bin));
+        bridge.refresh(doc_text);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !bridge.is_idle() {
+            bridge.poll();
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut block_splices = std::collections::HashMap::new();
+        for (bi, r) in block_ranges.iter().enumerate() {
+            let outputs = bridge.block_outputs(bi);
+            if outputs.is_empty() {
+                continue;
+            }
+            let timings: std::collections::HashMap<usize, u64> = outputs
+                .iter()
+                .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
+                .collect();
+            let markup = crate::output_region::region_markup_with_timings(&outputs, &timings);
+            block_splices.insert(
+                r.end,
+                format!("// ---- block {bi} output region ----\n{markup}\n"),
+            );
+        }
+        render_doc(doc_text, None, block_splices, bridge.run_log())
+    }
+
+    /// A stub kernel module binary (same contract as the bridge's
+    /// test stub: `{module, language, code}` in → `{outputs: [...]}`
+    /// out, keyed on the body).
+    fn stub_kernel_module() -> std::path::PathBuf {
+        stub_rules_bin(
+            r#"#!/bin/sh
+read -r line
+case "$line" in
+  *stream*) printf '%s' '{"outputs":[{"output_type":"stream","name":"stdout","text":"kernel stream hi\n"}]}' ;;
+  *result*) printf '%s' '{"outputs":[{"output_type":"execute_result","mime":"text/plain","data":"= 0.5"}]}' ;;
+  *error*) printf '%s' '{"outputs":[{"output_type":"error","ename":"KernelFailed","evalue":"boom","traceback":[]}]}' ;;
+esac
+"#,
+        )
     }
 
     #[test]
