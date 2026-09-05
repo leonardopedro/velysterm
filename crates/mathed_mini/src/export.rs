@@ -718,6 +718,72 @@ pub fn run_all_runs(doc_text: &str, grants: &[&str]) -> Vec<crate::kernel_bridge
     bridge.run_log().to_vec()
 }
 
+/// Headless "notebook page" screenshot: run every block (like
+/// [`run_all_runs`]) and rasterize each block's output region
+/// through the same typst_imaging pipeline the editor uses, stacking
+/// the regions top to bottom at the doc width into one image. Blocks
+/// with no outputs contribute nothing. This is the graphical
+/// acceptance path for real kernel media (`--region-image`): a
+/// matplotlib plot from ipykernel ends up as painted pixels in the
+/// PNG, with no window and no GPU.
+pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::RgbaImage, String> {
+    let mut bridge = if grants.is_empty() {
+        crate::kernel_bridge::KernelBridge::new()
+    } else {
+        crate::kernel_bridge::KernelBridge::with_exec_grants(grants)
+    };
+    bridge.refresh(doc_text);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !bridge.is_idle() {
+        bridge.poll();
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let stale = bridge.stale_blocks();
+    let width_pt = crate::render::DEFAULT_WIDTH_PT;
+    let mut regions: Vec<imaging::RgbaImage> = Vec::new();
+    for bi in 0..mathed_core::blocks::split_blocks(doc_text).len() {
+        let outputs = bridge.block_outputs(bi);
+        if outputs.is_empty() && !stale.contains(&bi) {
+            continue;
+        }
+        let timings: std::collections::HashMap<usize, u64> = outputs
+            .iter()
+            .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
+            .collect();
+        let mut markup = String::new();
+        if stale.contains(&bi) {
+            markup.push_str(&crate::output_region::stale_banner());
+            markup.push('\n');
+        }
+        markup.push_str(&crate::output_region::region_markup_with_timings(
+            &outputs, &timings,
+        ));
+        if let Some(img) = crate::output_region::region_image(&markup, width_pt) {
+            regions.push(img);
+        }
+    }
+    let Some(first) = regions.first() else {
+        return Err("no block produced a rendered region".to_string());
+    };
+    let width = regions.iter().map(|r| r.width).max().unwrap_or(first.width);
+    let height: u32 = regions.iter().map(|r| r.height).sum();
+    let mut out = imaging::RgbaImage::new(width, height);
+    let mut y = 0u32;
+    for r in &regions {
+        for row in 0..r.height {
+            let src = &r.data[(row as usize * r.width as usize * 4)
+                ..((row as usize + 1) * r.width as usize * 4)];
+            let dst_start = (y + row) as usize * width as usize * 4;
+            out.data[dst_start..dst_start + src.len()].copy_from_slice(src);
+        }
+        y += r.height;
+    }
+    Ok(out)
+}
+
 /// N8: compare the current doc against a previously written record
 /// and report the block indices whose statement hashes no longer
 /// match (the open-doc staleness policy: outputs derived from a
@@ -935,7 +1001,39 @@ fn render_doc(
                 let outputs: Vec<serde_json::Value> = e
                     .outputs
                     .iter()
-                    .filter_map(|o| serde_json::to_value(o).ok())
+                    .filter_map(|o| {
+                        let mut v = serde_json::to_value(o).ok()?;
+                        // Image payloads gain a ready-made data URL
+                        // (`data:<mime>;base64,…` — the exact form the
+                        // minimal world resolves), so a template renders
+                        // them directly:
+                        // `#image(ctx.kernel.at(0).outputs.at(1).data_url)`.
+                        let is_image_result = v.get("output_type").and_then(|t| t.as_str())
+                            == Some("execute_result")
+                            && v.get("mime")
+                                .and_then(|m| m.as_str())
+                                .is_some_and(|m| m.starts_with("image/"));                        if is_image_result
+                            && let (Some(mime), Some(data)) = (
+                                v.get("mime")
+                                    .and_then(|m| m.as_str())
+                                    .map(str::to_string),
+                                v.get("data")
+                                    .and_then(|d| d.as_str())
+                                    .map(str::to_string),
+                            )
+                            // `/` percent-encoded so the URL
+                            // survives Typst's virtual-path machinery
+                            // (see `world::data_url_encode_payload`).
+                            && let Some(obj) = v.as_object_mut()
+                        {
+                            let encoded = crate::world::data_url_encode_payload(&data);
+                            obj.insert(
+                                "data_url".to_string(),
+                                serde_json::json!(format!("data:{mime};base64,{encoded}")),
+                            );
+                        }
+                        Some(v)
+                    })
                     .collect();
                 // The contract objects must lower to Typst dicts
                 // (their keys are identifiers by construction); a
@@ -1806,10 +1904,48 @@ read -r line
 case "$line" in
   *stream*) printf '%s' '{"outputs":[{"output_type":"stream","name":"stdout","text":"kernel stream hi\n"}]}' ;;
   *result*) printf '%s' '{"outputs":[{"output_type":"execute_result","mime":"text/plain","data":"= 0.5"}]}' ;;
+  *plot*) printf '%s' '{"outputs":[{"output_type":"execute_result","mime":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="}]}' ;;
   *error*) printf '%s' '{"outputs":[{"output_type":"error","ename":"KernelFailed","evalue":"boom","traceback":[]}]}' ;;
 esac
 "#,
         )
+    }
+
+    #[test]
+    fn ctx_kernel_data_url_renders_template_images() {
+        // Followup: an image payload reaches templates as a
+        // ready-made data URL (`ctx.kernel…outputs.at(0).data_url`),
+        // and a template that wraps it in `#image` produces markup
+        // that rasterizes through the world + typst_imaging — the
+        // template/`--render-typst` graphical path.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Plot cell\n\n",
+            "#1 plot #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: fig)\n\n",
+            // data_url is the bare value — the template quotes it
+            // when building the markup string.
+            "#3 #let render(ctx) = \"#figure[#image(\\\"\" + ctx.at(\"kernel\").at(0).at(\"outputs\").at(0).at(\"data_url\") + \"\\\", height: 20pt)]\" ",
+            "#4 \\template(#3,#4, name: wrap)",
+        );
+        let out = export_typst_with_outputs_kernel_impl(
+            doc,
+            &["kernel"],
+            &["mathed"],
+            stub.to_str().expect("stub path"),
+        )
+        .expect("kernel figure export");
+        assert!(
+            out.contains("#figure[#image(\"data:image/png;base64,iVBORw0KGgo"),
+            "template embedded the data URL: {out}"
+        );
+        // The template output is markup a `--render-typst` preview
+        // would rasterize: the embedded image paints real pixels.
+        let img = crate::render::render_markup(&out, 600.0).expect("template rasterizes");
+        let painted = img
+            .data
+            .chunks_exact(4)
+            .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
+        assert!(painted, "template image painted pixels");
     }
 
     #[test]

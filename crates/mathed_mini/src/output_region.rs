@@ -59,7 +59,7 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
                 // green StringValue line.
                 match rows_table(s) {
                     Some(table) => lines.push(table),
-                    None => lines.push(format!("#text(rgb(\"#138000\"))[{s}{timing}]")),
+                    None => lines.push(green_text_line(s, &timing)),
                 }
             }
             // Rich media: the accompanying text keeps the green line,
@@ -68,7 +68,7 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
             KernelResult::Rich { text, outputs } => {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    lines.push(format!("#text(rgb(\"#138000\"))[{trimmed}{timing}]"));
+                    lines.push(green_text_line(trimmed, &timing));
                 }
                 for (mime, data) in outputs {
                     lines.push(rich_media_line(mime, data));
@@ -85,13 +85,33 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
                 } else {
                     format!(" — {hint}")
                 };
+                let text = format!("{code_name}: {message}{hint_part}");
+                // The whole dynamic text is a string literal in code
+                // position inside the content block, so a kernel's
+                // `<Figure size …>` (a Typst label opener) or any
+                // other markup can never break the region — the
+                // real-kernel escape hatch.
                 lines.push(format!(
-                    "#text(rgb(\"#c00000\"))[{code_name}: {message}{hint_part}{timing}]"
+                    "#text(rgb(\"#c00000\"))[#{}{timing}]",
+                    crate::translate::typst_str_lit(&text)
                 ));
             }
         }
     }
     lines
+}
+
+/// A green text line whose dynamic content is a Typst string
+/// literal in code position: kernel text is untrusted markup and may
+/// contain `<` (labels), `#`, `$`, `[` — inside `#("...")` they
+/// render literally, exactly like the U-series encoding rule applied
+/// to the menus. (A bare `"…"` in markup is literal quote
+/// characters, so the code-expression form is required.)
+fn green_text_line(s: &str, timing: &str) -> String {
+    format!(
+        "#text(rgb(\"#138000\"))[#{}{timing}]",
+        crate::translate::typst_str_lit(s)
+    )
 }
 
 /// Typst markup for one rich-media payload: a captioned figure that
@@ -105,10 +125,13 @@ fn rich_media_line(mime: &str, data: &str) -> String {
     let size = crate::kernel_bridge::human_bytes(crate::kernel_bridge::b64_decoded_len(data));
     // `alt` is a plain string (a11y), the caption is content, the
     // payload embeds as a data URL the world resolves. Base64 is
-    // inert inside the string literal, so a payload can never open
-    // Typst syntax.
+    // inert inside the string literal (a payload can never open
+    // Typst syntax), but `/` is percent-encoded: Typst's virtual
+    // path would collapse base64's `//` before the world sees it
+    // (see `world::data_url_encode_payload`).
+    let encoded = crate::world::data_url_encode_payload(data);
     format!(
-        "#figure(numbering: none, caption: [#text(9pt, fill: rgb(\"#666666\"))[{mime} · {size}]], alt: \"{mime} · {size}\", [#image(\"data:{mime};base64,{data}\", width: 100%)])\n"
+        "#figure(numbering: none, caption: [#text(9pt, fill: rgb(\"#666666\"))[{mime} · {size}]], alt: \"{mime} · {size}\", [#image(\"data:{mime};base64,{encoded}\", width: 100%)])\n"
     )
 }
 
@@ -319,6 +342,60 @@ mod tests {
     fn region_image_empty_markup_is_none() {
         assert!(region_image("", 600.0).is_none());
         assert!(region_image("   \n  ", 600.0).is_none());
+    }
+
+    #[test]
+    fn base64_double_slashes_survive_the_data_url_round_trip() {
+        // Real-kernel regression (the plot e2e caught it): a
+        // matplotlib PNG's base64 contains `/` — including `//`,
+        // which Typst's VirtualPath would collapse before the world
+        // resolves the image, silently corrupting the payload. The
+        // region must percent-encode and the world must decode; the
+        // rendered region proves the whole chain.
+        // A real (random-pixel) PNG whose base64 contains `//`.
+        let payload = "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAHCAYAAAA8sqwkAAABYklEQVR4nAFXAaj+ALVNrsdFaOwgt7BoVPvYi+BcYtoZWnQq8olw/bx3iBRtuaTQd16rA8yBk+bHwlonXACp7ncWClK7ttMyXGtqyAT8DATo+lFFhkPr8E16X/WPFYSJOFIjLeBI5zpC3QbHnhYAj5PM+K7pPJkillmM9mXWN/1BHxzbtWX9/ZSQ+9uGnOYXe/VHI/p9h0O1BZ0MxiM7ADj0vTnjmZY8QsJfHzYuX7FYK+M28kC8UdtXzSm88aJ5OvMDvvTFr3MbZHtgoW+iiwCznJ4Wvw+Y/5PWmwfMHCAFKCe4JFvToUDlcEuzebub8dKLdESYeKOYZ9QfL0MWfQEAd232EUGOOVMMPYNCp04Ad7WoJlbXMifrp2ez8dFkjqXhnL3K//UZWsecCwv0cWGzAKhFxscgooFvwsYMuNnUnWnb0CUs95IVx9zpCedTFoqRZwDUrM99TxHwhiPlLN+r8ibprSa9Y4maAAAAAElFTkSuQmCC";
+        let outputs = vec![(
+            10,
+            KernelResult::Rich {
+                text: String::new(),
+                outputs: vec![("image/png".to_string(), payload.to_string())],
+            },
+        )];
+        let m = region_markup(&outputs);
+        assert!(
+            m.contains("%2F"),
+            "slashes percent-encoded in the region markup: {m}"
+        );
+        // The rendered region comes back (the decode path produced a
+        // real image, not a silent drop).
+        let img = region_image(&m, 600.0).expect("region with // payload renders");
+        assert!(img.height > 0, "region rasterized");
+    }
+
+    #[test]
+    fn kernel_text_with_label_syntax_cannot_break_the_region() {
+        // Real-kernel regression: matplotlib's text/plain repr is
+        // `<Figure size 640x480 with 1 Axes>` — `<` opens a Typst
+        // label, so raw text would make the whole region fail to
+        // parse (the plot e2e caught this). The string-literal form
+        // renders it literally, and the region still rasterizes.
+        let outputs = vec![(
+            10,
+            KernelResult::StringValue("<Figure size 640x480 with 1 Axes>\n".to_string()),
+        )];
+        let m = region_markup(&outputs);
+        assert!(
+            m.contains("<Figure size 640x480 with 1 Axes>"),
+            "text preserved: {m}"
+        );
+        let parsed = typst::syntax::parse(&m);
+        let (errors, _) = parsed.errors_and_warnings();
+        assert!(
+            errors.is_empty(),
+            "label syntax cannot break parse: {errors:?}"
+        );
+        let img = region_image(&m, 600.0).expect("region still renders");
+        assert!(img.height > 0, "region rasterized");
     }
 
     #[test]

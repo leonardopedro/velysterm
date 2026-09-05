@@ -27,3 +27,8 @@ dev-machine):
   stateful executes, shutdown) plus a full-stack `\kernel` python segment
   through `mathed_mini --run-all`. Run inside the flake env:
   `nix develop .#python-kernel` (velysterm root), then the script.
+- `run_plot_e2e.sh` — graphical-MIME acceptance: a real ipykernel
+  matplotlib plot published as `display_data image/png`, carried through
+  `--run-all`, then rasterized by `mathed_mini --region-image` into a
+  PNG whose pixels are checked (the rendered figure, through
+  typst_imaging). The flake env adds `matplotlib` for this one.

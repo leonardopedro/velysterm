@@ -37,10 +37,26 @@ pub(crate) fn decode_data_url(s: &str) -> Option<Bytes> {
         return None;
     }
     use base64::Engine;
+    // The payload's `/` chars were percent-encoded at markup
+    // construction time ([`data_url_encode_payload`]): Typst's
+    // `VirtualPath` treats `/` as a *path separator* and collapses
+    // `//` sequences (base64 can produce them), which would corrupt
+    // the URL before it ever reaches [`World::file`]. Undo that here.
+    let payload = payload.replace("%2F", "/");
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(payload)
         .ok()?;
     Some(Bytes::new(decoded))
+}
+
+/// Percent-encode a base64 payload for embedding in a `data:` URL
+/// that travels through Typst's path machinery: `/` is the one
+/// character that collides with the virtual-path separator (a
+/// base64 `//` would be collapsed to `/` by `VirtualPath`), so it
+/// becomes `%2F` — every other base64 character is path-safe. The
+/// inverse is [`decode_data_url`].
+pub(crate) fn data_url_encode_payload(data: &str) -> String {
+    data.replace('/', "%2F")
 }
 
 /// Load every font embedded in `typst-assets` into a book + slot
@@ -246,6 +262,36 @@ mod tests {
         assert!(decode_data_url("data:image/png;base64,").is_none());
         // A non-data path is refused (never escapes to the fs).
         assert!(decode_data_url("../etc/passwd").is_none());
+    }
+
+    #[test]
+    fn data_url_encode_decode_survives_path_separator_collisions() {
+        // Real-kernel regression (the plot e2e caught it): base64
+        // payloads contain `/`, and Typst's VirtualPath collapses
+        // `//` sequences before the world sees the URL. The encode
+        // step is exactly what the region/annotations/data_url use;
+        // the decode must undo it. A *valid* PNG whose base64
+        // contains `//` pins the exact round-trip.
+        let payload = "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAHCAYAAAA8sqwkAAABYklEQVR4nAFXAaj+ALVNrsdFaOwgt7BoVPvYi+BcYtoZWnQq8olw/bx3iBRtuaTQd16rA8yBk+bHwlonXACp7ncWClK7ttMyXGtqyAT8DATo+lFFhkPr8E16X/WPFYSJOFIjLeBI5zpC3QbHnhYAj5PM+K7pPJkillmM9mXWN/1BHxzbtWX9/ZSQ+9uGnOYXe/VHI/p9h0O1BZ0MxiM7ADj0vTnjmZY8QsJfHzYuX7FYK+M28kC8UdtXzSm88aJ5OvMDvvTFr3MbZHtgoW+iiwCznJ4Wvw+Y/5PWmwfMHCAFKCe4JFvToUDlcEuzebub8dKLdESYeKOYZ9QfL0MWfQEAd232EUGOOVMMPYNCp04Ad7WoJlbXMifrp2ez8dFkjqXhnL3K//UZWsecCwv0cWGzAKhFxscgooFvwsYMuNnUnWnb0CUs95IVx9zpCedTFoqRZwDUrM99TxHwhiPlLN+r8ibprSa9Y4maAAAAAElFTkSuQmCC";
+        assert!(payload.contains("//"), "test payload must contain //");
+        let encoded = data_url_encode_payload(payload);
+        assert!(!encoded.contains('/'), "no raw separators left: {encoded}");
+        assert!(
+            encoded.contains("%2F"),
+            "slashes percent-encoded: {encoded}"
+        );
+        // Exact byte round-trip through the encode → URL → decode
+        // chain the region/annotations/data_url all use.
+        let url = format!("data:image/png;base64,{encoded}");
+        let bytes = decode_data_url(&url).expect("decodes");
+        use base64::Engine;
+        assert_eq!(
+            bytes.as_slice(),
+            base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .expect("reference decode"),
+            "exact byte round-trip"
+        );
     }
 
     #[test]

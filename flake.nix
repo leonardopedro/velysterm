@@ -99,10 +99,12 @@ EOF
       devShells.x86_64-linux.python-kernel = pkgs.mkShell {
         name = "velysterm-python-kernel";
         packages = [
-          (pkgs.python3.withPackages (ps: [ ps.ipykernel ps.jupyter-client ]))
+          (pkgs.python3.withPackages (
+            ps: [ ps.ipykernel ps.jupyter-client ps.matplotlib ]
+          ))
         ];
         shellHook = ''
-          echo "[velysterm-python-kernel] python3 with ipykernel + jupyter_client"
+          echo "[velysterm-python-kernel] python3 with ipykernel + jupyter_client + matplotlib"
         '';
       };
     };

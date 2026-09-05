@@ -243,6 +243,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
+            // Followup: headless notebook-page screenshot — run every
+            // block and rasterize each block's output region through
+            // typst_imaging into one stacked PNG (the plot e2e's
+            // rendered-figure check). Same grants/env as --run-all.
+            "--region-image" => {
+                let path = rest
+                    .first()
+                    .ok_or("--region-image requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let mut grants: Vec<&str> = Vec::new();
+                let mut out: Option<&str> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--grants" => {
+                            grants = rest
+                                .get(i + 1)
+                                .ok_or("--grants requires a comma-separated list")?
+                                .split(',')
+                                .collect();
+                            i += 2;
+                        }
+                        "--out" => {
+                            out = Some(rest.get(i + 1).ok_or("--out requires a path")?);
+                            i += 2;
+                        }
+                        other => {
+                            return Err(
+                                format!("unexpected --region-image argument: {other}").into()
+                            );
+                        }
+                    }
+                }
+                let img = mathed_mini::export::region_screenshot(&doc, &grants)
+                    .map_err(std::io::Error::other)?;
+                let out_path = out.unwrap_or("region.png");
+                write_png(&img, out_path)?;
+                eprintln!("Rendered region screenshot -> {out_path}");
+                return Ok(());
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[1]);
                 return Ok(());
@@ -251,4 +291,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     mathed_mini::app::run(initial)
+}
+
+/// Encode an RGBA image as a PNG file (the `--region-image` output).
+fn write_png(img: &imaging::RgbaImage, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(path)?;
+    let mut enc = png::Encoder::new(file, img.width, img.height);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut writer = enc.write_header()?;
+    writer.write_image_data(&img.data)?;
+    Ok(())
 }

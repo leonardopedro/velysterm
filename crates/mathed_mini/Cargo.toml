@@ -18,6 +18,9 @@ serde_json = "1.0"
 # Data-URL image payloads (`#image("data:image/png;base64,…")`)
 # resolved by the minimal world — already in the lockfile.
 base64 = "0.22"
+# PNG encoding for the headless `--region-image` screenshot (the
+# plot e2e's rendered notebook page) — already in the lockfile.
+png = "0.18"
 
 # The probability kernel client (worker thread + Session). Pulls prob_kernel
 # (P3 #11: wire kernel_client into mathed_mini) so a \prob computes a real

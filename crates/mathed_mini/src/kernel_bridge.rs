@@ -319,16 +319,36 @@ impl KernelBridge {
                     // Escape `=` so Typst does not read it as a
                     // heading.
                     KernelResult::Value(p) => format!(" #text(rgb(\"#138000\"))[\\= {p:.4}]"),
+                    // Kernel text is untrusted markup: a `<Figure …>`
+                    // (Typst label) or `#`/`$` must render literally —
+                    // the string-literal-in-code form, like the
+                    // region. (A bare `"…"` in markup is literal
+                    // quote characters, so `#("...")` is required.)
                     KernelResult::StringValue(s) => {
-                        format!(" #text(rgb(\"#138000\"))[{s}]")
+                        format!(
+                            " #text(rgb(\"#138000\"))[#{}]",
+                            crate::translate::typst_str_lit(s)
+                        )
                     }
-                    // Rich media: a terse inline marker (the media
-                    // itself renders in the block's output region, not
-                    // inline in the body).
-                    KernelResult::Rich { outputs, .. } => {
-                        let m = outputs.first().map(|(m, _)| m.as_str()).unwrap_or("media");
-                        format!(" #text(rgb(\"#138000\"))[ [{m}]]")
-                    }
+                    // Rich media: inline thumbnails — one small
+                    // reflowable `#image` per payload right next to
+                    // the statement (the full captioned figure lives
+                    // in the block's output region). Data URLs resolve
+                    // in the world, so these render through the same
+                    // typst_imaging pipeline as the doc.
+                    KernelResult::Rich { outputs, .. } => outputs
+                        .iter()
+                        .map(|(mime, data)| {
+                            // `/` percent-encoded: the payload travels
+                            // through Typst's virtual-path machinery
+                            // (see `world::data_url_encode_payload`).
+                            let encoded = crate::world::data_url_encode_payload(data);
+                            format!(
+                                " #image(\"data:{mime};base64,{encoded}\", height: 16pt, alt: \"{mime}\")"
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
                     KernelResult::Error { code_name, .. } => {
                         format!(" #text(rgb(\"#c00000\"))[ {code_name}]")
                     }
@@ -3103,6 +3123,7 @@ read -r line
 case "$line" in
   *stream*) printf '%s' '{"outputs":[{"output_type":"stream","name":"stdout","text":"kernel stream hi\n"}]}' ;;
   *result*) printf '%s' '{"outputs":[{"output_type":"execute_result","mime":"text/plain","data":"= 0.5"}]}' ;;
+  *plot*) printf '%s' '{"outputs":[{"output_type":"execute_result","mime":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="}]}' ;;
   *error*) printf '%s' '{"outputs":[{"output_type":"error","ename":"KernelFailed","evalue":"boom","traceback":[]}]}' ;;
 esac
 "#;
@@ -3205,6 +3226,59 @@ esac
         let log = bridge.run_log();
         assert_eq!(log.len(), 3);
         assert!(log.iter().all(|e| e.op == "kernel"), "kernel runs: {log:?}");
+    }
+
+    #[test]
+    fn rich_media_annotations_are_inline_thumbnails() {
+        // Followup: an image payload from a `\kernel` run splices an
+        // inline `#image("data:…")` thumbnail right after the
+        // statement (the full figure lives in the region). The
+        // thumbnail must render through the world + typst_imaging:
+        // the annotated layout paints actual pixels.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Cell\n",
+            "#1 plot #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\")\n",
+            "#3 result #4 \\kernel(#3,#4, lang: \"mathed\", grants: \"kernel\")",
+        );
+        let mut bridge = KernelBridge::with_kernel_config(
+            &["kernel"],
+            &["mathed"],
+            Some(stub.to_str().expect("stub path")),
+        );
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        let ann = bridge.result_annotations();
+        // The plot statement's annotation embeds the payload as a
+        // data URL (base64 is inert inside the string literal); the
+        // text/plain statement keeps its green text annotation.
+        let thumb = ann
+            .values()
+            .find(|m| m.contains("#image(\"data:image/png;base64,"))
+            .unwrap_or_else(|| panic!("no thumbnail annotation: {ann:?}"));
+        assert!(thumb.contains("height: 16pt"), "compact thumb: {thumb}");
+        assert!(thumb.contains("alt: \"image/png\""), "a11y alt: {thumb}");
+        assert!(!thumb.contains("iVBORw0KGgo\n"), "no raw dump in text");
+
+        // Layout the doc with the annotations: the thumbnail paints
+        // real pixels through MiniWorld + typst_imaging.
+        use crate::render::layout_doc_with;
+        let layout = layout_doc_with(
+            doc,
+            600.0,
+            &TransformOptions {
+                annotations: ann,
+                ..Default::default()
+            },
+        )
+        .expect("annotated layout");
+        let painted = layout
+            .image
+            .data
+            .chunks_exact(4)
+            .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
+        assert!(painted, "inline thumbnail rasterized");
     }
 
     #[test]

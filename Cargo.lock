@@ -5843,6 +5843,7 @@ dependencies = [
  "kernel_client",
  "mathed_biblio",
  "mathed_core",
+ "png",
  "serde_json",
  "softbuffer",
  "typst",

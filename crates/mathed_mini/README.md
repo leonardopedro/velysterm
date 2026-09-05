@@ -79,10 +79,24 @@ the doc stays the source of truth).
   accompanying text stays a green line above the figures, each
   caption names `mime · decoded size`, and the citation-style kernel
   menu (`Ctrl+K`) lists every figure as its own reference row
-  (`[block n] exec: image/png · 12 kB — ✓ figure`). Non-image rich
-  MIME (`text/html`) and payloads over 1 MiB keep the terse size
-  marker — payloads are never dropped, base64/HTML is never dumped
-  into region text.
+  (`[block n] exec: image/png · 12 kB — ✓ figure`), and the inline
+  annotation next to the statement is a small reflowable `#image`
+  thumbnail of each payload. Two real-kernel hazards are handled:
+  kernel text renders as Typst string literals (a matplotlib
+  `<Figure size …>` is a Typst *label* opener), and the payload's
+  `/` is percent-encoded in the data URL (Typst's `VirtualPath`
+  collapses base64's `//` before the world resolves the image — both
+  pinned by the plot e2e). `ctx.kernel` outputs carry a ready-made
+  `data_url` field so templates render figures directly
+  (`#image(ctx.kernel.at(0).outputs.at(0).data_url)`). Non-image
+  rich MIME (`text/html`) and payloads over 1 MiB keep the terse
+  size marker — payloads are never dropped, base64/HTML is never
+  dumped into region text.
+- **Headless region screenshot** — `--region-image <doc>
+  [--grants g] --out page.png` runs every block and rasterizes each
+  block's output region through the same typst_imaging pipeline into
+  one stacked PNG (the printable notebook page, no window, no GPU);
+  `run_plot_e2e.sh` uses it to pixel-check a real matplotlib plot.
 
 ## Input + interchange (U-series)
 
