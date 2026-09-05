@@ -266,6 +266,29 @@ the doc stays the source of truth).
   (caret left visible, timer resumed on focus-in) and the loop
   sleeps (`ControlFlow::Wait`) instead of waking every ~530 ms.
 
+  Two follow-ups on that round: **(1)** nested popup boxes now
+  anchor in *parent coordinates* — each box after the first hangs
+  off its parent box's label, because its number is parent-relative
+  (the base doc's cite of the same number may not exist, or may be
+  a *different* cite — the old base-doc lookup silently dropped
+  body-local numbers and mis-anchored collisions). **(2)** the
+  kernel/media menu rows are now keyed by (doc revision, bridge
+  content version [, filter]): a fold toggle — a pure visibility
+  change — or a run click whose results haven't landed no longer
+  re-runs the whole-doc scan + transform + index build, and new
+  async results while a menu is open refresh its rows *live* (one
+  derivation per results batch) instead of waiting for the next
+  user interaction. There is also an ignored release perf harness
+  for the popup path —
+  `cargo test --release -p mathed_mini perf_popup -- --ignored
+  --nocapture` — which descends an 8-deep nested cite chain and
+  reports the rebuild cost (reference run: 2.2 ms / exactly 8 Typst
+  compiles, one per popup) and 1000 simulated blink frames (0.0 ms,
+  zero compiles). The Bevy `mathed` frontend already sleeps while
+  unfocused — its `WinitSettings` use Bevy's reactive update mode
+  with a 60 s unfocused cap, so it never repaints on a blink timer
+  there.
+
   Because all of this is invisible, **F5** toggles a live memo/frame
   **HUD** (bottom-right status line, Esc/F5 dismisses) that makes the
   wins measurable in-editor: it reports the last frame's class —

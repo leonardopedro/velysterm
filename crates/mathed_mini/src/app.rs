@@ -593,6 +593,12 @@ struct App {
     /// Persisted across opens like the selection, so a filter set in
     /// one session is the one the next open shows.
     kernel_menu_filter: crate::kernel_menu::MenuKindFilter,
+    /// The (doc revision, bridge content version, filter) triple the
+    /// current `kernel_menu` rows were derived from. When all three
+    /// match, `refresh_kernel_menu_rows` is a no-op — a fold toggle
+    /// (a pure visibility change) or a run click whose results have
+    /// not landed yet stop re-scanning the whole document.
+    kernel_menu_rows_key: Option<(u64, u64, crate::kernel_menu::MenuKindFilter)>,
     /// Media catalog (Ctrl+G): every rendered kernel figure as a
     /// citation-style reference list with typst-rasterized
     /// thumbnails; Enter jumps the caret to the producing statement
@@ -601,6 +607,10 @@ struct App {
     /// exclusive with the kernel menu (opening one closes the
     /// other).
     media_menu: Option<Vec<crate::media_menu::MediaRow>>,
+    /// The (doc revision, bridge content version) pair the current
+    /// `media_menu` rows were derived from; a match makes the
+    /// refresh a no-op.
+    media_menu_rows_key: Option<(u64, u64)>,
     media_menu_selected: usize,
     /// Rasterized whole-document preview (Ctrl+R): the doc composed
     /// exactly as the editor draws it (each block's text with its
@@ -746,7 +756,9 @@ impl App {
             kernel_menu_selected: 0,
             kernel_menu_folded: crate::kernel_menu::FoldSet::new(),
             kernel_menu_filter: crate::kernel_menu::MenuKindFilter::default(),
+            kernel_menu_rows_key: None,
             media_menu: None,
+            media_menu_rows_key: None,
             media_menu_selected: 0,
             doc_preview: None,
             doc_preview_scroll: 0,
@@ -1022,12 +1034,7 @@ impl App {
         } else {
             self.kernel_menu = None;
             self.doc_preview = None;
-            let text = self.doc.text().to_string();
-            self.media_menu = Some(crate::media_menu::rows_for_doc(
-                &text,
-                self.bridge.results(),
-            ));
-            self.media_menu_selected = 0;
+            self.refresh_media_menu_rows();
         }
         self.request_redraw();
     }
@@ -1518,6 +1525,25 @@ impl App {
     /// so the selection can never land on one). Called on open,
     /// after a run, on fold, and on filter change.
     fn refresh_kernel_menu_rows(&mut self) {
+        // Rows are a pure function of (doc revision, bridge content
+        // version, filter): when all three are unchanged the current
+        // rows are still exact, so the whole-doc derivation below is
+        // skipped. This makes a fold toggle (a pure visibility
+        // change) and a run click whose results haven't landed yet
+        // cost nothing; only a real edit, new kernel results, or a
+        // filter change re-derive.
+        let rev = self.doc.revision();
+        let content = self.bridge.content_version();
+        if self.kernel_menu.is_some()
+            && kernel_rows_fresh(
+                self.kernel_menu_rows_key,
+                rev,
+                content,
+                self.kernel_menu_filter,
+            )
+        {
+            return;
+        }
         let text = self.doc.text().to_string();
         self.kernel_menu = Some(crate::kernel_menu::rows_for_doc_with(
             &text,
@@ -1525,6 +1551,7 @@ impl App {
             &self.bridge.stale_blocks(),
             self.kernel_menu_filter,
         ));
+        self.kernel_menu_rows_key = Some((rev, content, self.kernel_menu_filter));
         // A filter change can remove the group a fold referred to;
         // prune dead fold keys so they never linger.
         if let Some(rows) = &self.kernel_menu {
@@ -1538,6 +1565,30 @@ impl App {
             self.kernel_menu_selected = n - 1;
         } else if n == 0 {
             self.kernel_menu_selected = 0;
+        }
+        self.request_redraw();
+    }
+
+    /// Recompute the media catalog rows from the current doc + bridge
+    /// results, keyed by (doc revision, bridge content version) like
+    /// the kernel menu — a matching key keeps the current rows.
+    fn refresh_media_menu_rows(&mut self) {
+        let rev = self.doc.revision();
+        let content = self.bridge.content_version();
+        if self.media_menu.is_some() && media_rows_fresh(self.media_menu_rows_key, rev, content) {
+            return;
+        }
+        let text = self.doc.text().to_string();
+        self.media_menu = Some(crate::media_menu::rows_for_doc(
+            &text,
+            self.bridge.results(),
+        ));
+        self.media_menu_rows_key = Some((rev, content));
+        let n = self.media_menu.as_ref().map_or(0, Vec::len);
+        if n > 0 && self.media_menu_selected >= n {
+            self.media_menu_selected = n - 1;
+        } else if n == 0 {
+            self.media_menu_selected = 0;
         }
         self.request_redraw();
     }
@@ -1564,7 +1615,11 @@ impl App {
         if !self.kernel_menu_folded.insert(offset) {
             self.kernel_menu_folded.remove(&offset);
         }
+        // The rows themselves are unchanged by a fold (the keyed
+        // refresh is a no-op) — but the *fold state* feeds the menu
+        // raster's content key, so the frame must still repaint.
         self.refresh_kernel_menu_rows();
+        self.request_redraw();
         true
     }
 
@@ -3036,6 +3091,27 @@ fn caret_blink_due(focused: bool, now: Instant, next_blink: Instant) -> bool {
     focused && now >= next_blink
 }
 
+/// `true` when the cached kernel-menu rows still match the current
+/// (doc revision, bridge content version, filter) triple. Rows are a
+/// pure function of exactly those three inputs, so a match proves a
+/// fold toggle (a visibility-only change) or a run click whose
+/// results have not landed yet can keep the rows without re-scanning
+/// the document.
+fn kernel_rows_fresh(
+    cached: Option<(u64, u64, crate::kernel_menu::MenuKindFilter)>,
+    rev: u64,
+    content: u64,
+    filter: crate::kernel_menu::MenuKindFilter,
+) -> bool {
+    cached == Some((rev, content, filter))
+}
+
+/// `true` when the cached media-catalog rows still match the current
+/// (doc revision, bridge content version) pair.
+fn media_rows_fresh(cached: Option<(u64, u64)>, rev: u64, content: u64) -> bool {
+    cached == Some((rev, content))
+}
+
 /// Compute the rendered popup boxes for (doc_text, popup_stack): one
 /// whole-doc scan + one Typst render per popup, plus the anchored
 /// label positions against the current block layouts. Pure — the
@@ -3065,7 +3141,15 @@ fn compute_popup_render(
     // the common single-popup case — whose scope is its own body —
     // rendered an empty frame.
     let mut prev_body: Option<String> = None;
-    for &target in popup_stack {
+    // Anchor chain (same plan section): the first box hangs off the
+    // cite's `[N]` label in the base layout; each nested box anchors
+    // at its *parent* box's label (its number is relative to the
+    // parent scope, so the base doc's cite of the same number may
+    // not exist — or may be a different cite). The old code looked
+    // every box up in the base doc, silently dropping nested boxes
+    // whose number was body-local and mis-anchoring collisions.
+    let mut prev_label: Option<crate::cite_popup::CiteLabelPos> = None;
+    for (i, &target) in popup_stack.iter().enumerate() {
         let target = target as u64;
         let scope: &str = prev_body.as_deref().unwrap_or(doc_text);
         let body = crate::cite_popup::resolve_popup_body(scope, target);
@@ -3075,40 +3159,52 @@ fn compute_popup_render(
             }
             _ => None,
         };
-        let entry = match refs.iter().find(|e| e.numbers.contains(&target)) {
-            Some(e) => e,
-            None => continue,
-        };
-        let stmt = match scan.stmts.get(entry.stmt_idx) {
-            Some(s) => s,
-            None => continue,
-        };
-        let cite_byte = stmt.range.start;
-        // Find the block containing this cite's label, then use
-        // that block's layout for screen positioning.
-        let block_layout = {
-            let bid = block_offsets
-                .iter()
-                .find(|(id, _)| {
-                    block_index.blocks.iter().any(|b| {
-                        b.id == *id && b.range.start <= cite_byte && cite_byte <= b.range.end
+        let label = if i == 0 {
+            // First box: anchor in the base layout.
+            let entry = match refs.iter().find(|e| e.numbers.contains(&target)) {
+                Some(e) => e,
+                None => continue,
+            };
+            let stmt = match scan.stmts.get(entry.stmt_idx) {
+                Some(s) => s,
+                None => continue,
+            };
+            let cite_byte = stmt.range.start;
+            // Find the block containing this cite's label, then use
+            // that block's layout for screen positioning.
+            let block_layout = {
+                let bid = block_offsets
+                    .iter()
+                    .find(|(id, _)| {
+                        block_index.blocks.iter().any(|b| {
+                            b.id == *id && b.range.start <= cite_byte && cite_byte <= b.range.end
+                        })
                     })
-                })
-                .or_else(|| block_offsets.first())
-                .map(|(id, _)| *id);
-            match bid.and_then(|id| block_layouts.get(&id)) {
+                    .or_else(|| block_offsets.first())
+                    .map(|(id, _)| *id);
+                match bid.and_then(|id| block_layouts.get(&id)) {
+                    Some(l) => l,
+                    None => continue,
+                }
+            };
+            let geom = match block_layout.glyphs.caret_for_byte(cite_byte) {
+                Some(g) => g,
+                None => continue,
+            };
+            crate::cite_popup::CiteLabelPos::from_caret(
+                geom,
+                crate::cite_popup::cite_label_anchor_width(entry, block_layout),
+            )
+        } else {
+            // Nested box: anchor at the parent box's label (its
+            // number is parent-relative). A missing parent anchor
+            // means nothing to hang the box from.
+            match prev_label {
                 Some(l) => l,
                 None => continue,
             }
         };
-        let geom = match block_layout.glyphs.caret_for_byte(cite_byte) {
-            Some(g) => g,
-            None => continue,
-        };
-        let label = crate::cite_popup::CiteLabelPos::from_caret(
-            geom,
-            crate::cite_popup::cite_label_anchor_width(entry, block_layout),
-        );
+        prev_label = Some(label);
         let body_img = body.as_ref().and_then(|b| {
             let opts = mathed_core::transform::TransformOptions::default();
             crate::cite_popup::render_popup_body(b, &opts)
@@ -3507,8 +3603,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = self.kernel_deadline {
             if self.bridge.poll() {
                 // New results: rebuild the layout (footer changed)
-                // and redraw.
+                // and redraw. An open kernel/media menu also
+                // re-derives its rows — keyed by (rev, content,
+                // filter), so this is one derivation per results
+                // batch, and the status column / figure list goes
+                // live as results land instead of waiting for the
+                // next user interaction.
                 self.invalidate_annotations();
+                if self.kernel_menu.is_some() {
+                    self.refresh_kernel_menu_rows();
+                }
+                if self.media_menu.is_some() {
+                    self.refresh_media_menu_rows();
+                }
                 self.request_redraw();
             }
             if Instant::now() >= deadline {
@@ -3935,9 +4042,9 @@ mod tests {
     #![allow(clippy::single_range_in_vec_init)]
     use super::{
         FAR_LEFT, FAR_RIGHT, PopupRender, block_layout_key, caret_blink_due, cite_popup_scope_text,
-        compute_popup_render, draw_caret, popup_render_fresh, region_key, region_key_from,
-        resolve_hit, selection_range, touched_marker_starts, touched_math_span_starts,
-        touched_space_run_starts,
+        compute_popup_render, draw_caret, kernel_rows_fresh, media_rows_fresh, popup_render_fresh,
+        region_key, region_key_from, resolve_hit, selection_range, touched_marker_starts,
+        touched_math_span_starts, touched_space_run_starts,
     };
     use crate::memo::BlockLayout;
     use crate::render::{DocLayout, active_reveal_span, layout_doc, layout_doc_with};
@@ -3945,6 +4052,31 @@ mod tests {
     use mathed_core::glyphs::{CaretGeom, V2};
     use mathed_core::transform::TransformOptions;
     use std::collections::HashMap;
+
+    #[test]
+    fn menu_rows_fresh_gates_on_rev_content_and_filter() {
+        // Menu rows are a pure function of (doc revision, bridge
+        // content version, filter) — a matching key proves a fold
+        // toggle (a visibility-only change) or a run click whose
+        // results have not landed yet can keep the rows without
+        // re-scanning the document.
+        let f = crate::kernel_menu::MenuKindFilter::default();
+        let k = Some((5u64, 9u64, f));
+        assert!(kernel_rows_fresh(k, 5, 9, f));
+        assert!(!kernel_rows_fresh(None, 5, 9, f), "cold");
+        assert!(!kernel_rows_fresh(k, 6, 9, f), "doc edit");
+        assert!(!kernel_rows_fresh(k, 5, 10, f), "new kernel results");
+        assert!(
+            !kernel_rows_fresh(k, 5, 9, crate::kernel_menu::MenuKindFilter::Exec),
+            "filter cycle"
+        );
+
+        let m = Some((5u64, 9u64));
+        assert!(media_rows_fresh(m, 5, 9));
+        assert!(!media_rows_fresh(None, 5, 9));
+        assert!(!media_rows_fresh(m, 6, 9), "doc edit");
+        assert!(!media_rows_fresh(m, 5, 10), "new results");
+    }
 
     #[test]
     fn popup_render_fresh_gates_on_rev_stack_width() {
@@ -4059,10 +4191,106 @@ mod tests {
             nested[1].body.is_some(),
             "box for cite [1] inside that body"
         );
+        // F1: the nested box anchors at its *parent's* label — its
+        // number is parent-relative, and the base doc's cite of the
+        // same number may be a different cite (here base [1] is the
+        // `\cite(y)` *inside* that very body, up at the doc's first
+        // line). The old code looked the number up in the base doc
+        // and mis-anchored (or dropped) it.
+        assert_eq!(
+            nested[1].label, nested[0].label,
+            "nested box hangs off the parent box's anchor"
+        );
+        assert!(
+            nested[1].label.top < nested[0].label.bottom,
+            "parent anchor is above the child's stack position"
+        );
 
         // Dangling target: the box is omitted, not drawn empty.
         let dangling = compute_popup_render(doc, &[2], &layouts, &block_index, &offsets);
         assert!(dangling.is_empty(), "cite [2] does not exist");
+    }
+
+    /// Popup-box perf harness (ignored, release mode):
+    /// ```
+    /// cargo test --release -p mathed_mini perf_popup -- \
+    ///     --ignored --nocapture
+    /// ```
+    ///
+    /// Builds a `D`-deep nested cite chain (each cite's body contains
+    /// the next cite's markers + statement) and reports wall-clock
+    /// *and real Typst compile counts* for one rebuild (the stack
+    /// `[D, D-1, …, 1]` descends the chain — every box's body
+    /// renders, so the rebuild costs exactly `D` compiles plus one
+    /// whole-doc scan) and for 1000 simulated blink frames (a
+    /// matching key = zero compiles). Exact deltas are valid because
+    /// the harness runs alone.
+    #[test]
+    #[ignore = "manual release-mode perf harness (see doc comment)"]
+    fn perf_popup_render_harness() {
+        use std::time::Instant;
+
+        const D: usize = 8;
+        // Markers nest like balanced parens: open 1, 3, 5… then
+        // close innermost-first, each closing marker followed by its
+        // cite statement. The innermost cite is numbered 1 in base
+        // doc order, the outermost D.
+        let mut doc = String::new();
+        for k in 0..D {
+            doc.push_str(&format!("#{} ", 2 * k + 1));
+        }
+        doc.push_str(" plain ");
+        for k in (0..D).rev() {
+            doc.push_str(&format!(
+                "#{} \\cite(#{},{}) ",
+                2 * k + 2,
+                2 * k + 1,
+                2 * k + 2
+            ));
+        }
+        let stack: Vec<u32> = (1..=D as u32).rev().collect();
+
+        let mut block_index = BlockIndex::default();
+        block_index.update(&doc);
+        let layout = layout_doc(&doc, 600.0).expect("chain doc lays out");
+        let bid = block_index.blocks[0].id;
+        let mut layouts = HashMap::new();
+        layouts.insert(bid, BlockLayout { key: 0, layout });
+        let offsets = vec![(bid, 0.0)];
+
+        // One rebuild: `D` popup bodies rendered = `D` Typst
+        // compiles (per-box scope chain, each body cites the next).
+        let base = crate::render::compile_passes();
+        let t = Instant::now();
+        let boxes = compute_popup_render(&doc, &stack, &layouts, &block_index, &offsets);
+        let rebuild_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let rebuild_compiles = crate::render::compile_passes() - base;
+        assert_eq!(boxes.len(), D, "every chain box renders");
+        assert_eq!(rebuild_compiles, D as u64, "one compile per popup body");
+
+        // 1000 simulated blink frames: the keyed gate is a pure
+        // predicate — zero compiles, ~zero time.
+        let cached = PopupRender {
+            rev: 7,
+            stack: stack.clone(),
+            width_px: 1200,
+            boxes: Vec::new(),
+        };
+        let t = Instant::now();
+        let mut hits = 0usize;
+        for _ in 0..1000 {
+            if popup_render_fresh(Some(&cached), 7, &stack, 1200) {
+                hits += 1;
+            }
+        }
+        let blink_ms = t.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(hits, 1000);
+
+        eprintln!("[perf] popups: {D}-deep chain, {} bytes", doc.len());
+        eprintln!(
+            "[perf] rebuild: {rebuild_ms:.1} ms, {rebuild_compiles} Typst compiles (1 per popup)"
+        );
+        eprintln!("[perf] 1000 simulated blink frames: {blink_ms:.1} ms, 0 compiles");
     }
 
     #[test]
