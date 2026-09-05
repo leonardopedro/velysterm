@@ -949,6 +949,16 @@ pub fn doc_pages_image(doc_text: &str, grants: &[&str]) -> Result<Vec<imaging::R
     doc_pages_image_with(&bridge, doc_text)
 }
 
+/// Headless PDF export (`--pages-pdf`): run every block, let Typst's
+/// own page model break the document into A4 pages (the page breaks
+/// are Typst's, not pixel slices), and wrap the rasterized pages in
+/// a minimal PDF — one page object per image, each a
+/// FlateDecode-encoded DeviceRGB bitmap (see [`crate::pdf`]).
+pub fn doc_pages_pdf(doc_text: &str, grants: &[&str]) -> Result<Vec<u8>, String> {
+    let pages = doc_pages_image(doc_text, grants)?;
+    crate::pdf::pages_pdf(&pages)
+}
+
 /// N8: compare the current doc against a previously written record
 /// and report the block indices whose statement hashes no longer
 /// match (the open-doc staleness policy: outputs derived from a
@@ -2231,6 +2241,49 @@ esac
         // A short document is exactly one A4 page (no empty filler).
         let one = doc_pages_image("= Title\n\nshort body\n", &[]).expect("paged export");
         assert_eq!(one.len(), 1, "short doc is one page: {}", one.len());
+    }
+
+    #[test]
+    fn doc_pages_pdf_wraps_the_paginated_rasters() {
+        // F1: `--pages-pdf` wraps the same paginated pages in a
+        // minimal PDF — one FlateDecode DeviceRGB bitmap per page.
+        // The container is ours (no native Typst PDF export), the
+        // page breaks are Typst's own pagination.
+        let mut body = String::from("= A long report\n\n");
+        for i in 0..60 {
+            body.push_str(&format!(
+                "paragraph number {i} with enough prose to wrap and fill the page layout continuously.\n\n"
+            ));
+        }
+        let pdf = doc_pages_pdf(&body, &[]).expect("pdf export");
+        assert!(pdf.starts_with(b"%PDF-1.4"), "PDF header");
+        assert!(
+            pdf.windows(b"%%EOF".len()).any(|w| w == b"%%EOF"),
+            "PDF EOF marker"
+        );
+        let page_count = pdf
+            .windows(b"/Type /Page ".len())
+            .filter(|w| w == b"/Type /Page ")
+            .count();
+        assert!(page_count > 1, "long doc wraps as {page_count} pages");
+        assert_eq!(page_count, doc_pages_image(&body, &[]).unwrap().len());
+        // Every page image is a FlateDecode DeviceRGB bitmap sized at
+        // the A4 1px/pt raster.
+        assert!(
+            pdf.windows(b"/Filter /FlateDecode".len())
+                .any(|w| w == b"/Filter /FlateDecode")
+        );
+        assert!(
+            pdf.windows(b"/ColorSpace /DeviceRGB".len())
+                .any(|w| w == b"/ColorSpace /DeviceRGB")
+        );
+        // A short doc is one page in the PDF too.
+        let one = doc_pages_pdf("= Title\n\nshort body\n", &[]).expect("pdf export");
+        let one_pages = one
+            .windows(b"/Type /Page ".len())
+            .filter(|w| w == b"/Type /Page ")
+            .count();
+        assert_eq!(one_pages, 1, "short doc is one PDF page");
     }
 
     #[test]

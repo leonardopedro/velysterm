@@ -77,6 +77,41 @@ struct OverlayMemo {
     image: imaging::RgbaImage,
 }
 
+/// Content fingerprint of a [`crate::kernel_bridge::KernelResult`]
+/// for the doc-preview memo key: enough to know whether the
+/// rasterized preview (regions, inline annotations) can change. The
+/// values are folded in lossily on purpose — the fingerprint only
+/// guards against a *stale* raster, so truncating long payloads is
+/// the right trade (they are the bulk of `Rich` results and two
+/// results that differ only past the cut still change the rendered
+/// figure, which is precisely what must be detected — but the hash
+/// of the head alone already differs, since the head contains the
+/// MIME kind, count and the payload's beginning).
+fn result_fingerprint(r: &crate::kernel_bridge::KernelResult) -> String {
+    match r {
+        crate::kernel_bridge::KernelResult::Value(v) => format!("v:{v:.6}"),
+        crate::kernel_bridge::KernelResult::StringValue(s) => format!("s:{s}"),
+        crate::kernel_bridge::KernelResult::Rich { text, outputs } => {
+            let mut fp = format!("r:{}", text.len());
+            for (mime, payload) in outputs {
+                fp.push_str(&format!(";{}:{}", mime, payload.len()));
+            }
+            fp
+        }
+        crate::kernel_bridge::KernelResult::Error {
+            code_name,
+            message,
+            hints,
+        } => {
+            let mut fp = format!("e:{code_name}:{}", message.len());
+            for h in hints {
+                fp.push_str(&format!(";{:?}:{}", h.kind, h.target.len()));
+            }
+            fp
+        }
+    }
+}
+
 fn overlay_memo_key(width_px: u32, content: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -249,10 +284,20 @@ struct App {
     /// exactly as the editor draws it (each block's text with its
     /// inline annotations, then its output region below) and
     /// rasterized through typst_imaging into one image, shown as a
-    /// scrollable overlay; ↑/↓ scroll, Esc dismisses. Rebuilt on
-    /// every open, so it always reflects the current doc + results.
-    doc_preview: Option<Result<imaging::RgbaImage, String>>,
+    /// scrollable overlay; ↑/↓ scroll, Esc dismisses. The raster
+    /// lives in the content-keyed `overlay_memos` memo (site
+    /// "doc_preview"): it is recomputed only when the doc, the
+    /// bridge results, or the window width changed — an idle frame
+    /// is a pure blit. The value here is just the open state (or the
+    /// error message when composition failed).
+    doc_preview: Option<Result<(), String>>,
     doc_preview_scroll: usize,
+    /// Overlay memo accounting (content-keyed memoization hit rate):
+    /// how often a draw found an up-to-date raster vs how often a
+    /// fresh Typst compile ran. Reported on overlay close so the
+    /// eviction policy can be tuned with data.
+    overlay_memo_hits: u64,
+    overlay_memo_compiles: u64,
     /// Raster memos for the overlay draws (see [`OverlayMemo`]): one
     /// entry per overlay site, keyed by (site content, window width),
     /// so a caret-blink redraw never re-compiles an unchanged overlay.
@@ -354,6 +399,8 @@ impl App {
             doc_preview_scroll: 0,
             overlay_memos: std::collections::HashMap::new(),
             template_preview_scroll: 0,
+            overlay_memo_hits: 0,
+            overlay_memo_compiles: 0,
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -513,6 +560,9 @@ impl App {
     /// overlays). Never touches the doc.
     fn toggle_help_overlay(&mut self) {
         self.help_overlay = !self.help_overlay;
+        if !self.help_overlay {
+            self.report_overlay_memo_ratio();
+        }
         self.request_redraw();
     }
 
@@ -525,6 +575,7 @@ impl App {
     fn toggle_kernel_menu(&mut self) {
         if self.kernel_menu.is_some() {
             self.kernel_menu = None;
+            self.report_overlay_memo_ratio();
         } else {
             // Overlays are mutually exclusive: opening the kernel
             // menu closes the media catalog and the doc preview.
@@ -545,6 +596,7 @@ impl App {
     fn toggle_media_menu(&mut self) {
         if self.media_menu.is_some() {
             self.media_menu = None;
+            self.report_overlay_memo_ratio();
         } else {
             self.kernel_menu = None;
             self.doc_preview = None;
@@ -567,12 +619,12 @@ impl App {
     fn toggle_doc_preview(&mut self) {
         if self.doc_preview.is_some() {
             self.doc_preview = None;
+            self.report_overlay_memo_ratio();
         } else {
             self.kernel_menu = None;
             self.media_menu = None;
             self.template_preview = None;
-            let text = self.doc.text().to_string();
-            self.doc_preview = Some(crate::export::doc_screenshot_with(&self.bridge, &text));
+            self.doc_preview = Some(Ok(()));
             self.doc_preview_scroll = 0;
         }
         self.request_redraw();
@@ -609,8 +661,10 @@ impl App {
             .get(site)
             .is_some_and(|m| m.width == width_px && m.key == key)
         {
+            self.overlay_memo_hits += 1;
             return;
         }
+        self.overlay_memo_compiles += 1;
         match crate::render::render_markup(markup, width_px as f64) {
             Ok(image) => {
                 self.overlay_memos.insert(
@@ -645,8 +699,10 @@ impl App {
             .get(SITE)
             .is_some_and(|m| m.width == width_px && m.key == key)
         {
+            self.overlay_memo_hits += 1;
             return false;
         }
+        self.overlay_memo_compiles += 1;
         let width_f = width_px as f64;
         // Render each line; blanks and failures contribute no image
         // but keep their vertical slot.
@@ -688,6 +744,71 @@ impl App {
             },
         );
         true
+    }
+
+    /// Raster document preview (Ctrl+R) content-keyed memo: recompose
+    /// the whole-doc raster only when the doc text, the bridge
+    /// results, or the window width changed — everything the
+    /// composition depends on, folded into the memo key. An idle
+    /// frame is a pure blit (hit). The doc_preview open-state value
+    /// mirrors the memo: `Ok(())` when a raster exists, `Err` with
+    /// the composition error message otherwise (drawn in red).
+    fn ensure_doc_preview_raster(&mut self, win_px: u32) {
+        const SITE: &str = "doc_preview";
+        let text = self.doc.text().to_string();
+        // The screenshot depends on the live results too (regions
+        // render with their current values/stale banners, inline
+        // annotations splice their colours) — hash the whole result
+        // map into the key.
+        let mut results_fp = String::new();
+        for (k, r) in self.bridge.results() {
+            results_fp.push_str(&format!("{k}:{}", result_fingerprint(r)));
+        }
+        let content = format!("{}|{}", text, results_fp);
+        let key = overlay_memo_key(win_px, &content);
+        if self
+            .overlay_memos
+            .get(SITE)
+            .is_some_and(|m| m.width == win_px && m.key == key)
+        {
+            self.overlay_memo_hits += 1;
+            return;
+        }
+        self.overlay_memo_compiles += 1;
+        match crate::export::doc_screenshot_with(&self.bridge, &text) {
+            Ok(image) => {
+                self.overlay_memos.insert(
+                    SITE,
+                    OverlayMemo {
+                        width: win_px,
+                        key,
+                        image,
+                    },
+                );
+                self.doc_preview = Some(Ok(()));
+            }
+            Err(e) => {
+                self.overlay_memos.remove(SITE);
+                self.doc_preview = Some(Err(e));
+            }
+        }
+    }
+
+    /// Report the content-keyed overlay memo accounting (F4): hits vs
+    /// fresh compiles, emitted on overlay close so eviction/width
+    /// policy can be tuned with data.
+    fn report_overlay_memo_ratio(&mut self) {
+        let (hits, compiles) = (self.overlay_memo_hits, self.overlay_memo_compiles);
+        if hits == 0 && compiles == 0 {
+            return;
+        }
+        let total = hits + compiles;
+        let pct = hits as f64 * 100.0 / total as f64;
+        eprintln!(
+            "[mathed_mini] overlay memo: {hits} hits / {compiles} compiles ({pct:.1}% hit rate)"
+        );
+        self.overlay_memo_hits = 0;
+        self.overlay_memo_compiles = 0;
     }
 
     /// Recompute the open menu's rows from the current doc + bridge
@@ -807,6 +928,7 @@ impl App {
     fn toggle_template_preview(&mut self) {
         if self.template_preview.is_some() {
             self.template_preview = None;
+            self.report_overlay_memo_ratio();
         } else {
             self.kernel_menu = None;
             self.media_menu = None;
@@ -1667,6 +1789,11 @@ impl App {
             // New content: the viewport restarts at the top.
             self.template_preview_scroll = 0;
         }
+        // Raster document preview (Ctrl+R): recompose only when the
+        // doc, the displayed results, or the width changed.
+        if self.doc_preview.is_some() {
+            self.ensure_doc_preview_raster(win_px);
+        }
 
         // Compute the selection up-front (owned) so it doesn't alias
         // the mutable `surface` borrow below.
@@ -1844,9 +1971,23 @@ impl App {
                 blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &lbl);
                 let y0 = 8 + lbl.height as usize + 4;
                 match result {
-                    Ok(img) => {
-                        let scroll = self.doc_preview_scroll.min(img.height as usize);
-                        blit_over_bg_scrolled(&mut buffer, win_w, doc_h, 8, y0, img, scroll);
+                    Ok(()) => {
+                        // The raster is the content-keyed memo; a
+                        // stale-width or stale-content frame was
+                        // recomposed by the pre-pass, so an idle
+                        // frame here is a pure scrolled blit.
+                        if let Some(m) = self.overlay_memos.get("doc_preview") {
+                            let scroll = self.doc_preview_scroll.min(m.image.height as usize);
+                            blit_over_bg_scrolled(
+                                &mut buffer,
+                                win_w,
+                                doc_h,
+                                8,
+                                y0,
+                                &m.image,
+                                scroll,
+                            );
+                        }
                     }
                     Err(e) => {
                         // The message is dynamic text (it can contain
@@ -2548,8 +2689,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.doc_preview.is_some() {
                     match &logical_key {
                         Key::Named(NamedKey::ArrowDown) => {
-                            if let Some(Ok(img)) = &self.doc_preview {
-                                let max = img.height as usize;
+                            if let Some(m) = self.overlay_memos.get("doc_preview") {
+                                let max = m.image.height as usize;
                                 self.doc_preview_scroll =
                                     (self.doc_preview_scroll + 80).min(max.saturating_sub(1));
                             }

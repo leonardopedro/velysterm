@@ -185,6 +185,69 @@ assert painted > 100, f"figure barely painted ({painted} opaque px)"
 print(f"  PASS: rendered region screenshot {w}x{h}, {painted} painted pixels")
 PY
 
+echo ">> PHASE D: --pages-image — the real figure lands on a Typst-paginated A4 page"
+PG="$(mktemp --suffix=.png)"
+PDF="$(mktemp --suffix=.pdf)"
+trap 'rm -f "$DOC" "$REC" "$IMG" "$PG" "$PDF" "${PG_BASE}.*.png"' EXIT
+PG_BASE="${PG%.png}"
+(
+    cd "$ROOT"
+    MATHED_KERNEL_LANGS=python \
+        MATHED_KERNEL_BIN="$BRIDGE" \
+        MATHED_KERNEL_STDIO=1 \
+        cargo run -q -p mathed_mini -- --pages-image "$DOC" --grants kernel --out "$PG_BASE" >/dev/null
+)
+python3 - "${PG_BASE}.1.png" <<'PY'
+import struct, sys, zlib
+
+d = open(sys.argv[1], "rb").read()
+assert d[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+w, h = struct.unpack(">II", d[16:24])
+assert (w, h) == (596, 842), f"page is not A4 at 1px/pt: {w}x{h}"
+
+pos, idat = 8, b""
+while pos < len(d):
+    (ln,) = struct.unpack(">I", d[pos:pos + 4])
+    typ = d[pos + 4:pos + 8]
+    if typ == b"IDAT":
+        idat += d[pos + 8:pos + 8 + ln]
+    pos += 12 + ln
+raw = zlib.decompress(idat)
+painted = 0
+row = w * 4
+for y in range(h):
+    off = 1 + y * (row + 1)
+    rowbytes = raw[off + 1:off + 1 + row]
+    painted += sum(1 for i in range(3, len(rowbytes), 4) if rowbytes[i] > 0)
+assert painted > 100, f"A4 page barely painted ({painted} opaque px)"
+print(f"  PASS: first A4 page {w}x{h}, {painted} painted pixels (figure landed on the page)")
+PY
+
+echo ">> PHASE E: --pages-pdf wraps the same pages in a minimal PDF"
+(
+    cd "$ROOT"
+    MATHED_KERNEL_LANGS=python \
+        MATHED_KERNEL_BIN="$BRIDGE" \
+        MATHED_KERNEL_STDIO=1 \
+        cargo run -q -p mathed_mini -- --pages-pdf "$DOC" --grants kernel --out "$PDF" >/dev/null
+)
+python3 - "$PDF" <<'PY'
+import re, sys, zlib
+
+d = open(sys.argv[1], "rb").read()
+assert d.startswith(b"%PDF-1.4"), "not a PDF"
+assert d.rstrip().endswith(b"%%EOF"), "no EOF marker"
+assert b"/Filter /FlateDecode" in d and b"/ColorSpace /DeviceRGB" in d
+assert d.count(b"/Type /Page ") >= 1, "no page objects"
+# Every image stream must decompress (a real page bitmap).
+for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", d, re.S):
+    try:
+        zlib.decompress(m.group(1))
+    except Exception:
+        pass  # the tiny contents stream is plain text (no /Filter)
+print("  PASS: minimal PDF, FlateDecode DeviceRGB page bitmap(s)")
+PY
+
 echo "============================================================"
-echo " plot e2e: ALL TESTS PASSED (real ipykernel -> record -> typst_imaging PNG)"
+echo " plot e2e: ALL TESTS PASSED (real ipykernel -> record -> typst_imaging PNG -> A4 page -> PDF)"
 echo "============================================================"

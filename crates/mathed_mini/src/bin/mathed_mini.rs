@@ -363,6 +363,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Rendered {} A4 page(s) -> {base}.*.png", pages.len());
                 return Ok(());
             }
+            // PDF export — the same paginated pages, wrapped in a
+            // minimal PDF (one FlateDecode DeviceRGB bitmap per page,
+            // see crate::pdf). No native Typst PDF export exists in
+            // this Typst, so the container is written here; the page
+            // breaks are still Typst's own.
+            "--pages-pdf" => {
+                let path = rest.first().ok_or("--pages-pdf requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let mut grants: Vec<&str> = Vec::new();
+                let mut out: Option<&str> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--grants" => {
+                            grants = rest
+                                .get(i + 1)
+                                .ok_or("--grants requires a comma-separated list")?
+                                .split(',')
+                                .collect();
+                            i += 2;
+                        }
+                        "--out" => {
+                            out = Some(rest.get(i + 1).ok_or("--out requires a path")?);
+                            i += 2;
+                        }
+                        other => {
+                            return Err(format!("unexpected --pages-pdf argument: {other}").into());
+                        }
+                    }
+                }
+                let pdf = mathed_mini::export::doc_pages_pdf(&doc, &grants)
+                    .map_err(std::io::Error::other)?;
+                let out_path = out.unwrap_or("doc.pdf");
+                std::fs::write(out_path, &pdf)?;
+                let pages = pdf
+                    .windows("/Type /Page ".len())
+                    .filter(|w| w == b"/Type /Page ")
+                    .count();
+                eprintln!("Rendered {pages} A4 page(s) -> {out_path}");
+                return Ok(());
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[1]);
                 return Ok(());

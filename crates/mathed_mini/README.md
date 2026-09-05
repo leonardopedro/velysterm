@@ -109,7 +109,9 @@ the doc stays the source of truth).
   annotations, then its output region) and rasterizes it through
   typst_imaging into one scrollable overlay image (↑/↓ scroll, Esc
   closes); the headless form is `--doc-image <doc> [--grants g]
-  --out page.png`.
+  --out page.png`. The preview raster is memoized like the other
+  overlays (content-keyed: doc text + live results + window width),
+  so idle frames are pure blits.
 - **Paginated A4 export** — `--pages-image <doc> [--grants g]
   --out base` writes one PNG per page (`base.1.png`, …). The page
   breaks come from **Typst's own page model**
@@ -117,13 +119,31 @@ the doc stays the source of truth).
   introspection stabilization) — never from slicing pixels — and
   each page rasterizes through typst_imaging. Figures, tables and
   data-URL media flow and break like any document content.
+- **PDF export** — `--pages-pdf <doc> [--grants g] --out doc.pdf`
+  wraps the same paginated pages in a minimal PDF: one page object
+  per raster, each a FlateDecode-compressed DeviceRGB bitmap
+  (alpha composited over white). This Typst has no native PDF
+  *export* (only a PDF image loader), so the container is written
+  here — the page breaks are still Typst's own pagination.
+  On overlay close, the editor prints the content-keyed memo hit
+  rate (`[mathed_mini] overlay memo: N hits / M compiles`) so the
+  eviction/width policy can be tuned with data.
 - **Headless region screenshot** — `--region-image <doc>
   [--grants g] --out page.png` runs every block and rasterizes each
   block's output region through the same typst_imaging pipeline into
   one stacked PNG (the printable notebook page, no window, no GPU);
   `run_plot_e2e.sh` uses it to pixel-check a real matplotlib plot
   and `run_svg_e2e.sh` the same path for a real `image/svg+xml`
-  vector payload.
+  vector payload. Both scripts then run `--pages-image` (the real
+  figure lands on a Typst-paginated A4 page, pixel-checked) and
+  `--pages-pdf` (the same pages wrapped in the minimal PDF). The
+  SVG e2e's paged phase caught a real transform bug: `<` in doc
+  text (e.g. a python kernel body `display(SVG('<svg …>'))`)
+  reached Typst as a live label opener and failed the whole paged
+  compile — the transform now escapes `<`/`@` exactly when Typst's
+  lexer would read them as label/ref openers (followed by an
+  identifier char), so prose renders literally while `a < b`
+  comparisons stay untouched.
 - **Overlay rasters are memoized** — the kernel menu, media catalog,
   help and template preview cache their raster by (content, window
   width) and recompile only when either changes: a caret-blink

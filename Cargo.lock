@@ -5838,6 +5838,7 @@ dependencies = [
  "accesskit_winit 0.29.2",
  "arboard",
  "base64",
+ "flate2",
  "imaging",
  "imaging_vello_cpu",
  "kernel_client",

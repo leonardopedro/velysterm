@@ -1147,10 +1147,37 @@ fn is_bare_markup_delim(c: char) -> bool {
     matches!(c, '_' | '*' | '`')
 }
 
+/// Whether the `<`/`@` at `byte_pos` in `chunk` would be read by
+/// Typst's markup lexer as a live label / ref-marker opener: both
+/// only become syntax when the character *after* them can continue an
+/// identifier (`typst_syntax::is_id_continue`: XID continue, `_`,
+/// `-`). Everywhere else they are plain text — `a < b` is a literal
+/// less-than, a trailing `<` or `@` is literal. Escaping exactly this
+/// case keeps prose literal without double-escaping ordinary
+/// comparisons or punctuation (the SVG-kernel-body e2e caught the
+/// unescaped form: `<svg …>` opened a live label and failed the whole
+/// paged compile with "unclosed label").
+fn is_label_or_ref_opener(chunk: &str, byte_pos: usize) -> bool {
+    let Some(&b) = chunk.as_bytes().get(byte_pos) else {
+        return false;
+    };
+    if b != b'<' && b != b'@' {
+        return false;
+    }
+    chunk[byte_pos + 1..]
+        .chars()
+        .next()
+        .is_some_and(typst::syntax::is_id_continue)
+}
+
 fn emit_escaped(chunk: &str, doc_start: usize, out: &mut String, map: &mut OffsetMap) {
     let mut run_start = 0;
     for (i, c) in chunk.char_indices() {
-        if c == '#' || c == '\\' || is_bare_markup_delim(c) {
+        if c == '#'
+            || c == '\\'
+            || is_bare_markup_delim(c)
+            || (c == '<' || c == '@') && is_label_or_ref_opener(chunk, i)
+        {
             push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
             // Typst parses `\#`/`\\` as one "Escape" syntax node and
             // attributes the resulting glyph's source span to *this*
@@ -1222,6 +1249,18 @@ fn emit_plain_text(chunk: &str, doc_start: usize, out: &mut String, map: &mut Of
                 }
             }
             b'#' | b'_' | b'*' | b'`' => {
+                push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
+                // Same escape-byte pin as `emit_escaped` — see there.
+                map.spans.push(CopySpan {
+                    doc_start: doc_start + i,
+                    render_start: out.len(),
+                    len: 0,
+                });
+                out.push('\\');
+                run_start = i;
+                i += 1;
+            }
+            b'<' | b'@' if is_label_or_ref_opener(chunk, i) => {
                 push_copy(&chunk[run_start..i], doc_start + run_start, out, map);
                 // Same escape-byte pin as `emit_escaped` — see there.
                 map.spans.push(CopySpan {
@@ -1656,6 +1695,50 @@ mod tests {
     fn bare_hash_escaped_even_when_not_immediately_after_start() {
         let out = render("issue #! is open", &TransformOptions::default());
         assert_eq!(out.text, "issue \\#! is open");
+    }
+
+    #[test]
+    fn less_than_identifier_is_escaped_as_label_opener() {
+        // Typst's markup lexer reads `<` as a label opener only when
+        // the character after it can continue an identifier
+        // (`is_id_continue`: XID continue, `_`, `-`). A python kernel
+        // body like `display(SVG('<svg …>'))` used to reach Typst
+        // with a *live* `<svg`, failing the whole layout ("unclosed
+        // label") — the SVG e2e caught it on the paged path. Plain
+        // prose must render the `<` literally, so the opener is
+        // escaped exactly like the other markup delimiters.
+        let out = render(
+            "a python body display(SVG('<svg xmlns=\"…\">')) and a tag <intro> here",
+            &TransformOptions::default(),
+        );
+        assert_eq!(
+            out.text,
+            "a python body display(SVG('\\<svg xmlns=\"…\">')) and a tag \\<intro> here"
+        );
+        // A `<` not followed by an identifier char is plain text —
+        // no escape (a bare comparison `a < b`, or a trailing `<`).
+        let out = render("a < b comparison", &TransformOptions::default());
+        assert_eq!(out.text, "a < b comparison");
+        let out = render("ends with <", &TransformOptions::default());
+        assert_eq!(out.text, "ends with <");
+    }
+
+    #[test]
+    fn at_identifier_is_escaped_as_ref_marker() {
+        // Same lexer rule for `@`: followed by an identifier char it
+        // becomes a reference marker (which would silently swallow
+        // the name in rendered prose — an email `foo@bar.com` or a
+        // bare mention `@name`); escaped here so it stays literal.
+        let out = render(
+            "mail foo@bar.com and mention @name here",
+            &TransformOptions::default(),
+        );
+        assert_eq!(out.text, "mail foo\\@bar.com and mention \\@name here");
+        // A trailing `@` or an `@` before a space is plain text.
+        let out = render("at sign @ here", &TransformOptions::default());
+        assert_eq!(out.text, "at sign @ here");
+        let out = render("ends with @", &TransformOptions::default());
+        assert_eq!(out.text, "ends with @");
     }
 
     #[test]

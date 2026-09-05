@@ -21,6 +21,10 @@ base64 = "0.22"
 # PNG encoding for the headless `--region-image` screenshot (the
 # plot e2e's rendered notebook page) — already in the lockfile.
 png = "0.18"
+# zlib/flate compression for the minimal PDF writer (`--pages-pdf`,
+# FlateDecode-encoded DeviceRGB page bitmaps) — already in the
+# lockfile (pulled transitively by other crates).
+flate2 = "1.1"
 
 # The probability kernel client (worker thread + Session). Pulls prob_kernel
 # (P3 #11: wire kernel_client into mathed_mini) so a \prob computes a real
