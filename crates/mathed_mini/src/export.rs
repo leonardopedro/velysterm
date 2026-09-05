@@ -883,6 +883,72 @@ pub fn doc_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::RgbaIm
     doc_screenshot_with(&bridge, doc_text)
 }
 
+/// Typst markup for a paginated A4 document page: every block's
+/// transformed text (inline kernel annotations included) followed by
+/// its output region, flowing through Typst's own page model — the
+/// page breaks are Typst's, not pixel slices. Data-URL figures
+/// resolve through the same world.
+fn doc_page_markup(bridge: &crate::kernel_bridge::KernelBridge, doc_text: &str) -> String {
+    let scan = mathed_core::markers::scan(doc_text);
+    let segments = mathed_core::markers::resolve_segments(&scan);
+    let annotations = bridge.result_annotations();
+    let mut markup =
+        String::from("#set page(paper: \"a4\", margin: 2.2cm)\n#set text(fill: black)\n");
+    for (bi, range) in mathed_core::blocks::split_blocks(doc_text)
+        .iter()
+        .enumerate()
+    {
+        let opts = mathed_core::transform::TransformOptions {
+            annotations: annotations.clone(),
+            ..Default::default()
+        };
+        let render = mathed_core::transform::to_render_text_range(
+            doc_text,
+            &scan,
+            &segments,
+            range.clone(),
+            &opts,
+        );
+        markup.push_str(&render.text);
+        markup.push('\n');
+        let outputs = bridge.block_outputs(bi);
+        if outputs.is_empty() && !bridge.stale_blocks().contains(&bi) {
+            continue;
+        }
+        let timings: std::collections::HashMap<usize, u64> = outputs
+            .iter()
+            .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
+            .collect();
+        let region = crate::output_region::region_markup_with_timings(&outputs, &timings);
+        if !region.trim().is_empty() {
+            markup.push_str(&region);
+            markup.push('\n');
+        }
+    }
+    markup
+}
+
+/// Paginated A4 export from a live bridge: compose the document as
+/// Typst markup and let Typst's own pagination break it into pages
+/// ([`crate::render::render_paged`]), each rasterized through
+/// typst_imaging — the multi-page counterpart to
+/// [`doc_screenshot_with`].
+pub fn doc_pages_image_with(
+    bridge: &crate::kernel_bridge::KernelBridge,
+    doc_text: &str,
+) -> Result<Vec<imaging::RgbaImage>, String> {
+    let markup = doc_page_markup(bridge, doc_text);
+    crate::render::render_paged(&crate::world::MiniWorld::new(markup))
+        .map_err(|e| format!("paged render failed: {e:?}"))
+}
+
+/// Headless paginated export (`--pages-image`): run every block and
+/// rasterize the A4 pages Typst's pagination produced.
+pub fn doc_pages_image(doc_text: &str, grants: &[&str]) -> Result<Vec<imaging::RgbaImage>, String> {
+    let bridge = settled_bridge(doc_text, grants);
+    doc_pages_image_with(&bridge, doc_text)
+}
+
 /// N8: compare the current doc against a previously written record
 /// and report the block indices whose statement hashes no longer
 /// match (the open-doc staleness policy: outputs derived from a
@@ -2133,6 +2199,38 @@ esac
         // Three text blocks contribute real vertical extent (each
         // block rasterizes separately and stacks).
         assert!(img.height > 40, "page taller than a single line");
+    }
+
+    #[test]
+    fn doc_pages_image_breaks_long_documents_through_typst_pagination() {
+        // Paginated export reuses Typst's *own* page model
+        // (`typst::compile::<PagedDocument>`): a long document flows
+        // into A4 pages whose breaks Typst decided — never pixel
+        // slices. A short doc is exactly one page.
+        let mut body = String::from("= A long report\n\n");
+        for i in 0..60 {
+            body.push_str(&format!(
+                "paragraph number {i} with enough prose to wrap and fill the page layout continuously.\n\n"
+            ));
+        }
+        let pages = doc_pages_image(&body, &[]).expect("paged export");
+        assert!(pages.len() > 1, "long doc flows onto {}", pages.len());
+        let w = pages[0].width;
+        let h = pages[0].height;
+        assert!(w > 0 && h > 0, "page has size");
+        assert_eq!(w, 596, "A4 width at 1px/pt");
+        assert_eq!(h, 842, "A4 height at 1px/pt");
+        for page in &pages {
+            let painted = page
+                .data
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
+                .count();
+            assert!(painted > 100, "each page painted ({painted} px)");
+        }
+        // A short document is exactly one A4 page (no empty filler).
+        let one = doc_pages_image("= Title\n\nshort body\n", &[]).expect("paged export");
+        assert_eq!(one.len(), 1, "short doc is one page: {}", one.len());
     }
 
     #[test]

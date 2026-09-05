@@ -127,6 +127,29 @@ pub fn render_world(world: &MiniWorld, width_pt: f64) -> Result<RgbaImage, Rende
     rasterize(&frame)
 }
 
+/// Rasterize an already-laid-out [`Frame`] — the shared rasterizer,
+/// exposed so the paged export can rasterize each paginated page
+/// frame individually (1 px/pt, the workspace's uniform scale).
+pub fn rasterize_frame(frame: &Frame) -> Result<RgbaImage, RenderError> {
+    rasterize(frame)
+}
+
+/// Compile the world's source through **Typst's own pagination**
+/// (`typst::compile::<PagedDocument>`, the same paged layout the
+/// Typst binary runs: default `page` flow, introspection
+/// stabilization, comemo-memoized re-layout passes) and rasterize
+/// each finished page frame. This is the typst-native multi-page
+/// path behind `export::doc_pages_image` / `--pages-image`: page
+/// breaks come from Typst's page model, never from slicing pixels.
+pub fn render_paged(world: &MiniWorld) -> Result<Vec<RgbaImage>, RenderError> {
+    let warned = typst::compile::<typst_layout::PagedDocument>(world);
+    let doc = warned.output.map_err(|_| RenderError::Eval)?;
+    doc.pages()
+        .iter()
+        .map(|page| rasterize(&page.frame))
+        .collect()
+}
+
 /// Lay out a mathed document into a cached [`DocLayout`]: the
 /// rasterized page plus the glyph index for caret positioning. This
 /// is the entry point a frontend rebuilds on edit/resize and then

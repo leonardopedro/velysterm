@@ -110,6 +110,13 @@ the doc stays the source of truth).
   typst_imaging into one scrollable overlay image (↑/↓ scroll, Esc
   closes); the headless form is `--doc-image <doc> [--grants g]
   --out page.png`.
+- **Paginated A4 export** — `--pages-image <doc> [--grants g]
+  --out base` writes one PNG per page (`base.1.png`, …). The page
+  breaks come from **Typst's own page model**
+  (`typst::compile::<PagedDocument>`: default `page` flow,
+  introspection stabilization) — never from slicing pixels — and
+  each page rasterizes through typst_imaging. Figures, tables and
+  data-URL media flow and break like any document content.
 - **Headless region screenshot** — `--region-image <doc>
   [--grants g] --out page.png` runs every block and rasterizes each
   block's output region through the same typst_imaging pipeline into
@@ -117,6 +124,15 @@ the doc stays the source of truth).
   `run_plot_e2e.sh` uses it to pixel-check a real matplotlib plot
   and `run_svg_e2e.sh` the same path for a real `image/svg+xml`
   vector payload.
+- **Overlay rasters are memoized** — the kernel menu, media catalog,
+  help and template preview cache their raster by (content, window
+  width) and recompile only when either changes: a caret-blink
+  redraw of an open overlay is a pure blit. Typst's own comemo
+  memoization is scoped to one compile pass, so this content-keyed
+  memo at the draw seam is the extension point (same derived-state
+  contract as the cached block/footer layouts). The template
+  preview's once 12-line strip now shows its full text, scrollable
+  with ↑/↓.
 
 ## Input + interchange (U-series)
 
@@ -137,4 +153,5 @@ never silently dropped.
 pipeline; a `\base` segment wraps the *whole document* — `ctx.body`
 carries the rendered body, `ctx.templates` each plain template's
 output, and the base's output is the export. Headless preview:
-`preview_template` (Ctrl+P overlay in the editor).
+`preview_template` (Ctrl+P overlay in the editor, full text
+scrollable with ↑/↓).

@@ -58,6 +58,69 @@ type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 /// standard event loop.
 struct UserEvent(accesskit_winit::Event);
 
+/// Content-keyed raster memo for an overlay draw (kernel menu, media
+/// catalog, help, template preview). Typst's own memoization
+/// ([`comemo`], activated per compile pass in `typst::compile`) is
+/// scoped to one pass: fonts are re-prepared and payloads re-decoded
+/// for every separate compile our per-frame overlay draws perform.
+/// The right extension point is therefore this memo — the raster for
+/// a site is kept while its content hash and the window width are
+/// unchanged, so an unchanged overlay is a pure blit and a fresh
+/// Typst compile happens only when its content actually changed.
+/// Same derived-state contract as the cached `block_layouts` /
+/// `footer_layout`: nothing here ever touches the doc.
+struct OverlayMemo {
+    /// Window width (px) the raster was laid out at.
+    width: u32,
+    /// Content hash (markup + width) the raster was built from.
+    key: u64,
+    image: imaging::RgbaImage,
+}
+
+fn overlay_memo_key(width_px: u32, content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    width_px.hash(&mut h);
+    content.hash(&mut h);
+    h.finish()
+}
+
+/// Alpha-composite `overlay` onto `img` at `(x0, y0)` (clipped) —
+/// the canvas-local counterpart of `blit_over_bg_clipped`, used to
+/// compose the template-preview memo without a window surface.
+fn blit_rgba(img: &mut imaging::RgbaImage, x0: u32, y0: u32, overlay: &imaging::RgbaImage) {
+    let iw = img.width;
+    let ih = img.height;
+    let ow = overlay.width;
+    let oh = overlay.height;
+    let copy_w = ow.min(iw.saturating_sub(x0));
+    let copy_h = oh.min(ih.saturating_sub(y0));
+    for y in 0..copy_h {
+        for x in 0..copy_w {
+            let s = ((y * ow + x) * 4) as usize;
+            let d = (((y0 + y) * iw + (x0 + x)) * 4) as usize;
+            let a = overlay.data[s + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let (r, g, b) = (
+                overlay.data[s] as u32,
+                overlay.data[s + 1] as u32,
+                overlay.data[s + 2] as u32,
+            );
+            let inv = 255 - a;
+            img.data[d] = ((r * a + img.data[d] as u32 * inv) / 255) as u8;
+            img.data[d + 1] = ((g * a + img.data[d + 1] as u32 * inv) / 255) as u8;
+            img.data[d + 2] = ((b * a + img.data[d + 2] as u32 * inv) / 255) as u8;
+            // Keep alpha straight (the canvas is transparent where
+            // nothing painted): the memo blits over the page the same
+            // way the live overlay did.
+            let da = img.data[d + 3] as u32;
+            img.data[d + 3] = (a + (da * (255 - a)) / 255) as u8;
+        }
+    }
+}
+
 impl From<accesskit_winit::Event> for UserEvent {
     fn from(e: accesskit_winit::Event) -> Self {
         UserEvent(e)
@@ -190,6 +253,14 @@ struct App {
     /// every open, so it always reflects the current doc + results.
     doc_preview: Option<Result<imaging::RgbaImage, String>>,
     doc_preview_scroll: usize,
+    /// Raster memos for the overlay draws (see [`OverlayMemo`]): one
+    /// entry per overlay site, keyed by (site content, window width),
+    /// so a caret-blink redraw never re-compiles an unchanged overlay.
+    overlay_memos: std::collections::HashMap<&'static str, OverlayMemo>,
+    /// Vertical viewport inside the template-preview memo (Ctrl+P):
+    /// the preview renders its full text (no 12-line truncation) and
+    /// ↑/↓ scroll it, like the raster document preview.
+    template_preview_scroll: usize,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -281,6 +352,8 @@ impl App {
             media_menu_selected: 0,
             doc_preview: None,
             doc_preview_scroll: 0,
+            overlay_memos: std::collections::HashMap::new(),
+            template_preview_scroll: 0,
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -497,6 +570,7 @@ impl App {
         } else {
             self.kernel_menu = None;
             self.media_menu = None;
+            self.template_preview = None;
             let text = self.doc.text().to_string();
             self.doc_preview = Some(crate::export::doc_screenshot_with(&self.bridge, &text));
             self.doc_preview_scroll = 0;
@@ -521,6 +595,99 @@ impl App {
         self.caret_changed();
         self.push_a11y_update();
         self.request_redraw();
+    }
+
+    /// Memoize the raster for an overlay whose content is one Typst
+    /// markup block (kernel menu, media catalog, help). Re-renders
+    /// (a fresh Typst compile) only when the content hash or the
+    /// window width changed; a failed render drops the memo (the
+    /// overlay then draws nothing, as before). See [`OverlayMemo`].
+    fn memo_overlay_markup(&mut self, site: &'static str, markup: &str, width_px: u32) {
+        let key = overlay_memo_key(width_px, markup);
+        if self
+            .overlay_memos
+            .get(site)
+            .is_some_and(|m| m.width == width_px && m.key == key)
+        {
+            return;
+        }
+        match crate::render::render_markup(markup, width_px as f64) {
+            Ok(image) => {
+                self.overlay_memos.insert(
+                    site,
+                    OverlayMemo {
+                        width: width_px,
+                        key,
+                        image,
+                    },
+                );
+            }
+            Err(_) => {
+                self.overlay_memos.remove(site);
+            }
+        }
+    }
+
+    /// Memoize the template-preview raster (Ctrl+P): the preview's
+    /// text lines (bounded — a pathological export cannot explode the
+    /// canvas), each rendered like the underlying preedit text and
+    /// stacked at the doc width — recomposed only when the text or
+    /// width changed (the whole preview, no truncation: ↑/↓ scrolls
+    /// the full raster, the fold/expand treatment of the once
+    /// 12-line-clipped strip). Returns whether the raster was
+    /// recomposed (the caller resets the scroll viewport then).
+    fn memo_template_preview(&mut self, text: &str, width_px: u32) -> bool {
+        const SITE: &str = "template_preview";
+        const MAX_LINES: usize = 400;
+        let key = overlay_memo_key(width_px, text);
+        if self
+            .overlay_memos
+            .get(SITE)
+            .is_some_and(|m| m.width == width_px && m.key == key)
+        {
+            return false;
+        }
+        let width_f = width_px as f64;
+        // Render each line; blanks and failures contribute no image
+        // but keep their vertical slot.
+        let mut lines: Vec<Option<imaging::RgbaImage>> = Vec::new();
+        let mut height = 0u32;
+        for line in text.lines().take(MAX_LINES) {
+            if line.is_empty() {
+                height += 14;
+                lines.push(None);
+                continue;
+            }
+            match crate::render::render_preedit(line, width_f) {
+                Ok(img) => {
+                    height += img.height + 4;
+                    lines.push(Some(img));
+                }
+                Err(_) => {
+                    height += 14;
+                    lines.push(None);
+                }
+            }
+        }
+        let mut canvas = imaging::RgbaImage::new(width_px, height);
+        let mut y = 0u32;
+        for line in lines {
+            if let Some(img) = line {
+                blit_rgba(&mut canvas, 0, y, &img);
+                y += img.height + 4;
+            } else {
+                y += 14;
+            }
+        }
+        self.overlay_memos.insert(
+            SITE,
+            OverlayMemo {
+                width: width_px,
+                key,
+                image: canvas,
+            },
+        );
+        true
     }
 
     /// Recompute the open menu's rows from the current doc + bridge
@@ -634,12 +801,18 @@ impl App {
         self.refresh_kernel_menu_rows();
     }
 
-    /// document is never modified.
+    /// document is never modified. Overlays are mutually exclusive:
+    /// opening the preview closes the kernel menu / media catalog /
+    /// raster preview, and the viewport starts at the top.
     fn toggle_template_preview(&mut self) {
         if self.template_preview.is_some() {
             self.template_preview = None;
         } else {
+            self.kernel_menu = None;
+            self.media_menu = None;
+            self.doc_preview = None;
             self.template_preview = Some(crate::export::preview_template(self.doc.text()));
+            self.template_preview_scroll = 0;
         }
         self.request_redraw();
     }
@@ -1446,6 +1619,55 @@ impl App {
         // only reads the cache.
         self.refresh_region_cache(size.width as f64);
 
+        // Overlay raster pre-pass (content-keyed memoization): an
+        // overlay's raster is recomputed only when its content or the
+        // window width changed, so caret-blink redraws of an open
+        // overlay are pure blits instead of fresh Typst compiles. The
+        // markup is built here (a cheap string pass) and memoized;
+        // the draw sites below only blit. Typst's own comemo
+        // memoization is scoped to a single compile pass, so this
+        // memo at the content seam is the extension point (see
+        // [`OverlayMemo`]).
+        let win_px = size.width;
+        // Build each active overlay's content into an owned string
+        // first (the borrow must end before the memo &mut self call).
+        let kernel_markup = self.kernel_menu.as_ref().map(|rows| {
+            let mut markup = crate::kernel_menu::rows_markup_folded(
+                rows,
+                &self.kernel_menu_folded,
+                self.kernel_menu_selected,
+            );
+            markup.push_str(&crate::kernel_menu::footer_hint_markup(
+                rows.len(),
+                self.kernel_menu_filter,
+            ));
+            markup
+        });
+        if let Some(markup) = &kernel_markup {
+            self.memo_overlay_markup("kernel_menu", markup, win_px);
+        }
+        let media_markup = self.media_menu.as_ref().map(|rows| {
+            let mut markup = crate::media_menu::rows_markup(rows, self.media_menu_selected);
+            markup.push_str(&crate::media_menu::footer_hint_markup(rows.len()));
+            markup
+        });
+        if let Some(markup) = &media_markup {
+            self.memo_overlay_markup("media_menu", markup, win_px);
+        }
+        if self.help_overlay {
+            self.memo_overlay_markup("help", &crate::help_overlay::markup(), win_px);
+        }
+        let preview_text = self.template_preview.as_ref().map(|result| match result {
+            Ok(out) => out.clone(),
+            Err(e) => format!("template preview failed: {e}"),
+        });
+        if let Some(text) = &preview_text
+            && self.memo_template_preview(text, win_px)
+        {
+            // New content: the viewport restarts at the top.
+            self.template_preview_scroll = 0;
+        }
+
         // Compute the selection up-front (owned) so it doesn't alias
         // the mutable `surface` borrow below.
         let sel = self.selection();
@@ -1580,62 +1802,36 @@ impl App {
             }
         }
 
-        // T9: rendered-template preview overlay (Ctrl+P) — the
-        // headless --render-typst output as stacked underlined lines
-        // at the top left; Escape dismisses. The document is never
-        // touched.
-        if let Some(result) = &self.template_preview {
-            let text = match result {
-                Ok(out) => out.clone(),
-                Err(e) => format!("template preview failed: {e}"),
-            };
-            let mut y = 8usize;
-            for line in text.lines().take(12) {
-                if y > doc_h.saturating_sub(8) {
-                    break;
-                }
-                if line.is_empty() {
-                    y += 14;
-                    continue;
-                }
-                if let Ok(img) = crate::render::render_preedit(line, DEFAULT_WIDTH_PT) {
-                    blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, y, &img);
-                    y += img.height as usize + 4;
-                } else {
-                    y += 14;
-                }
-            }
+        // T9: rendered-template preview overlay (Ctrl+P) — memoized
+        // raster (see the pre-pass), scrollable with ↑/↓ over the
+        // full text; blit-only here. The document is never touched.
+        // (Field-disjoint read of `overlay_memos` while `buffer`
+        // borrows only `self.surface`.)
+        if self.template_preview.is_some()
+            && let Some(m) = self.overlay_memos.get("template_preview")
+        {
+            let scroll = self.template_preview_scroll.min(m.image.height as usize);
+            blit_over_bg_scrolled(&mut buffer, win_w, doc_h, 8, 8, &m.image, scroll);
         }
 
         // Kernel statements menu (Ctrl+K): the \exec / \kernel rows
         // as one reflowable markup block at the window width — plain
         // TUI text that wraps instead of clipping — drawn top-left;
-        // Esc dismisses. Derived state; never touches the document.
-        if let Some(rows) = &self.kernel_menu {
-            let mut markup = crate::kernel_menu::rows_markup_folded(
-                rows,
-                &self.kernel_menu_folded,
-                self.kernel_menu_selected,
-            );
-            markup.push_str(&crate::kernel_menu::footer_hint_markup(
-                rows.len(),
-                self.kernel_menu_filter,
-            ));
-            if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
-                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
-            }
+        // Esc dismisses. Derived state; memoized in the pre-pass.
+        if self.kernel_menu.is_some()
+            && let Some(m) = self.overlay_memos.get("kernel_menu")
+        {
+            blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &m.image);
         }
 
         // Media catalog (Ctrl+G): one reflowable Typst grid at the
         // window width — a marker column, a typst-rasterized
         // thumbnail per figure, and a wrapping caption; Enter jumps
-        // the caret, Esc dismisses. Drawn like the other overlays.
-        if let Some(rows) = &self.media_menu {
-            let mut markup = crate::media_menu::rows_markup(rows, self.media_menu_selected);
-            markup.push_str(&crate::media_menu::footer_hint_markup(rows.len()));
-            if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
-                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
-            }
+        // the caret, Esc dismisses. Memoized in the pre-pass.
+        if self.media_menu.is_some()
+            && let Some(m) = self.overlay_memos.get("media_menu")
+        {
+            blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &m.image);
         }
 
         // Rasterized document preview (Ctrl+R): the whole page as one
@@ -1670,12 +1866,11 @@ impl App {
 
         // Shortcut help overlay (F1): one reflowable markup block at
         // the window width, drawn top-left above the other overlays;
-        // Esc dismisses. Static content — never touches the doc.
+        // Esc dismisses. Static content; memoized in the pre-pass.
         if self.help_overlay
-            && let Ok(img) =
-                crate::render::render_markup(&crate::help_overlay::markup(), size.width as f64)
+            && let Some(m) = self.overlay_memos.get("help")
         {
-            blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
+            blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &m.image);
         }
 
         // Popup boxes.
@@ -2363,6 +2558,29 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         Key::Named(NamedKey::ArrowUp) => {
                             self.doc_preview_scroll = self.doc_preview_scroll.saturating_sub(80);
+                            self.request_redraw();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Template preview scroll (Ctrl+P): Up/Down move the
+                // viewport inside the full preview raster (the
+                // expand/fold of the once 12-line-clipped strip).
+                if self.template_preview.is_some() {
+                    match &logical_key {
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(m) = self.overlay_memos.get("template_preview") {
+                                let max = m.image.height as usize;
+                                self.template_preview_scroll =
+                                    (self.template_preview_scroll + 80).min(max.saturating_sub(1));
+                            }
+                            self.request_redraw();
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.template_preview_scroll =
+                                self.template_preview_scroll.saturating_sub(80);
                             self.request_redraw();
                             return;
                         }

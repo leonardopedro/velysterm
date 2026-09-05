@@ -320,6 +320,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Rendered document screenshot -> {out_path}");
                 return Ok(());
             }
+            // Paginated A4 export — run every block and let Typst's
+            // own page model break the composed document into pages,
+            // writing one PNG per page as `<out>.<n>.png` (Typst's
+            // native pagination, rasterized through typst_imaging).
+            "--pages-image" => {
+                let path = rest
+                    .first()
+                    .ok_or("--pages-image requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let mut grants: Vec<&str> = Vec::new();
+                let mut out: Option<&str> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--grants" => {
+                            grants = rest
+                                .get(i + 1)
+                                .ok_or("--grants requires a comma-separated list")?
+                                .split(',')
+                                .collect();
+                            i += 2;
+                        }
+                        "--out" => {
+                            out = Some(rest.get(i + 1).ok_or("--out requires a path")?);
+                            i += 2;
+                        }
+                        other => {
+                            return Err(
+                                format!("unexpected --pages-image argument: {other}").into()
+                            );
+                        }
+                    }
+                }
+                let pages = mathed_mini::export::doc_pages_image(&doc, &grants)
+                    .map_err(std::io::Error::other)?;
+                let base = out.unwrap_or("page");
+                for (n, page) in pages.iter().enumerate() {
+                    let name = format!("{base}.{}.png", n + 1);
+                    write_png(page, &name)?;
+                }
+                eprintln!("Rendered {} A4 page(s) -> {base}.*.png", pages.len());
+                return Ok(());
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[1]);
                 return Ok(());
