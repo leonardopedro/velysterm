@@ -999,6 +999,10 @@ impl App {
         if self.doc_preview.is_some() {
             self.doc_preview = None;
             self.report_overlay_memo_ratio();
+            // The hint/error lines are transient with the overlay:
+            // free their per-width entries instead of LRU.
+            self.memo_store.remove_site("doc_preview_label");
+            self.memo_store.remove_site("doc_preview_err");
         } else {
             self.kernel_menu = None;
             self.media_menu = None;
@@ -3570,6 +3574,12 @@ impl ApplicationHandler<UserEvent> for App {
                             || self.media_menu.take().is_some()
                             || self.doc_preview.take().is_some()
                         {
+                            // If the doc preview closed, free its
+                            // transient hint/error memos (no-ops when
+                            // another overlay closed — they are
+                            // mutually exclusive anyway).
+                            self.memo_store.remove_site("doc_preview_label");
+                            self.memo_store.remove_site("doc_preview_err");
                             self.request_redraw();
                         } else if self.hud {
                             // The live HUD dismisses like the other

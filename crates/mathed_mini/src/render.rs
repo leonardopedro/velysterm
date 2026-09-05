@@ -452,6 +452,77 @@ mod tests {
         );
     }
 
+    /// Headless large-document perf harness (not part of the default
+    /// suite — run in release for meaningful numbers):
+    ///
+    /// ```text
+    /// cargo test --release -p mathed_mini perf_large_doc \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// Generates a 600-block document (300 heading+body sections)
+    /// and reports wall-clock time *and real Typst compile counts*
+    /// (the global render counter) for the two per-edit costs the
+    /// memos gate: the transform front-end (scan + segment
+    /// resolution, once per edit) and the block-layout pass (one
+    /// compile per changed block), plus one whole-doc compose (what a
+    /// stale Ctrl+R refresh costs). The exact deltas are valid
+    /// because the harness runs alone (`--ignored` only runs ignored
+    /// tests, and the filter runs this one).
+    #[test]
+    #[ignore = "manual release-mode perf harness (see doc comment)"]
+    fn perf_large_doc_layout_harness() {
+        use std::time::Instant;
+
+        // ~300 heading+body blocks: prose with inline math.
+        let mut doc = String::new();
+        for i in 0..300 {
+            doc.push_str(&format!("= Section {i}\n\n"));
+            doc.push_str(&format!(
+                "Body {i}: the quick brown fox $x_{i} + y_{i}$ jumps over \
+                 lazy dogs repeatedly for a realistic line count.\n\n"
+            ));
+        }
+        let width = DEFAULT_WIDTH_PT;
+
+        // Front-end: scan + segment resolution — the once-per-edit
+        // pass the F1 revision cache gates.
+        let t = Instant::now();
+        let s = scan(&doc);
+        let segs = resolve_segments(&s);
+        let front_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        // Block-layout pass: one Typst compile per changed block
+        // (the F2 content keys mean only edited blocks pay).
+        let blocks = mathed_core::blocks::split_blocks(&doc);
+        let no_annotations = std::collections::HashMap::new();
+        let base = compile_passes();
+        let t = Instant::now();
+        let mut laid = 0usize;
+        for b in &blocks {
+            if render_block_range(&doc, &s, &segs, b.clone(), &no_annotations, width).is_ok() {
+                laid += 1;
+            }
+        }
+        let block_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let compiles = compile_passes() - base;
+
+        // Whole-document compose (what a stale Ctrl+R preview costs).
+        let t = Instant::now();
+        let composed = render_markup(&doc_to_markup(&doc), width).is_ok();
+        let doc_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!("[perf] doc: {} blocks, {} bytes", blocks.len(), doc.len());
+        eprintln!("[perf] front-end scan+segments: {front_ms:.1} ms");
+        eprintln!(
+            "[perf] layout {laid}/{} blocks: {block_ms:.1} ms, {compiles} Typst compiles",
+            blocks.len()
+        );
+        eprintln!("[perf] whole-doc compose (one Ctrl+R refresh): {doc_ms:.1} ms (ok={composed})");
+        // Sanity only — the numbers above are the point of the harness.
+        assert!(laid == blocks.len());
+    }
+
     #[test]
     fn renders_math_to_nonempty_image() {
         let img = render_markup("$x^2 + y^2$", 300.0).expect("render should succeed");

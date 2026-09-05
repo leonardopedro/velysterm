@@ -189,6 +189,24 @@ impl MemoStore {
         self.lru.retain(|k| *k != (site, width));
     }
 
+    /// Drop every memo entry for `site` across all widths. Used when a
+    /// transient overlay closes (e.g. the doc-preview hint/error
+    /// lines): its per-width history is freed immediately instead of
+    /// waiting on LRU eviction. The permanent rasters (the doc-preview
+    /// image itself) are *not* removed here — callers only drop the
+    /// truly transient sites.
+    pub fn remove_site(&mut self, site: &'static str) {
+        let stale: Vec<(&'static str, u32)> = self
+            .memos
+            .keys()
+            .filter(|(s, _)| *s == site)
+            .copied()
+            .collect();
+        for (s, w) in stale {
+            self.remove(s, w);
+        }
+    }
+
     /// Mark (site, width) most-recently-used (moves it to the back of
     /// the recency queue).
     fn touch(&mut self, site: &'static str, width: u32) {
@@ -317,6 +335,19 @@ mod tests {
         assert!(s.get("a", 1, 1).is_none());
         let (hits, _, _) = s.take_accounting();
         assert_eq!(hits, 0, "a post-remove get is a miss, not a hit");
+    }
+
+    #[test]
+    fn remove_site_drops_every_width_of_a_site() {
+        let mut s = MemoStore::new();
+        s.insert("preview_label", 1, 1, rgba(4, 4));
+        s.insert("preview_label", 2, 2, rgba(4, 4));
+        s.insert("other", 1, 3, rgba(4, 4));
+        s.remove_site("preview_label");
+        assert!(s.image("preview_label", 1).is_none(), "width 1 freed");
+        assert!(s.image("preview_label", 2).is_none(), "width 2 freed");
+        assert!(s.image("other", 1).is_some(), "other sites untouched");
+        assert_eq!(s.len(), 1);
     }
 
     #[test]

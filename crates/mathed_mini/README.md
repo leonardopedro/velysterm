@@ -244,7 +244,15 @@ the doc stays the source of truth).
   it. (The same code-reading "profile" also caught the last hidden
   per-frame compiles: the doc-preview hint label and its error line
   used to recompile at their draw sites on every redraw the preview
-  was open — they are content-keyed rasters now.)
+  was open — they are content-keyed rasters now, freed wholesale
+  when the preview closes instead of waiting on LRU.) For headless
+  numbers there is an ignored release-mode harness —
+  `cargo test --release -p mathed_mini perf_large_doc -- --ignored
+  --nocapture` — which lays out a 600-block document and reports
+  wall-clock *and real compile counts* for the front-end, the block
+  pass, and one whole-doc compose (reference run: ~0ms front-end,
+  ~126ms for 600 block compiles ≈ 0.2ms per edited block, ~211ms
+  per whole-doc refresh).
 
 ## Input + interchange (U-series)
 
