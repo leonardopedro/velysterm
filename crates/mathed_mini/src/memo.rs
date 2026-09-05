@@ -42,6 +42,27 @@ impl std::ops::Deref for BlockLayout {
     }
 }
 
+/// A block's cached output-region raster plus the content
+/// fingerprint it was built from (F3b): the same content-keyed
+/// treatment as [`BlockLayout`] for the result regions — a kernel
+/// result landing in one block only re-renders that block's region.
+/// Derefs to [`imaging::RgbaImage`] to keep the draw site unchanged.
+pub struct RegionEntry {
+    /// Fingerprint of the region's content (block outputs + stale
+    /// flag + width).
+    pub key: u64,
+    /// The rasterized region.
+    pub image: imaging::RgbaImage,
+}
+
+impl std::ops::Deref for RegionEntry {
+    type Target = imaging::RgbaImage;
+
+    fn deref(&self) -> &Self::Target {
+        &self.image
+    }
+}
+
 /// A cached raster plus the (content, width) fingerprint it was built
 /// from.
 pub struct RasterMemo {

@@ -8,6 +8,7 @@
 //! unsupported in this minimal frontend.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use typst::comemo::Track;
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::engine::{Engine, Route, Sink, Traced};
@@ -61,9 +62,15 @@ pub(crate) fn data_url_encode_payload(data: &str) -> String {
     data.replace('/', "%2F")
 }
 
+/// How many times the embedded fonts have been parsed (the F1
+/// invariant: exactly once per process, on first world creation —
+/// afterwards every [`MiniWorld::new`] reuses the shared environment).
+static FONT_LOADS: AtomicUsize = AtomicUsize::new(0);
+
 /// Load every font embedded in `typst-assets` into a book + slot
 /// list.
 fn load_fonts() -> (FontBook, Vec<Font>) {
+    FONT_LOADS.fetch_add(1, Ordering::Relaxed);
     let mut book = FontBook::new();
     let mut fonts = Vec::new();
     for data in typst_assets::fonts() {
@@ -272,6 +279,26 @@ mod tests {
     /// A 1×1 opaque red PNG, base64-encoded (Jupyter's payload
     /// convention for `image/png`).
     const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn constructing_worlds_never_reparses_fonts() {
+        // F2: pin the F1 win. Typst's own comemo cache is per-compile
+        // and never covered world construction; before F1 every
+        // `MiniWorld::new` re-parsed every embedded font. The parse
+        // count must not move no matter how many worlds are built
+        // (other tests in this binary may have already triggered the
+        // one process-wide load — snapshot and compare).
+        let before = FONT_LOADS.load(Ordering::Relaxed);
+        assert!(before >= 1, "the shared environment has been loaded");
+        for _ in 0..8 {
+            let _ = MiniWorld::new(format!("block {}", std::process::id()));
+        }
+        let after = FONT_LOADS.load(Ordering::Relaxed);
+        assert_eq!(
+            before, after,
+            "world construction must reuse the shared fonts, never re-parse"
+        );
+    }
 
     #[test]
     fn all_worlds_share_one_font_environment() {

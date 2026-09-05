@@ -113,8 +113,11 @@ the doc stays the source of truth).
   overlays (content-keyed: doc text + live results — it renders at
   a fixed width, so resizing never recompiles it), so idle frames
   are pure blits; and once you have ever opened it, the raster is
-  prefetched while the editor is quiet (F4, 400ms debounce), so
-  Ctrl+R re-opens as a blit instead of a compile.
+  prefetched while the editor is quiet (400ms debounce) on a
+  **background worker thread** from an owned `ScreenshotSnapshot`
+  (never a frame stall), so Ctrl+R re-opens as a blit instead of a
+  compile — a stale compose (the doc or results moved on mid-flight)
+  is dropped by its memo-key guard.
 - **Paginated A4 export** — `--pages-image <doc> [--grants g]
   --out base` writes one PNG per page (`base.1.png`, …). The page
   breaks come from **Typst's own page model**
@@ -156,17 +159,22 @@ the doc stays the source of truth).
   annotations/errors inside it, and the window width — so an edit
   in one block or a kernel result elsewhere keeps every other
   block's raster (three manual cache clears collapsed into one
-  content-keyed mechanism); and the overlays (kernel menu, media
-  catalog, help, template preview, doc preview) live in one
-  content-keyed store that keeps **per-width** rasters under an LRU
-  byte budget — resizing back to a width you've seen is a hit, and
-  width churn cannot grow memory without bound. A caret-blink
-  redraw of an open overlay is a pure blit; the template preview's
-  once 12-line strip now shows its full text, scrollable with ↑/↓.
-  On overlay close the editor prints the accounting —
-  `[mathed_mini] overlay memo: N hits / M compiles / E evicted
-  (pct% hit rate)` — so eviction/width policy can be tuned with
-  data.
+  content-keyed mechanism); the same treatment now extends to the
+  **footer** (markup + width) and each block's **output region**
+  (its outputs + stale flag + width), so a result landing in one
+  block re-renders only that block's region instead of clearing
+  every cache; and the overlays (kernel menu, media catalog, help,
+  template preview, doc preview) live in one content-keyed store
+  that keeps **per-width** rasters under an LRU byte budget —
+  resizing back to a width you've seen is a hit, and width churn
+  cannot grow memory without bound. A pinned invariant counts font
+  parses: worlds are constructed endlessly and the fonts are never
+  re-parsed after the first load. A caret-blink redraw of an open
+  overlay is a pure blit; the template preview's once 12-line strip
+  now shows its full text, scrollable with ↑/↓. On overlay close
+  the accounting — `N hits / M compiles / E evicted (pct% hit
+  rate)` — flashes in-editor at the bottom-left (3s) so the
+  eviction/width policy can be tuned with data.
 
 ## Input + interchange (U-series)
 

@@ -778,19 +778,23 @@ fn settled_bridge(doc_text: &str, grants: &[&str]) -> crate::kernel_bridge::Kern
 /// timing annotations + stale banner), rendered through typst_imaging
 /// at the doc width. `None` when the block has no region content or
 /// the markup cannot be rendered.
-fn block_region_image(
-    bridge: &crate::kernel_bridge::KernelBridge,
+/// Rasterize a block's output region from any [`ScreenshotView`]
+/// (the live [`KernelBridge`] or the owned
+/// [`ScreenshotSnapshot`](crate::kernel_bridge::ScreenshotSnapshot)
+/// the background compose worker uses).
+fn block_region_image<V: crate::kernel_bridge::ScreenshotView>(
+    view: &V,
     bi: usize,
     width_pt: f64,
 ) -> Option<imaging::RgbaImage> {
-    let stale = bridge.stale_blocks();
-    let outputs = bridge.block_outputs(bi);
+    let stale = view.stale_blocks();
+    let outputs = view.block_outputs(bi);
     if outputs.is_empty() && !stale.contains(&bi) {
         return None;
     }
     let timings: std::collections::HashMap<usize, u64> = outputs
         .iter()
-        .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
+        .filter_map(|(off, _)| view.timing_of(*off).map(|t| (*off, t)))
         .collect();
     let mut markup = String::new();
     if stale.contains(&bi) {
@@ -845,13 +849,19 @@ pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::Rgb
 /// output region below — into one image through typst_imaging. This
 /// is the graphical "what the document looks like" path shared by
 /// the headless `--doc-image` CLI and the editor's Ctrl+R preview.
-pub fn doc_screenshot_with(
-    bridge: &crate::kernel_bridge::KernelBridge,
+/// The doc-screenshot composition loop over any [`ScreenshotView`]:
+/// every block's transformed text (with its inline kernel
+/// annotations) followed by its output region, stacked into one
+/// image. Shared by the live-bridge path
+/// ([`doc_screenshot_with`]) and the background-snapshot path
+/// ([`doc_screenshot_from_snapshot`]).
+fn doc_screenshot_core<V: crate::kernel_bridge::ScreenshotView>(
+    view: &V,
     doc_text: &str,
 ) -> Result<imaging::RgbaImage, String> {
     let scan = mathed_core::markers::scan(doc_text);
     let segments = mathed_core::markers::resolve_segments(&scan);
-    let annotations = bridge.result_annotations();
+    let annotations = view.result_annotations();
     let width_pt = crate::render::DEFAULT_WIDTH_PT;
     let mut pieces: Vec<imaging::RgbaImage> = Vec::new();
     for (bi, range) in mathed_core::blocks::split_blocks(doc_text)
@@ -868,11 +878,31 @@ pub fn doc_screenshot_with(
         ) {
             pieces.push(img);
         }
-        if let Some(img) = block_region_image(bridge, bi, width_pt) {
+        if let Some(img) = block_region_image(view, bi, width_pt) {
             pieces.push(img);
         }
     }
     stack_vertically(pieces).map_err(|_| "document produced no renderable content".to_string())
+}
+
+/// Whole-document raster preview from a live bridge — see
+/// [`doc_screenshot_core`].
+pub fn doc_screenshot_with(
+    bridge: &crate::kernel_bridge::KernelBridge,
+    doc_text: &str,
+) -> Result<imaging::RgbaImage, String> {
+    doc_screenshot_core(bridge, doc_text)
+}
+
+/// Whole-document raster preview from an owned [`ScreenshotSnapshot`]
+/// (F1): identical composition to [`doc_screenshot_with`] but driven
+/// from the `Send` snapshot, so the background prefetch worker can
+/// compile a preview without touching the live bridge.
+pub fn doc_screenshot_from_snapshot(
+    snap: &crate::kernel_bridge::ScreenshotSnapshot,
+    doc_text: &str,
+) -> Result<imaging::RgbaImage, String> {
+    doc_screenshot_core(snap, doc_text)
 }
 
 /// Headless whole-document screenshot (`--doc-image`): run every
@@ -1405,6 +1435,9 @@ fn escape_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Bring the ScreenshotView methods (annotations/staleness/outputs/
+    // timings) into scope for the live-vs-snapshot equivalence test.
+    use crate::kernel_bridge::ScreenshotView;
 
     #[test]
     fn typst_export_produces_valid_output() {
@@ -2191,6 +2224,65 @@ esac
         // its own image (the plot figure paints there too).
         let reg = region_screenshot(doc, &["kernel"]).expect("region screenshot");
         assert!(reg.width > 0 && reg.height > 0);
+    }
+
+    #[test]
+    fn doc_screenshot_from_snapshot_matches_the_live_bridge_pixel_for_pixel() {
+        // F1: the background compose worker drives
+        // `doc_screenshot_from_snapshot` from an owned
+        // `ScreenshotSnapshot`; its output must be byte-identical to
+        // the live-bridge path, and the snapshot's view (annotations,
+        // staleness, block outputs, timings) must match the bridge's.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Plot cell\n\n",
+            "#1 plot #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: fig)",
+        );
+        let mut bridge = crate::kernel_bridge::KernelBridge::with_kernel_config(
+            &["kernel"],
+            &["mathed"],
+            Some(stub.to_str().expect("stub path")),
+        );
+        bridge.refresh(doc);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !bridge.is_idle() {
+            bridge.poll();
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let snap = bridge.screenshot_snapshot();
+        // View equivalence across every block and every result offset.
+        assert_eq!(
+            snap.result_annotations(),
+            bridge.result_annotations(),
+            "inline annotations identical"
+        );
+        assert_eq!(
+            snap.stale_blocks(),
+            bridge.stale_blocks(),
+            "staleness identical"
+        );
+        for bi in 0..mathed_core::blocks::split_blocks(doc).len() {
+            assert_eq!(
+                snap.block_outputs(bi),
+                bridge.block_outputs(bi),
+                "block {bi} outputs identical"
+            );
+        }
+        for off in bridge.results().keys() {
+            assert_eq!(snap.timing_of(*off), bridge.timing_of(*off));
+        }
+        // Raster equivalence: byte-identical page.
+        let live = doc_screenshot_with(&bridge, doc).expect("live screenshot");
+        let from_snap = doc_screenshot_from_snapshot(&snap, doc).expect("snapshot screenshot");
+        assert_eq!(
+            (live.width, live.height),
+            (from_snap.width, from_snap.height),
+            "same page size"
+        );
+        assert_eq!(live.data, from_snap.data, "pixel-identical pages");
     }
 
     #[test]

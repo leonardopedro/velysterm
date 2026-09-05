@@ -36,6 +36,10 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// is a pure blit.
 const IDLE_PREFETCH_DELAY: Duration = Duration::from_millis(400);
 
+/// F4: how long the transient bottom-left status flash stays visible
+/// after an overlay close reports its memo accounting.
+const STATUS_FLASH_MS: Duration = Duration::from_millis(3000);
+
 /// Sentinel x (frame points) far to the left/right of any realistic
 /// page width, used to hit-test "start/end of this visual row" with
 /// `GlyphIndex::byte_for_point` (`move_home`/`move_end`).
@@ -70,6 +74,18 @@ struct UserEvent(accesskit_winit::Event);
 // comemo cache). Same derived-state contract as the cached
 // `block_layouts` / `footer_layout`: nothing here ever touches the
 // doc.
+
+/// An in-flight background doc-preview compose (F1): the Ctrl+R
+/// raster is compiled on a worker thread from an owned
+/// [`ScreenshotSnapshot`](crate::kernel_bridge::ScreenshotSnapshot) so
+/// an idle prefetch never stalls a frame. `dispatch_key` is the memo
+/// key at dispatch time; on arrival the raster is inserted only if
+/// the current key still matches (the doc or the results moved on →
+/// the work is stale and is dropped).
+struct PreviewJob {
+    dispatch_key: u64,
+    rx: std::sync::mpsc::Receiver<Result<imaging::RgbaImage, String>>,
+}
 
 /// Content fingerprint of a [`crate::kernel_bridge::KernelResult`]
 /// for the doc-preview memo key: enough to know whether the
@@ -111,6 +127,28 @@ fn overlay_memo_key(width_px: u32, content: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     width_px.hash(&mut h);
     content.hash(&mut h);
+    h.finish()
+}
+
+/// Content fingerprint of a block's output-region raster (F3b): the
+/// block's outputs (each folded lossily via
+/// [`result_fingerprint`]), its stale flag, and the window width.
+/// The editor's region shows exactly these — outputs and the stale
+/// banner — so the key is precise: a result landing in one block
+/// re-renders only that block's region.
+fn region_key(
+    width_px: u32,
+    outputs: &[(usize, crate::kernel_bridge::KernelResult)],
+    stale: bool,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    width_px.hash(&mut h);
+    stale.hash(&mut h);
+    for (off, r) in outputs {
+        off.hash(&mut h);
+        result_fingerprint(r).hash(&mut h);
+    }
     h.finish()
 }
 
@@ -230,15 +268,14 @@ struct App {
     /// click hit-testing and cross-block Up/Down navigation
     /// between redraws.
     block_offsets: Vec<(BlockId, f32)>,
-    /// Cached footer (results-panel) layout.
-    footer_layout: Option<DocLayout>,
-    /// The footer markup the cached `footer_layout` was built from —
-    /// compared each redraw to detect kernel-result changes without
-    /// re-diffing the doc.
-    footer_markup_cache: String,
+    /// Cached footer (results-panel) layout, content-keyed (F3a):
+    /// the key is (footer markup, window width), so result changes
+    /// and resizes re-layout it exactly when the rendered output
+    /// could differ (derefs to [`crate::render::DocLayout`]).
+    footer_layout: Option<crate::memo::BlockLayout>,
     /// Cached window width (px). When the window is resized the
-    /// block layouts re-key (the width is part of each block's
-    /// content fingerprint); the footer is evicted outright.
+    /// block layouts and the footer re-key (width is part of each
+    /// content fingerprint).
     layout_width: u32,
     /// (block-based caching — per-block reveal is handled by
     /// `block_layouts` eviction on reveal-block changes and
@@ -264,11 +301,22 @@ struct App {
     /// once, not twice).
     pipeline: PipelineCache,
     /// Cached block output-region images (N-series N1), keyed by
-    /// block id. Regions are derived state over the bridge's live
-    /// results; the cache is dropped whenever the doc or the
-    /// results change, so a region can never outlive the outputs
-    /// it renders.
-    region_cache: HashMap<BlockId, imaging::RgbaImage>,
+    /// block id and content (F3b): each entry carries the
+    /// fingerprint of its region's content (block outputs + stale
+    /// flag + width), so a result landing in one block re-renders
+    /// only that block's region. Derefs to
+    /// [`imaging::RgbaImage`].
+    region_cache: HashMap<BlockId, crate::memo::RegionEntry>,
+    /// Transient bottom-left status flash (F4) — e.g. the memo
+    /// hit-rate accounting after an overlay close. Drawn for a few
+    /// seconds, then dropped; never touches the doc.
+    status_flash: Option<(String, std::time::Instant)>,
+    /// In-flight background doc-preview compose (F1): while set, the
+    /// Ctrl+R raster is being compiled on a worker thread from a
+    /// [`crate::kernel_bridge::ScreenshotSnapshot`]; the result is
+    /// inserted only if the doc/results are unchanged since the job
+    /// was dispatched.
+    preview_job: Option<PreviewJob>,
     /// Pending ASCII→Unicode math completion (U-series U2): the
     /// glyph preview is drawn as an IME-style overlay at the
     /// caret; commit/cancel never touch the doc until commit.
@@ -406,12 +454,13 @@ impl App {
             block_layouts: HashMap::new(),
             block_offsets: Vec::new(),
             footer_layout: None,
-            footer_markup_cache: String::new(),
             layout_width: 0,
             pref_x: None,
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
             region_cache: HashMap::new(),
+            status_flash: None,
+            preview_job: None,
             completion: CompletionUi::new(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
@@ -538,20 +587,32 @@ impl App {
     /// recorded for the F4 idle-prefetch debounce.
     fn invalidate_doc(&mut self) {
         let _damage = self.block_index.update(self.doc.text());
-        // Block ids/indices may have shifted — regions are derived
-        // from the current statement→block mapping.
-        self.region_cache.clear();
+        // Block ids/indices may have shifted — the content-keyed
+        // region cache (F3b) re-derives on the next redraw (its keys
+        // fold the block's outputs, so stale or vanished regions are
+        // replaced/dropped there).
         self.last_edit = std::time::Instant::now();
     }
 
     /// Called when kernel results change (annotations / translator
     /// errors), not the document text itself. The per-block layouts
-    /// are content-keyed (F2) — the key folds the per-block
-    /// annotations/errors, so only blocks whose results actually
-    /// moved re-layout on the next redraw. The regions are
-    /// result-derived, so they always re-derive.
-    fn invalidate_annotations(&mut self) {
-        self.region_cache.clear();
+    /// are content-keyed (F2) and the regions content-keyed (F3b):
+    /// their keys fold the per-block annotations/errors/outputs, so
+    /// only blocks whose results actually moved re-render on the
+    /// next redraw.
+    fn invalidate_annotations(&mut self) {}
+
+    /// Clear the transient bottom-left status flash once it has been
+    /// shown long enough (checked on every wake, so no redraw needs
+    /// to be scheduled for expiry).
+    fn expire_status_flash(&mut self) {
+        if self
+            .status_flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > STATUS_FLASH_MS)
+        {
+            self.status_flash = None;
+        }
     }
 
     /// (Re)render cached block output-region images (N-series N1)
@@ -561,15 +622,21 @@ impl App {
     /// (cheap map lookups per redraw, no stale images possible). A
     /// stale block (N-series N2) gets the "stale — run to update"
     /// banner prepended to its region.
-    fn refresh_region_cache(&mut self, width_pt: f64) {
+    fn refresh_region_cache(&mut self, width_px: u32) {
         let blocks = self.block_index.blocks.clone();
         let stale = self.bridge.stale_blocks();
         for (idx, block) in blocks.iter().enumerate() {
-            if self.region_cache.contains_key(&block.id) {
-                continue;
-            }
             let outputs = self.bridge.block_outputs(idx);
+            let key = region_key(width_px, &outputs, stale.contains(&idx));
+            // Content-keyed (F3b): keep an unchanged region, drop one
+            // whose outputs vanished, render one whose outputs or
+            // stale state moved.
+            match self.region_cache.get(&block.id) {
+                Some(e) if e.key == key => continue,
+                _ => {}
+            }
             if outputs.is_empty() && !stale.contains(&idx) {
+                self.region_cache.remove(&block.id);
                 continue;
             }
             let mut markup = String::new();
@@ -578,10 +645,20 @@ impl App {
                 markup.push('\n');
             }
             markup.push_str(&crate::output_region::region_markup(&outputs));
-            if let Some(img) = crate::output_region::region_image(&markup, width_pt) {
-                self.region_cache.insert(block.id, img);
+            match crate::output_region::region_image(&markup, width_px as f64) {
+                Some(image) => {
+                    self.region_cache
+                        .insert(block.id, crate::memo::RegionEntry { key, image });
+                }
+                None => {
+                    self.region_cache.remove(&block.id);
+                }
             }
         }
+        // Prune entries whose block id disappeared (splits/merges).
+        let live: std::collections::HashSet<BlockId> =
+            self.block_index.blocks.iter().map(|b| b.id).collect();
+        self.region_cache.retain(|id, _| live.contains(id));
     }
 
     /// T9: toggle the rendered-template preview overlay (Ctrl+P).
@@ -769,13 +846,14 @@ impl App {
         overlay_memo_key(0, &content)
     }
 
-    /// Warm the Ctrl+R doc-preview memo if stale (F4): recompose the
+    /// Warm the Ctrl+R doc-preview memo if stale: recompose the
     /// whole-doc raster only when the doc text or the bridge results
     /// changed. Returns `None` on a memo hit, `Some(Ok(()))` after a
     /// successful fresh compile, `Some(Err(e))` when the composition
-    /// failed. Never touches the preview's open state — used both by
-    /// the open path ([`Self::ensure_doc_preview_raster`]) and by
-    /// the idle prefetch ([`Self::prefetch_doc_preview_if_idle`]).
+    /// failed. Never touches the preview's open state — used by the
+    /// open path ([`Self::ensure_doc_preview_raster`]); the idle
+    /// prefetch ([`Self::prefetch_doc_preview_if_idle`]) composes on
+    /// a worker thread instead, so it never stalls a frame.
     fn warm_doc_preview_memo(&mut self, doc_text: &str) -> Option<Result<(), String>> {
         const SITE: &str = "doc_preview";
         const WIDTH: u32 = 0;
@@ -813,11 +891,15 @@ impl App {
     /// F4: prefetch the Ctrl+R doc-preview raster while the editor is
     /// idle — the user has opened the preview before, no overlay is
     /// open, no kernel results are in flight, and the doc has been
-    /// quiet for [`IDLE_PREFETCH_DELAY`]. Warming here (not on open)
-    /// means Ctrl+R opens with a pure blit; the accounting counts the
+    /// quiet for [`IDLE_PREFETCH_DELAY`]. The compose runs on a
+    /// worker thread (F1) from an owned
+    /// [`ScreenshotSnapshot`](crate::kernel_bridge::ScreenshotSnapshot),
+    /// so prefetching never stalls a frame; the result lands via
+    /// [`Self::drain_preview_job`]. Warming here (not on open) means
+    /// Ctrl+R opens with a pure blit; the accounting counts the
     /// prefetch compile honestly against the hit rate.
     fn prefetch_doc_preview_if_idle(&mut self) {
-        if !self.preview_wanted || self.doc_preview.is_some() {
+        if !self.preview_wanted || self.doc_preview.is_some() || self.preview_job.is_some() {
             return;
         }
         if self.kernel_deadline.is_some() {
@@ -828,12 +910,76 @@ impl App {
             return;
         }
         let text = self.doc.text().to_string();
-        let _ = self.warm_doc_preview_memo(&text);
+        let key = self.doc_preview_key(&text);
+        // Already warm for this content — nothing to dispatch (and
+        // the hit is counted for the report).
+        if self.memo_store.get("doc_preview", 0, key).is_some() {
+            return;
+        }
+        let snap = self.bridge.screenshot_snapshot();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<imaging::RgbaImage, String>>();
+        // The compose is pure CPU over shared read-only Typst state
+        // (the process-wide font environment) — a worker thread keeps
+        // it off the frame.
+        if std::thread::Builder::new()
+            .name("mathed-doc-preview".to_string())
+            .spawn(move || {
+                let res = crate::export::doc_screenshot_from_snapshot(&snap, &text);
+                let _ = tx.send(res);
+            })
+            .is_err()
+        {
+            return; // no worker: fall back to the sync open path
+        }
+        self.preview_job = Some(PreviewJob {
+            dispatch_key: key,
+            rx,
+        });
+    }
+
+    /// Drain a finished background doc-preview compose (F1): insert
+    /// the raster into the memo only if the doc/results are unchanged
+    /// since dispatch (the memo key still matches); otherwise drop
+    /// the stale work — the next idle pause re-dispatches against the
+    /// current content. Never opens the preview overlay.
+    fn drain_preview_job(&mut self) {
+        let Some(job) = self.preview_job.take() else {
+            return;
+        };
+        match job.rx.try_recv() {
+            Ok(result) => {
+                let text = self.doc.text().to_string();
+                let current_key = self.doc_preview_key(&text);
+                if current_key != job.dispatch_key {
+                    return; // the doc/results moved on while composing
+                }
+                // The open path may have compiled meanwhile.
+                if self.memo_store.get("doc_preview", 0, current_key).is_some() {
+                    return;
+                }
+                match result {
+                    Ok(image) => {
+                        self.memo_store.insert("doc_preview", 0, current_key, image);
+                    }
+                    Err(_) => {
+                        self.memo_store.remove("doc_preview", 0);
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.preview_job = Some(job);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // The worker died without a result; nothing to insert.
+            }
+        }
     }
 
     /// Report the content-keyed overlay memo accounting (F4): hits vs
-    /// fresh compiles vs LRU evictions, emitted on overlay close so
-    /// eviction/width policy can be tuned with data.
+    /// fresh compiles vs LRU evictions, shown as a transient
+    /// bottom-left status flash on overlay close so the eviction /
+    /// width policy can be tuned with data — visible in-editor, not
+    /// just stderr.
     fn report_overlay_memo_ratio(&mut self) {
         let (hits, compiles, evictions) = self.memo_store.take_accounting();
         if hits == 0 && compiles == 0 && evictions == 0 {
@@ -845,9 +991,13 @@ impl App {
         } else {
             hits as f64 * 100.0 / total as f64
         };
-        eprintln!(
-            "[mathed_mini] overlay memo: {hits} hits / {compiles} compiles / {evictions} evicted ({pct:.1}% hit rate)"
-        );
+        self.status_flash = Some((
+            format!(
+                "memo: {hits} hits / {compiles} compiles / {evictions} evicted ({pct:.1}% hit rate)"
+            ),
+            std::time::Instant::now(),
+        ));
+        self.request_redraw();
     }
 
     /// Recompute the open menu's rows from the current doc + bridge
@@ -1000,7 +1150,9 @@ impl App {
     /// untouched.
     fn clear_outputs(&mut self) {
         self.bridge.clear_outputs();
-        self.region_cache.clear();
+        // The content-keyed region cache (F3b) re-derives on the next
+        // redraw: emptied blocks' keys change, so their regions are
+        // dropped there.
         self.invalidate_annotations();
         self.request_redraw();
     }
@@ -1711,13 +1863,10 @@ impl App {
             return;
         };
 
-        // Resize: width is part of each block's content fingerprint,
-        // so the block layouts re-key naturally below; the footer
-        // (keyed only by its markup) must be evicted outright.
-        if self.layout_width != size.width {
-            self.footer_layout = None;
-            self.layout_width = size.width;
-        }
+        // Resize: width is part of every content fingerprint, so the
+        // block layouts, the footer (F3a) and the regions (F3b) all
+        // re-key naturally below/on refresh.
+        self.layout_width = size.width;
 
         let text = self.doc.text().to_string();
         let reveal_span = active_reveal_span(&text, self.caret);
@@ -1772,19 +1921,30 @@ impl App {
             self.block_index.blocks.iter().map(|b| b.id).collect();
         self.block_layouts.retain(|id, _| live.contains(id));
 
+        // Footer (results panel), content-keyed (F3a): (markup,
+        // width) → raster; result changes and resizes re-layout it
+        // exactly when the rendered output could differ.
         let footer_markup = self.bridge.result_panel_markup().unwrap_or_default();
-        if self.footer_layout.is_none() || footer_markup != self.footer_markup_cache {
-            self.footer_layout =
-                crate::render::layout_footer(&footer_markup, size.width as f64).ok();
-            self.footer_markup_cache = footer_markup;
+        let footer_key = overlay_memo_key(size.width, &footer_markup);
+        if !self
+            .footer_layout
+            .as_ref()
+            .is_some_and(|f| f.key == footer_key)
+        {
+            self.footer_layout = crate::render::layout_footer(&footer_markup, size.width as f64)
+                .ok()
+                .map(|layout| crate::memo::BlockLayout {
+                    key: footer_key,
+                    layout,
+                });
         }
 
-        // Block output regions (N-series N1): refresh any block
-        // whose region is not cached yet (results changed since the
-        // last redraw — invalidations cleared the cache). Rendered
-        // before the surface borrow so the compositing loop below
-        // only reads the cache.
-        self.refresh_region_cache(size.width as f64);
+        // Block output regions (N-series N1), content-keyed (F3b):
+        // refresh any block whose region fingerprint changed (a
+        // result landing elsewhere leaves the other regions cached).
+        // Rendered before the surface borrow so the compositing loop
+        // below only reads the cache.
+        self.refresh_region_cache(size.width);
 
         // Overlay raster pre-pass (content-keyed memoization): an
         // overlay's raster is recomputed only when its content or the
@@ -1839,6 +1999,14 @@ impl App {
         // at a fixed width, so resizing never recompiles it).
         if self.doc_preview.is_some() {
             self.ensure_doc_preview_raster();
+        }
+        // Transient status flash (F4): memoized like the overlays, so
+        // blink frames blit it instead of recompiling.
+        if let Some((msg, at)) = &self.status_flash
+            && at.elapsed() <= STATUS_FLASH_MS
+        {
+            let markup = format!("#text(fill: rgb(\"#a0a0a0\"))[{msg}]");
+            self.memo_overlay_markup("status_flash", &markup, win_px);
         }
 
         // Compute the selection up-front (owned) so it doesn't alias
@@ -2088,6 +2256,14 @@ impl App {
                 panel_h,
             );
         }
+        // Transient status flash (F4): bottom-left status line (e.g.
+        // the memo hit-rate accounting reported on overlay close),
+        // memoized in the pre-pass; expired in `about_to_wait`.
+        if let Some(img) = self.memo_store.image("status_flash", win_px) {
+            let top = win_h.saturating_sub(img.height as usize + 8);
+            blit_over_bg_clipped(&mut buffer, win_w, win_h, 8, top, img);
+        }
+
         let _ = buffer.present();
     }
 }
@@ -2598,11 +2774,17 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
 
-        // F4: idle prefetch of the Ctrl+R doc-preview raster — a
-        // quiet editor warms the content-keyed memo so opening the
-        // preview is a pure blit (compiles only when the doc or the
-        // results actually changed).
+        // F1: drain a finished background doc-preview compose first,
+        // then F4: idle prefetch of the Ctrl+R raster — a quiet
+        // editor warms the content-keyed memo on a worker thread so
+        // opening the preview is a pure blit without stalling a
+        // frame.
+        self.drain_preview_job();
         self.prefetch_doc_preview_if_idle();
+
+        // F4: drop the transient status flash once its time is up
+        // (the next blink redraw repaints without it).
+        self.expire_status_flash();
 
         // Busy-poll during kernel work; otherwise wake for the next
         // blink.
@@ -2956,8 +3138,9 @@ mod tests {
     // into a `Vec<usize>`, changing the semantics.
     #![allow(clippy::single_range_in_vec_init)]
     use super::{
-        FAR_LEFT, FAR_RIGHT, block_layout_key, cite_popup_scope_text, draw_caret, resolve_hit,
-        selection_range, touched_marker_starts, touched_math_span_starts, touched_space_run_starts,
+        FAR_LEFT, FAR_RIGHT, block_layout_key, cite_popup_scope_text, draw_caret, region_key,
+        resolve_hit, selection_range, touched_marker_starts, touched_math_span_starts,
+        touched_space_run_starts,
     };
     use crate::render::{DocLayout, active_reveal_span, layout_doc, layout_doc_with};
     use mathed_core::glyphs::{CaretGeom, V2};
@@ -3032,6 +3215,24 @@ mod tests {
             block_layout_key(100, doc, &b1, &[], &empty, &empty),
             "untouched block survives an edit elsewhere"
         );
+    }
+
+    #[test]
+    fn region_key_tracks_outputs_stale_and_width() {
+        // F3b: a block's region raster fingerprint — a result change
+        // or a staleness flip re-renders that block's region; an
+        // unchanged block keeps its cached region across redraws.
+        use crate::kernel_bridge::KernelResult;
+        let k_value = |off: usize, v: f64| (off, KernelResult::Value(v));
+        let out_a = vec![k_value(10, 1.0)];
+        let out_b = vec![k_value(10, 2.0)];
+        let out_c = vec![k_value(10, 1.0), k_value(20, 0.5)];
+        let ka = region_key(100, &out_a, false);
+        assert_eq!(ka, region_key(100, &out_a, false), "deterministic");
+        assert_ne!(ka, region_key(100, &out_b, false), "value change re-keys");
+        assert_ne!(ka, region_key(100, &out_c, false), "output count re-keys");
+        assert_ne!(ka, region_key(100, &out_a, true), "stale flip re-keys");
+        assert_ne!(ka, region_key(200, &out_a, false), "width re-keys");
     }
 
     #[test]

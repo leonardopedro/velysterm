@@ -349,50 +349,7 @@ impl KernelBridge {
     /// body. Feed this to
     /// [`TransformOptions::annotations`](mathed_core::transform::TransformOptions).
     pub fn result_annotations(&self) -> HashMap<usize, String> {
-        self.results
-            .iter()
-            .map(|(&k, r)| {
-                let markup = match r {
-                    // Escape `=` so Typst does not read it as a
-                    // heading.
-                    KernelResult::Value(p) => format!(" #text(rgb(\"#138000\"))[\\= {p:.4}]"),
-                    // Kernel text is untrusted markup: a `<Figure …>`
-                    // (Typst label) or `#`/`$` must render literally —
-                    // the string-literal-in-code form, like the
-                    // region. (A bare `"…"` in markup is literal
-                    // quote characters, so `#("...")` is required.)
-                    KernelResult::StringValue(s) => {
-                        format!(
-                            " #text(rgb(\"#138000\"))[#{}]",
-                            crate::translate::typst_str_lit(s)
-                        )
-                    }
-                    // Rich media: inline thumbnails — one small
-                    // reflowable `#image` per payload right next to
-                    // the statement (the full captioned figure lives
-                    // in the block's output region). Data URLs resolve
-                    // in the world, so these render through the same
-                    // typst_imaging pipeline as the doc.
-                    KernelResult::Rich { outputs, .. } => outputs
-                        .iter()
-                        .map(|(mime, data)| {
-                            // `/` percent-encoded: the payload travels
-                            // through Typst's virtual-path machinery
-                            // (see `world::data_url_encode_payload`).
-                            let encoded = crate::world::data_url_encode_payload(data);
-                            format!(
-                                " #image(\"data:{mime};base64,{encoded}\", height: 16pt, alt: \"{mime}\")"
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    KernelResult::Error { code_name, .. } => {
-                        format!(" #text(rgb(\"#c00000\"))[ {code_name}]")
-                    }
-                };
-                (k, markup)
-            })
-            .collect()
+        annotations_markup(&self.results)
     }
 
     /// Typst markup for the results panel footer, summarizing kernel
@@ -1229,11 +1186,7 @@ impl KernelBridge {
     /// result at `offset`, from the run log (the bounded
     /// reproducibility record). `None` when the offset has no run yet.
     pub fn timing_of(&self, offset: usize) -> Option<u64> {
-        self.run_log
-            .iter()
-            .rev()
-            .find(|e| e.offset == offset)
-            .map(|e| e.timing_ms)
+        timing_from_run_log(&self.run_log, offset)
     }
 
     /// N5: `true` when every submitted request has been answered —
@@ -1280,35 +1233,13 @@ impl KernelBridge {
     /// was computed. The region view shows these blocks with a
     /// "stale — run to update" marker; running the block clears it.
     pub fn stale_blocks(&self) -> Vec<usize> {
-        let mut stale = std::collections::BTreeSet::new();
-        for (&off, &block) in &self.stmt_blocks {
-            let is_stale = self.pending.contains_key(&off)
-                || self.cur_hashes.get(&off) != self.last_result_hashes.get(&off);
-            if is_stale {
-                stale.insert(block);
-            }
-        }
-        // N7: a block is stale when any `\exec(from:)` pipe source
-        // lives in a stale block (hash propagation along pipe edges,
-        // to a fixpoint for chains).
-        loop {
-            let mut added = false;
-            for (&off, &src) in &self.from_edges {
-                let (Some(&b), Some(&sb)) =
-                    (self.stmt_blocks.get(&off), self.stmt_blocks.get(&src))
-                else {
-                    continue;
-                };
-                if stale.contains(&sb) && !stale.contains(&b) {
-                    stale.insert(b);
-                    added = true;
-                }
-            }
-            if !added {
-                break;
-            }
-        }
-        stale.into_iter().collect()
+        stale_blocks_from(
+            &self.stmt_blocks,
+            &self.pending,
+            &self.cur_hashes,
+            &self.last_result_hashes,
+            &self.from_edges,
+        )
     }
 
     /// N7: the stdin threaded into a `\exec(from:)` — the referenced
@@ -1333,14 +1264,7 @@ impl KernelBridge {
     /// untouched — both coexist; only the block's damaged cells
     /// re-render their region.
     pub fn block_outputs(&self, block: usize) -> Vec<(usize, KernelResult)> {
-        let mut out: Vec<(usize, KernelResult)> = self
-            .results
-            .iter()
-            .filter(|(off, _)| self.stmt_blocks.get(off) == Some(&block))
-            .map(|(&k, r)| (k, r.clone()))
-            .collect();
-        out.sort_by_key(|(k, _)| *k);
-        out
+        outputs_for_block(&self.results, &self.stmt_blocks, block)
     }
 
     /// Drain completed worker responses into
@@ -1807,6 +1731,212 @@ fn translator_offset(
         return Some(def.span.start);
     }
     translators.get("").map(|def| def.span.start)
+}
+
+/// Inline annotation markup derived purely from a results map —
+/// the single source of truth shared by the live [`KernelBridge`]
+/// and the background [`ScreenshotSnapshot`] (F1), so the two can
+/// never drift. Keyed by each prob body offset; see
+/// [`KernelBridge::result_annotations`].
+pub(crate) fn annotations_markup(results: &HashMap<usize, KernelResult>) -> HashMap<usize, String> {
+    results
+        .iter()
+        .map(|(&k, r)| {
+            let markup = match r {
+                // Escape `=` so Typst does not read it as a
+                // heading.
+                KernelResult::Value(p) => format!(" #text(rgb(\"#138000\"))[\\= {p:.4}]"),
+                // Kernel text is untrusted markup: a `<Figure …>`
+                // (Typst label) or `#`/`$` must render literally —
+                // the string-literal-in-code form, like the
+                // region. (A bare `"…"` in markup is literal
+                // quote characters, so `#("...")` is required.)
+                KernelResult::StringValue(s) => format!(
+                    " #text(rgb(\"#138000\"))[#{}]",
+                    crate::translate::typst_str_lit(s)
+                ),
+                // Rich media: inline thumbnails — one small
+                // reflowable `#image` per payload right next to
+                // the statement (the full captioned figure lives
+                // in the block's output region). Data URLs resolve
+                // in the world, so these render through the same
+                // typst_imaging pipeline as the doc.
+                KernelResult::Rich { outputs, .. } => outputs
+                    .iter()
+                    .map(|(mime, data)| {
+                        // `/` percent-encoded: the payload travels
+                        // through Typst's virtual-path machinery
+                        // (see `world::data_url_encode_payload`).
+                        let encoded = crate::world::data_url_encode_payload(data);
+                        format!(
+                            " #image(\"data:{mime};base64,{encoded}\", height: 16pt, alt: \"{mime}\" )"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                KernelResult::Error { code_name, .. } => {
+                    format!(" #text(rgb(\"#c00000\"))[ {code_name}]")
+                }
+            };
+            (k, markup)
+        })
+        .collect()
+}
+
+/// Most recent client-observed round-trip time (ms) for the run at
+/// `offset`, from a run log — shared by the live bridge and the
+/// [`ScreenshotSnapshot`].
+pub(crate) fn timing_from_run_log(run_log: &[RunEntry], offset: usize) -> Option<u64> {
+    run_log
+        .iter()
+        .rev()
+        .find(|e| e.offset == offset)
+        .map(|e| e.timing_ms)
+}
+
+/// Block indexes that are stale, from the read state a staleness
+/// computation needs — shared by the live bridge and the
+/// [`ScreenshotSnapshot`].
+pub(crate) fn stale_blocks_from(
+    stmt_blocks: &HashMap<usize, usize>,
+    pending: &HashMap<usize, Instant>,
+    cur_hashes: &HashMap<usize, u64>,
+    last_result_hashes: &HashMap<usize, u64>,
+    from_edges: &HashMap<usize, usize>,
+) -> Vec<usize> {
+    let mut stale = std::collections::BTreeSet::new();
+    for (&off, &block) in stmt_blocks {
+        let is_stale =
+            pending.contains_key(&off) || cur_hashes.get(&off) != last_result_hashes.get(&off);
+        if is_stale {
+            stale.insert(block);
+        }
+    }
+    // N7: a block is stale when any `\exec(from:)` pipe source
+    // lives in a stale block (hash propagation along pipe edges,
+    // to a fixpoint for chains).
+    loop {
+        let mut added = false;
+        for (&off, &src) in from_edges {
+            let (Some(&b), Some(&sb)) = (stmt_blocks.get(&off), stmt_blocks.get(&src)) else {
+                continue;
+            };
+            if stale.contains(&sb) && !stale.contains(&b) {
+                stale.insert(b);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    stale.into_iter().collect()
+}
+
+/// Outputs grouped to a block, from a results map + statement→block
+/// map — shared by the live bridge and the [`ScreenshotSnapshot`].
+pub(crate) fn outputs_for_block(
+    results: &HashMap<usize, KernelResult>,
+    stmt_blocks: &HashMap<usize, usize>,
+    block: usize,
+) -> Vec<(usize, KernelResult)> {
+    let mut out: Vec<(usize, KernelResult)> = results
+        .iter()
+        .filter(|(off, _)| stmt_blocks.get(off) == Some(&block))
+        .map(|(&k, r)| (k, r.clone()))
+        .collect();
+    out.sort_by_key(|(k, _)| *k);
+    out
+}
+
+/// The read view the whole-document screenshot composition needs.
+/// Implemented by the live [`KernelBridge`] and by the owned,
+/// `Send` [`ScreenshotSnapshot`], so export code can compose from
+/// either without duplicating the loop.
+pub(crate) trait ScreenshotView {
+    /// Inline annotation markup keyed by prob body offset.
+    fn result_annotations(&self) -> HashMap<usize, String>;
+    /// Block indexes whose displayed output is stale.
+    fn stale_blocks(&self) -> Vec<usize>;
+    /// Results grouped to a block, in document order.
+    fn block_outputs(&self, block: usize) -> Vec<(usize, KernelResult)>;
+    /// Round-trip time (ms) of the most recent run at `offset`.
+    fn timing_of(&self, offset: usize) -> Option<u64>;
+}
+
+impl ScreenshotView for KernelBridge {
+    fn result_annotations(&self) -> HashMap<usize, String> {
+        KernelBridge::result_annotations(self)
+    }
+
+    fn stale_blocks(&self) -> Vec<usize> {
+        KernelBridge::stale_blocks(self)
+    }
+
+    fn block_outputs(&self, block: usize) -> Vec<(usize, KernelResult)> {
+        KernelBridge::block_outputs(self, block)
+    }
+
+    fn timing_of(&self, offset: usize) -> Option<u64> {
+        KernelBridge::timing_of(self, offset)
+    }
+}
+
+/// An owned, `Send` view of everything the doc-screenshot
+/// composition reads from a [`KernelBridge`] — taken on the main
+/// thread and handed to the background compose worker (F1), so an
+/// idle prefetch never stalls a frame nor borrows the live bridge.
+/// The view methods share the same free functions as the bridge's
+/// accessors, so the two can never drift.
+#[derive(Debug)]
+pub struct ScreenshotSnapshot {
+    results: HashMap<usize, KernelResult>,
+    stmt_blocks: HashMap<usize, usize>,
+    pending: HashMap<usize, Instant>,
+    cur_hashes: HashMap<usize, u64>,
+    last_result_hashes: HashMap<usize, u64>,
+    from_edges: HashMap<usize, usize>,
+    run_log: Vec<RunEntry>,
+}
+
+impl KernelBridge {
+    /// Snapshot every read the doc-screenshot composition performs
+    /// (F1 background prefetch).
+    pub fn screenshot_snapshot(&self) -> ScreenshotSnapshot {
+        ScreenshotSnapshot {
+            results: self.results.clone(),
+            stmt_blocks: self.stmt_blocks.clone(),
+            pending: self.pending.clone(),
+            cur_hashes: self.cur_hashes.clone(),
+            last_result_hashes: self.last_result_hashes.clone(),
+            from_edges: self.from_edges.clone(),
+            run_log: self.run_log.clone(),
+        }
+    }
+}
+
+impl ScreenshotView for ScreenshotSnapshot {
+    fn result_annotations(&self) -> HashMap<usize, String> {
+        annotations_markup(&self.results)
+    }
+
+    fn stale_blocks(&self) -> Vec<usize> {
+        stale_blocks_from(
+            &self.stmt_blocks,
+            &self.pending,
+            &self.cur_hashes,
+            &self.last_result_hashes,
+            &self.from_edges,
+        )
+    }
+
+    fn block_outputs(&self, block: usize) -> Vec<(usize, KernelResult)> {
+        outputs_for_block(&self.results, &self.stmt_blocks, block)
+    }
+
+    fn timing_of(&self, offset: usize) -> Option<u64> {
+        timing_from_run_log(&self.run_log, offset)
+    }
 }
 
 #[cfg(test)]
