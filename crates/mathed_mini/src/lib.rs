@@ -24,6 +24,7 @@ pub mod help_overlay;
 pub mod kernel_bridge;
 pub mod kernel_menu;
 pub mod marker_overlay;
+pub mod media_menu;
 pub mod output_region;
 pub mod references_panel;
 pub mod render;

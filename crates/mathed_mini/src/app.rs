@@ -163,10 +163,33 @@ struct App {
     help_overlay: bool,
     kernel_menu: Option<Vec<crate::kernel_menu::KernelMenuRow>>,
     kernel_menu_selected: usize,
+    /// Folded statement groups in the open menu, keyed by the group
+    /// header row's statement offset (the collapsible reference-list
+    /// treatment: Space folds a statement's media rows under it).
+    /// Cleared when the menu (re)opens; preserved across a run's row
+    /// refresh so a run never silently re-expands a folded group.
+    kernel_menu_folded: crate::kernel_menu::FoldSet,
     /// Per-kind menu filter (`f` cycles all → exec → kernel).
     /// Persisted across opens like the selection, so a filter set in
     /// one session is the one the next open shows.
     kernel_menu_filter: crate::kernel_menu::MenuKindFilter,
+    /// Media catalog (Ctrl+G): every rendered kernel figure as a
+    /// citation-style reference list with typst-rasterized
+    /// thumbnails; Enter jumps the caret to the producing statement
+    /// (the references-panel affordance applied to figures). Derived
+    /// state over the doc + the bridge's live results; mutually
+    /// exclusive with the kernel menu (opening one closes the
+    /// other).
+    media_menu: Option<Vec<crate::media_menu::MediaRow>>,
+    media_menu_selected: usize,
+    /// Rasterized whole-document preview (Ctrl+R): the doc composed
+    /// exactly as the editor draws it (each block's text with its
+    /// inline annotations, then its output region below) and
+    /// rasterized through typst_imaging into one image, shown as a
+    /// scrollable overlay; ↑/↓ scroll, Esc dismisses. Rebuilt on
+    /// every open, so it always reflects the current doc + results.
+    doc_preview: Option<Result<imaging::RgbaImage, String>>,
+    doc_preview_scroll: usize,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -252,7 +275,12 @@ impl App {
             help_overlay: false,
             kernel_menu: None,
             kernel_menu_selected: 0,
+            kernel_menu_folded: crate::kernel_menu::FoldSet::new(),
             kernel_menu_filter: crate::kernel_menu::MenuKindFilter::default(),
+            media_menu: None,
+            media_menu_selected: 0,
+            doc_preview: None,
+            doc_preview_scroll: 0,
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -425,14 +453,81 @@ impl App {
         if self.kernel_menu.is_some() {
             self.kernel_menu = None;
         } else {
+            // Overlays are mutually exclusive: opening the kernel
+            // menu closes the media catalog and the doc preview.
+            self.media_menu = None;
+            self.doc_preview = None;
+            // A fresh open starts fully expanded; folds persist only
+            // for the life of one open session (across runs/refresh).
+            self.kernel_menu_folded.clear();
             self.refresh_kernel_menu_rows();
         }
         self.request_redraw();
     }
 
+    /// Toggle the media catalog (Ctrl+G): open = recompute the
+    /// figure reference rows from the current doc + bridge results;
+    /// close = dismiss. Enter jumps the caret (see
+    /// [`Self::jump_media_menu_selected`]).
+    fn toggle_media_menu(&mut self) {
+        if self.media_menu.is_some() {
+            self.media_menu = None;
+        } else {
+            self.kernel_menu = None;
+            self.doc_preview = None;
+            let text = self.doc.text().to_string();
+            self.media_menu = Some(crate::media_menu::rows_for_doc(
+                &text,
+                self.bridge.results(),
+            ));
+            self.media_menu_selected = 0;
+        }
+        self.request_redraw();
+    }
+
+    /// Toggle the rasterized whole-document preview (Ctrl+R): render
+    /// the current doc + live results into one image through
+    /// typst_imaging and show it as a scrollable overlay. Rebuilt on
+    /// every open, so it reflects the current doc even when the
+    /// results shown are stale (the regions render with their stale
+    /// banners, exactly as the editor draws them).
+    fn toggle_doc_preview(&mut self) {
+        if self.doc_preview.is_some() {
+            self.doc_preview = None;
+        } else {
+            self.kernel_menu = None;
+            self.media_menu = None;
+            let text = self.doc.text().to_string();
+            self.doc_preview = Some(crate::export::doc_screenshot_with(&self.bridge, &text));
+            self.doc_preview_scroll = 0;
+        }
+        self.request_redraw();
+    }
+
+    /// Jump the caret to the media catalog's selected row's producing
+    /// statement (Enter) and dismiss the catalog.
+    fn jump_media_menu_selected(&mut self) {
+        let Some(row) = self
+            .media_menu
+            .as_ref()
+            .and_then(|rows| rows.get(self.media_menu_selected))
+            .cloned()
+        else {
+            return;
+        };
+        self.media_menu = None;
+        self.caret = row.offset;
+        self.sel_anchor = Some(row.offset);
+        self.caret_changed();
+        self.push_a11y_update();
+        self.request_redraw();
+    }
+
     /// Recompute the open menu's rows from the current doc + bridge
     /// state under the current filter, clamping the selection to the
-    /// row set. Called on open, after a run, and on filter change.
+    /// *visible* row set (folded groups' children are not on screen,
+    /// so the selection can never land on one). Called on open,
+    /// after a run, on fold, and on filter change.
     fn refresh_kernel_menu_rows(&mut self) {
         let text = self.doc.text().to_string();
         self.kernel_menu = Some(crate::kernel_menu::rows_for_doc_with(
@@ -441,13 +536,47 @@ impl App {
             &self.bridge.stale_blocks(),
             self.kernel_menu_filter,
         ));
-        let n = self.kernel_menu.as_ref().map_or(0, |r| r.len());
+        // A filter change can remove the group a fold referred to;
+        // prune dead fold keys so they never linger.
+        if let Some(rows) = &self.kernel_menu {
+            let alive: Vec<usize> = rows.iter().map(|r| r.offset).collect();
+            self.kernel_menu_folded.retain(|o| alive.contains(o));
+        }
+        let n = self.kernel_menu.as_ref().map_or(0, |rows| {
+            crate::kernel_menu::visible_rows(rows, &self.kernel_menu_folded).len()
+        });
         if n > 0 && self.kernel_menu_selected >= n {
             self.kernel_menu_selected = n - 1;
         } else if n == 0 {
             self.kernel_menu_selected = 0;
         }
         self.request_redraw();
+    }
+
+    /// Space in the kernel menu: fold/unfold the selected statement
+    /// group (a header row with media children). Returns true when a
+    /// fold changed (the caller swallows the key); false when the
+    /// selection is not foldable, so Space falls through to typing.
+    fn toggle_fold_kernel_menu_selected(&mut self) -> bool {
+        let Some(rows) = self.kernel_menu.as_ref() else {
+            return false;
+        };
+        let Some((row, is_child)) = crate::kernel_menu::visible_row(
+            rows,
+            &self.kernel_menu_folded,
+            self.kernel_menu_selected,
+        ) else {
+            return false;
+        };
+        if is_child || row.children == 0 {
+            return false;
+        }
+        let offset = row.offset;
+        if !self.kernel_menu_folded.insert(offset) {
+            self.kernel_menu_folded.remove(&offset);
+        }
+        self.refresh_kernel_menu_rows();
+        true
     }
 
     /// Cycle the per-kind menu filter (`f` while the menu is open) and
@@ -483,11 +612,17 @@ impl App {
     /// updates live; Esc dismisses.
     fn run_kernel_menu_selected(&mut self) {
         let text = self.doc.text().to_string();
-        let Some(row) = self
+        let Some((row, _)) = self
             .kernel_menu
             .as_ref()
-            .and_then(|rows| rows.get(self.kernel_menu_selected))
-            .cloned()
+            .and_then(|rows| {
+                crate::kernel_menu::visible_row(
+                    rows,
+                    &self.kernel_menu_folded,
+                    self.kernel_menu_selected,
+                )
+            })
+            .map(|(r, is_child)| (r.clone(), is_child))
         else {
             return;
         };
@@ -808,6 +943,20 @@ impl App {
             // block, Esc dismisses (see toggle_kernel_menu).
             "k" | "K" => {
                 self.toggle_kernel_menu();
+                true
+            }
+            // Media catalog (Ctrl+G): the doc's rendered kernel
+            // figures as a reference list with thumbnails; Enter
+            // jumps the caret to the producing statement.
+            "g" | "G" => {
+                self.toggle_media_menu();
+                true
+            }
+            // Rasterized document preview (Ctrl+R): compose the doc
+            // page (blocks + output regions) and rasterize it through
+            // typst_imaging into one scrollable overlay image.
+            "r" | "R" => {
+                self.toggle_doc_preview();
                 true
             }
             // T9: template preview (Ctrl+P) — render the document
@@ -1463,13 +1612,59 @@ impl App {
         // TUI text that wraps instead of clipping — drawn top-left;
         // Esc dismisses. Derived state; never touches the document.
         if let Some(rows) = &self.kernel_menu {
-            let mut markup = crate::kernel_menu::rows_markup(rows, self.kernel_menu_selected);
+            let mut markup = crate::kernel_menu::rows_markup_folded(
+                rows,
+                &self.kernel_menu_folded,
+                self.kernel_menu_selected,
+            );
             markup.push_str(&crate::kernel_menu::footer_hint_markup(
                 rows.len(),
                 self.kernel_menu_filter,
             ));
             if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
                 blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
+            }
+        }
+
+        // Media catalog (Ctrl+G): one reflowable Typst grid at the
+        // window width — a marker column, a typst-rasterized
+        // thumbnail per figure, and a wrapping caption; Enter jumps
+        // the caret, Esc dismisses. Drawn like the other overlays.
+        if let Some(rows) = &self.media_menu {
+            let mut markup = crate::media_menu::rows_markup(rows, self.media_menu_selected);
+            markup.push_str(&crate::media_menu::footer_hint_markup(rows.len()));
+            if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
+                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
+            }
+        }
+
+        // Rasterized document preview (Ctrl+R): the whole page as one
+        // image through typst_imaging, scrollable with ↑/↓, under a
+        // dim hint line; Esc dismisses.
+        if let Some(result) = &self.doc_preview {
+            let label =
+                "#text(fill: rgb(\"#808080\"))[document raster preview — ↑/↓ scroll · esc close]";
+            if let Ok(lbl) = crate::render::render_markup(label, size.width as f64) {
+                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &lbl);
+                let y0 = 8 + lbl.height as usize + 4;
+                match result {
+                    Ok(img) => {
+                        let scroll = self.doc_preview_scroll.min(img.height as usize);
+                        blit_over_bg_scrolled(&mut buffer, win_w, doc_h, 8, y0, img, scroll);
+                    }
+                    Err(e) => {
+                        // The message is dynamic text (it can contain
+                        // Typst syntax, e.g. a path) — render it as a
+                        // string literal in code position.
+                        let msg = format!(
+                            "#text(fill: rgb(\"#c03030\"))[#{}]",
+                            crate::translate::typst_str_lit(e)
+                        );
+                        if let Ok(mimg) = crate::render::render_markup(&msg, size.width as f64) {
+                            blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, y0, &mimg);
+                        }
+                    }
+                }
             }
         }
 
@@ -1840,6 +2035,50 @@ fn blit_over_bg_clipped(
     }
 }
 
+/// Like [`blit_over_bg_clipped`] but starting the source image at a
+/// vertical `scroll` row — the raster preview overlay's viewport
+/// (↑/↓ moves the view inside the page image, whose height can far
+/// exceed the window). Rows above the scroll are not drawn; the
+/// copy is clipped to the window and the available height.
+fn blit_over_bg_scrolled(
+    buffer: &mut [u32],
+    win_w: usize,
+    max_h: usize,
+    x0: usize,
+    y0: usize,
+    img: &imaging::RgbaImage,
+    scroll: usize,
+) {
+    let iw = img.width as usize;
+    let ih = img.height as usize;
+    let copy_w = iw.min(win_w.saturating_sub(x0));
+    let copy_h = ih.saturating_sub(scroll).min(max_h.saturating_sub(y0));
+
+    for y in 0..copy_h {
+        let src_row = (scroll + y) * iw * 4;
+        let dst_row = (y0 + y) * win_w;
+        for x in 0..copy_w {
+            let s = src_row + x * 4;
+            let (r, g, b, a) = (
+                img.data[s] as u32,
+                img.data[s + 1] as u32,
+                img.data[s + 2] as u32,
+                img.data[s + 3] as u32,
+            );
+            if a == 0 {
+                continue;
+            }
+            let px = buffer[dst_row + x0 + x];
+            let (pr, pg, pb) = ((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF);
+            let inv = 255 - a;
+            let cr = (r * a + pr * inv) / 255;
+            let cg = (g * a + pg * inv) / 255;
+            let cb = (b * a + pb * inv) / 255;
+            buffer[dst_row + x0 + x] = (cr << 16) | (cg << 8) | cb;
+        }
+    }
+}
+
 /// Like [`blit_over_bg_clipped`] but composited at an arbitrary `y0`
 /// offset, assuming a black background (used for block-by-block
 /// compositing).
@@ -2068,11 +2307,62 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         Key::Named(NamedKey::ArrowDown) => {
-                            let n = self.kernel_menu.as_ref().map_or(0, |r| r.len());
+                            let n = self.kernel_menu.as_ref().map_or(0, |rows| {
+                                crate::kernel_menu::visible_rows(rows, &self.kernel_menu_folded)
+                                    .len()
+                            });
                             if n > 0 {
                                 self.kernel_menu_selected =
                                     (self.kernel_menu_selected + 1).min(n - 1);
                             }
+                            self.request_redraw();
+                            return;
+                        }
+                        // Fold/unfold the selected statement group
+                        // (collapsible reference-list precedent);
+                        // non-foldable rows fall through to typing.
+                        Key::Named(NamedKey::Space) if self.toggle_fold_kernel_menu_selected() => {
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Media catalog navigation (Ctrl+G): Up/Down move the
+                // selection (the rows are all visible — no folds).
+                if self.media_menu.is_some() {
+                    match &logical_key {
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.media_menu_selected = self.media_menu_selected.saturating_sub(1);
+                            self.request_redraw();
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            let n = self.media_menu.as_ref().map_or(0, |r| r.len());
+                            if n > 0 {
+                                self.media_menu_selected =
+                                    (self.media_menu_selected + 1).min(n - 1);
+                            }
+                            self.request_redraw();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Raster preview scroll (Ctrl+R): Up/Down move the
+                // viewport inside the page image.
+                if self.doc_preview.is_some() {
+                    match &logical_key {
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if let Some(Ok(img)) = &self.doc_preview {
+                                let max = img.height as usize;
+                                self.doc_preview_scroll =
+                                    (self.doc_preview_scroll + 80).min(max.saturating_sub(1));
+                            }
+                            self.request_redraw();
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.doc_preview_scroll = self.doc_preview_scroll.saturating_sub(80);
                             self.request_redraw();
                             return;
                         }
@@ -2098,6 +2388,8 @@ impl ApplicationHandler<UserEvent> for App {
                             self.request_redraw();
                         } else if self.template_preview.take().is_some()
                             || self.kernel_menu.take().is_some()
+                            || self.media_menu.take().is_some()
+                            || self.doc_preview.take().is_some()
                         {
                             self.request_redraw();
                         } else if self.popup_stack.is_empty() {
@@ -2123,6 +2415,13 @@ impl ApplicationHandler<UserEvent> for App {
                         self.push_a11y_update();
                     }
                     Key::Named(NamedKey::Enter) => {
+                        // Media catalog: Enter jumps the caret to the
+                        // selected figure's producing statement and
+                        // dismisses the catalog.
+                        if self.media_menu.is_some() {
+                            self.jump_media_menu_selected();
+                            return;
+                        }
                         // Kernel menu: Enter re-runs the selected
                         // row's block; Shift+Enter re-runs every
                         // row's block (the menu's run-all). Rows are

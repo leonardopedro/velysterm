@@ -17,9 +17,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ),
     ("·  Enter", "menu: re-run the selected block"),
     ("·  Shift+Enter", "menu: run every listed block"),
+    ("·  Space", "menu: fold/unfold a statement's figures"),
     ("·  f", "menu: cycle filter all → exec → kernel"),
     ("·  ↑/↓", "menu: move the selection"),
     ("Ctrl+Shift+K", "clear displayed outputs (regions only)"),
+    ("Ctrl+G", "media catalog — jump to a figure's statement"),
+    ("Ctrl+R", "rasterized document preview (overlay)"),
     ("Ctrl+P", "rendered-template preview (overlay)"),
     ("Ctrl+M", "toggle marker overlay"),
     ("Ctrl+C/X/V, Ctrl+A", "copy / cut / paste / select all"),
@@ -57,6 +60,9 @@ mod tests {
         assert!(m.contains("run every block"), "run-all documented");
         assert!(m.contains("kernel statements menu"), "menu documented");
         assert!(m.contains("cycle filter"), "menu filter documented");
+        assert!(m.contains("fold/unfold"), "menu fold documented");
+        assert!(m.contains("media catalog"), "catalog documented");
+        assert!(m.contains("document preview"), "preview documented");
         assert!(m.contains("this help"), "self-documenting");
     }
 }

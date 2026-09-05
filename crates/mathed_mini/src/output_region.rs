@@ -454,4 +454,36 @@ mod tests {
             .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(painted, "figure painted the png");
     }
+
+    #[test]
+    fn svg_vector_payload_rasterizes_through_the_same_seam() {
+        // Vector MIME: `image/svg+xml` rides the identical data-URL
+        // path — Typst detects the format from the payload bytes (not
+        // an extension) and rasterizes it as a vector image, so an
+        // SVG figure paints real pixels in the region exactly like a
+        // PNG does. Base64 of a 16×16 red square with a green circle.
+        let svg_b64 = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSIjZmYyMDIwIi8+PGNpcmNsZSBjeD0iOCIgY3k9IjgiIHI9IjUiIGZpbGw9IiMyMGZmMjAiLz48L3N2Zz4=";
+        let outputs = vec![(
+            10,
+            KernelResult::Rich {
+                text: "vector plot\n".to_string(),
+                outputs: vec![("image/svg+xml".to_string(), svg_b64.to_string())],
+            },
+        )];
+        let m = region_markup(&outputs);
+        assert!(
+            m.contains("data:image/svg+xml;base64,"),
+            "svg payload embedded: {m}"
+        );
+        let img = region_image(&m, 600.0).expect("svg region renders");
+        assert!(img.width > 0 && img.height > 0, "region has size");
+        let painted = img
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
+            .count();
+        // The 16×16 figure scales up to the region width; the red
+        // square alone is hundreds of pixels.
+        assert!(painted > 200, "svg painted {painted} px");
+    }
 }

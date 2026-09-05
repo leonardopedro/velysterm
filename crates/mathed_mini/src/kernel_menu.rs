@@ -33,6 +33,12 @@ pub struct KernelMenuRow {
     pub offset: usize,
     /// Escaped, single-line text shown for this row.
     pub text: String,
+    /// How many immediately-following rows are this row's media
+    /// children (the figure reference rows a statement with a
+    /// `Rich` result lists). A row with `children > 0` is a
+    /// foldable statement group header; its children hide when the
+    /// group is folded (the collapsible reference-list precedent).
+    pub children: usize,
 }
 
 /// The statement kinds the menu lists (the scripted + kernel cell
@@ -83,7 +89,9 @@ impl MenuKindFilter {
 }
 
 /// One-line, escaped snippet of a statement body (≤ 40 chars).
-fn snippet(body: &str) -> String {
+/// Shared with the media catalog menu (it captions the same
+/// statements' figures).
+pub(crate) fn snippet(body: &str) -> String {
     let first_line = body.lines().next().unwrap_or_default().trim();
     if first_line.chars().count() > 40 {
         let cut: String = first_line.chars().take(37).collect();
@@ -135,8 +143,8 @@ fn status(result: Option<&KernelResult>, block_stale: bool) -> String {
 /// Escape body/status text so it can never open or close Typst
 /// syntax when the row is reflowed as markup (the U-series encoding
 /// rule, applied to the menu too): `\`, `#`, `$` and leading `=`
-/// become inert text.
-fn esc_text(s: &str) -> String {
+/// become inert text. Shared with the media catalog menu.
+pub(crate) fn esc_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -212,10 +220,14 @@ pub fn rows_for_doc_with(
                 block,
                 offset: s.span.start,
                 text: esc_text(&text),
+                children: 0,
             }];
             // Rich media rows: every image payload a statement
             // displayed becomes its own citation-style reference row
-            // under the statement (the same block re-runs). `✓`
+            // under the statement (the same block re-runs) — a
+            // collapsible group: the statement row is the header and
+            // these rows are its children (`children` on the header
+            // counts them, so a fold can hide the whole group). `✓`
             // means the figure rendered; `(stale)` mirrors the region
             // when the block's output is out of date.
             if let Some(KernelResult::Rich { outputs, .. }) = results.get(&s.span.start) {
@@ -228,6 +240,7 @@ pub fn rows_for_doc_with(
                     let size = crate::kernel_bridge::human_bytes(
                         crate::kernel_bridge::b64_decoded_len(data),
                     );
+                    rows[0].children += 1;
                     rows.push(KernelMenuRow {
                         block,
                         offset: s.span.start,
@@ -235,6 +248,7 @@ pub fn rows_for_doc_with(
                             "[block {}] {}: {mime} · {size} — ✓ figure{stale_mark}",
                             block, tag
                         )),
+                        children: 0,
                     });
                 }
             }
@@ -255,10 +269,119 @@ pub fn blocks_to_run(rows: &[KernelMenuRow]) -> Vec<usize> {
     blocks
 }
 
+/// Foldable statement groups are keyed by the header row's offset
+/// (unique per statement, unlike `block` which a heading can share).
+pub type FoldSet = std::collections::HashSet<usize>;
+
+/// One walk over the flat rows classifying each row as a group
+/// header (a statement with media children), one of that group's
+/// children, or a plain standalone row — in *visible* order (folded
+/// groups' children are skipped). The single source both navigation
+/// and rendering use, so they can never disagree about what is on
+/// screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleRow {
+    /// Flat index into the rows slice.
+    pub index: usize,
+    /// True when this row is a media child of the preceding header
+    /// (indented under it; only visible when its group is expanded).
+    pub is_child: bool,
+}
+
+pub fn visible_rows(rows: &[KernelMenuRow], folded: &FoldSet) -> Vec<VisibleRow> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        out.push(VisibleRow {
+            index: i,
+            is_child: false,
+        });
+        let n = rows[i].children;
+        if n > 0 && folded.contains(&rows[i].offset) {
+            // Folded group: skip the header's children entirely.
+            i += 1 + n;
+            continue;
+        }
+        i += 1;
+        for _ in 0..n {
+            if i < rows.len() {
+                out.push(VisibleRow {
+                    index: i,
+                    is_child: true,
+                });
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The flat indices of the currently visible rows (see
+/// [`visible_rows`]); kept for callers that only need the set.
+pub fn visible_indices(rows: &[KernelMenuRow], folded: &FoldSet) -> Vec<usize> {
+    visible_rows(rows, folded)
+        .into_iter()
+        .map(|v| v.index)
+        .collect()
+}
+
+/// The visible row at the given visible-list position, if any — row
+/// navigation and Enter both act on it.
+pub fn visible_row<'a>(
+    rows: &'a [KernelMenuRow],
+    folded: &FoldSet,
+    sel: usize,
+) -> Option<(&'a KernelMenuRow, bool)> {
+    visible_rows(rows, folded)
+        .get(sel)
+        .and_then(|v| rows.get(v.index).map(|r| (r, v.is_child)))
+}
+
+/// Is the row at flat index `i` a foldable group header (a statement
+/// with media children)? Only these rows respond to Space.
+pub fn is_foldable(rows: &[KernelMenuRow], i: usize) -> bool {
+    rows.get(i).is_some_and(|r| r.children > 0)
+}
+
+/// The whole menu as one reflowable markup block, honoring folds:
+/// statement rows with media children show a `▼` (expanded) / `▶`
+/// (collapsed) fold glyph and their media rows are drawn indented
+/// under them (`↳`); a folded group's children are omitted entirely
+/// (the collapsible reference-list treatment). `selected` is an index
+/// into the *visible* list. Escaped rows never open Typst syntax.
+pub fn rows_markup_folded(rows: &[KernelMenuRow], folded: &FoldSet, selected: usize) -> String {
+    let mut out = String::new();
+    for (v, vr) in visible_rows(rows, folded).into_iter().enumerate() {
+        let row = &rows[vr.index];
+        if v == selected {
+            out.push_str("#text(fill: rgb(\"#20c020\"))[▸ ");
+        } else {
+            out.push_str("#text[· ");
+        }
+        if row.children > 0 && !vr.is_child {
+            // A foldable statement group header: the fold glyph is
+            // the visible affordance that Space collapses/expands it.
+            let glyph = if folded.contains(&row.offset) {
+                "▶"
+            } else {
+                "▼"
+            };
+            out.push_str(glyph);
+            out.push(' ');
+        } else if vr.is_child {
+            out.push_str("↳ ");
+        }
+        out.push_str(&row.text);
+        out.push_str("]\n");
+    }
+    out
+}
+
 /// The dimmed one-line footer under the rows (a static hint — no
 /// user content, so no escaping needed), returned as ready markup
 /// the caller appends to the rows' markup block. Names the current
-/// per-kind filter and the `f` key that cycles it.
+/// per-kind filter, the `f` key that cycles it, and the Space fold
+/// toggle for statement groups.
 pub fn footer_hint_markup(rows_len: usize, filter: MenuKindFilter) -> String {
     let hint = if rows_len == 0 {
         format!(
@@ -268,7 +391,7 @@ pub fn footer_hint_markup(rows_len: usize, filter: MenuKindFilter) -> String {
         )
     } else {
         format!(
-            "enter: run block · shift+enter: run all · f: filter ({} · {})",
+            "enter: run block · shift+enter: run all · space: fold/unfold · f: filter ({} · {})",
             filter.label(),
             filter.next().label()
         )
@@ -377,6 +500,7 @@ mod tests {
                 block,
                 offset: block * 10,
                 text: String::new(),
+                children: 0,
             }
         }
         // Two rows may share a block (heading + its exec), and the
@@ -481,6 +605,10 @@ mod tests {
             "statement row names the media status: {rows:?}"
         );
         assert!(
+            rows[0].children == 2,
+            "statement header counts its media children: {rows:?}"
+        );
+        assert!(
             rows[1].text.contains("exec: image/png · 8 B — ✓ figure"),
             "first media reference row: {rows:?}"
         );
@@ -506,6 +634,82 @@ mod tests {
         let parsed = typst::syntax::parse(&markup);
         let (errors, _) = parsed.errors_and_warnings();
         assert!(errors.is_empty(), "menu with media rows parses: {errors:?}");
+    }
+
+    #[test]
+    fn folding_hides_a_statement_groups_media_children() {
+        let doc = "= A\n\
+                   #1 echo hi #2 \\exec(#1,#2, grants: \"readonly\")\n\n\
+                   #3 2 + 2 #4 \\kernel(#3,#4, lang: \"mathed\", grants: \"kernel\")\n";
+        let (idx, _blocks) = idx_for(doc);
+        let exec_off = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Exec)
+            .expect("exec")
+            .span
+            .start;
+        let mut results = HashMap::new();
+        results.insert(
+            exec_off,
+            KernelResult::Rich {
+                text: "plot ready\n".to_string(),
+                outputs: vec![
+                    ("image/png".to_string(), "iVBORw0KGgo".to_string()),
+                    ("image/svg+xml".to_string(), "PHN2Zz4=".to_string()),
+                ],
+            },
+        );
+        let rows = rows_for_doc(doc, &results, &[]);
+        let folded: FoldSet = [exec_off].into();
+        // Expanded: header + its two media children + the kernel row.
+        let vis = visible_rows(&rows, &FoldSet::new());
+        assert_eq!(vis.len(), 4, "expanded shows everything: {vis:?}");
+        assert!(!vis[0].is_child, "header is not a child: {vis:?}");
+        assert!(
+            vis[1].is_child && vis[2].is_child,
+            "media rows nested: {vis:?}"
+        );
+        assert!(!vis[3].is_child, "kernel row standalone: {vis:?}");
+        // Folded: the exec group's media children vanish; the kernel
+        // row stays. The header is still the selected target for Enter.
+        let vis = visible_rows(&rows, &folded);
+        assert_eq!(vis.len(), 2, "fold hides the media children: {vis:?}");
+        assert_eq!(vis[0].index, 0);
+        assert_eq!(vis[1].index, 3, "kernel row follows the folded group");
+        assert!(vis[1].is_child == false, "{vis:?}");
+        // Enter on the visible row still maps to the statement's block
+        // whether folded or not.
+        let (row, _) = visible_row(&rows, &folded, 0).expect("header");
+        assert_eq!(row.block, 0);
+        assert_eq!(row.offset, exec_off);
+        // Fold glyphs: expanded headers show ▼, folded show ▶; folded
+        // markup omits the children text entirely and still parses.
+        let expanded_markup = rows_markup_folded(&rows, &FoldSet::new(), 0);
+        assert!(expanded_markup.contains("▼"), "{expanded_markup}");
+        assert!(
+            expanded_markup.contains("image/png · 8 B"),
+            "children visible when expanded: {expanded_markup}"
+        );
+        assert!(expanded_markup.contains("↳"), "children indented");
+        let folded_markup = rows_markup_folded(&rows, &folded, 0);
+        assert!(folded_markup.contains("▶"), "{folded_markup}");
+        assert!(
+            !folded_markup.contains("image/png · 8 B"),
+            "children hidden when folded: {folded_markup}"
+        );
+        for markup in [expanded_markup, folded_markup] {
+            let parsed = typst::syntax::parse(&markup);
+            let (errors, _) = parsed.errors_and_warnings();
+            assert!(errors.is_empty(), "folded menu parses: {errors:?}");
+        }
+        // Navigation never lands on a hidden row: the visible set is
+        // exactly what Up/Down move through.
+        assert_eq!(
+            visible_indices(&rows, &folded),
+            vec![0, 3],
+            "visible indices skip folded children"
+        );
     }
 
     #[test]

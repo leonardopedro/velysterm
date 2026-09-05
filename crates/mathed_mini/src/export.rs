@@ -258,6 +258,33 @@ fn jup_lines(s: &str) -> Vec<String> {
 /// → stdout stream, `Value` → `text/plain` execute_result, `Error`
 /// → error output (ename = the UK code name). `None` for results
 /// that carry nothing to display (empty stdout).
+/// Is `mime` a text-form MIME that Jupyter notebooks store as raw
+/// text (not base64)? The fold normalizes every image payload to
+/// base64 for the data-URL embed; this is the inverse for the
+/// `.ipynb` data dict.
+fn is_text_form_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/svg+xml" | "text/html" | "application/javascript" | "text/markdown" | "text/latex"
+    )
+}
+
+/// The nbformat data-dict value for a folded payload: binary MIME
+/// keeps its base64 (Jupyter's storage for PNG/JPEG), text-form MIME
+/// is written back as decoded text — the inverse of the fold's
+/// base64 normalization.
+fn nbformat_payload_value(mime: &str, payload: &str) -> serde_json::Value {
+    if is_text_form_mime(mime) {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap_or_default();
+        serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+    } else {
+        serde_json::Value::String(payload.to_string())
+    }
+}
+
 fn kernel_output(result: &crate::kernel_bridge::KernelResult) -> Option<serde_json::Value> {
     match result {
         crate::kernel_bridge::KernelResult::StringValue(s) if s.is_empty() => None,
@@ -281,7 +308,7 @@ fn kernel_output(result: &crate::kernel_bridge::KernelResult) -> Option<serde_js
                 );
             }
             for (mime, payload) in outputs {
-                data.insert(mime.clone(), serde_json::Value::String(payload.clone()));
+                data.insert(mime.clone(), nbformat_payload_value(mime, payload));
             }
             Some(serde_json::json!({
                 "output_type": "execute_result",
@@ -726,7 +753,10 @@ pub fn run_all_runs(doc_text: &str, grants: &[&str]) -> Vec<crate::kernel_bridge
 /// acceptance path for real kernel media (`--region-image`): a
 /// matplotlib plot from ipykernel ends up as painted pixels in the
 /// PNG, with no window and no GPU.
-pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::RgbaImage, String> {
+/// Run every block to a settled idle (bounded wait, like
+/// [`run_all_runs`]) and return the live bridge — the shared engine
+/// behind the region and whole-document screenshot paths.
+fn settled_bridge(doc_text: &str, grants: &[&str]) -> crate::kernel_bridge::KernelBridge {
     let mut bridge = if grants.is_empty() {
         crate::kernel_bridge::KernelBridge::new()
     } else {
@@ -741,38 +771,51 @@ pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::Rgb
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+    bridge
+}
+
+/// The output-region image for one block (`region_markup` with
+/// timing annotations + stale banner), rendered through typst_imaging
+/// at the doc width. `None` when the block has no region content or
+/// the markup cannot be rendered.
+fn block_region_image(
+    bridge: &crate::kernel_bridge::KernelBridge,
+    bi: usize,
+    width_pt: f64,
+) -> Option<imaging::RgbaImage> {
     let stale = bridge.stale_blocks();
-    let width_pt = crate::render::DEFAULT_WIDTH_PT;
-    let mut regions: Vec<imaging::RgbaImage> = Vec::new();
-    for bi in 0..mathed_core::blocks::split_blocks(doc_text).len() {
-        let outputs = bridge.block_outputs(bi);
-        if outputs.is_empty() && !stale.contains(&bi) {
-            continue;
-        }
-        let timings: std::collections::HashMap<usize, u64> = outputs
-            .iter()
-            .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
-            .collect();
-        let mut markup = String::new();
-        if stale.contains(&bi) {
-            markup.push_str(&crate::output_region::stale_banner());
-            markup.push('\n');
-        }
-        markup.push_str(&crate::output_region::region_markup_with_timings(
-            &outputs, &timings,
-        ));
-        if let Some(img) = crate::output_region::region_image(&markup, width_pt) {
-            regions.push(img);
-        }
+    let outputs = bridge.block_outputs(bi);
+    if outputs.is_empty() && !stale.contains(&bi) {
+        return None;
     }
-    let Some(first) = regions.first() else {
-        return Err("no block produced a rendered region".to_string());
+    let timings: std::collections::HashMap<usize, u64> = outputs
+        .iter()
+        .filter_map(|(off, _)| bridge.timing_of(*off).map(|t| (*off, t)))
+        .collect();
+    let mut markup = String::new();
+    if stale.contains(&bi) {
+        markup.push_str(&crate::output_region::stale_banner());
+        markup.push('\n');
+    }
+    markup.push_str(&crate::output_region::region_markup_with_timings(
+        &outputs, &timings,
+    ));
+    crate::output_region::region_image(&markup, width_pt)
+}
+
+/// Stack images vertically on a black canvas, aligned left at the
+/// widest image's width (doc pages share the doc width, so every
+/// image is the same width in practice; narrower ones leave the
+/// right edge black). `Err` when `images` is empty.
+fn stack_vertically(images: Vec<imaging::RgbaImage>) -> Result<imaging::RgbaImage, String> {
+    let Some(first) = images.first() else {
+        return Err("no image rendered".to_string());
     };
-    let width = regions.iter().map(|r| r.width).max().unwrap_or(first.width);
-    let height: u32 = regions.iter().map(|r| r.height).sum();
+    let width = images.iter().map(|r| r.width).max().unwrap_or(first.width);
+    let height: u32 = images.iter().map(|r| r.height).sum();
     let mut out = imaging::RgbaImage::new(width, height);
     let mut y = 0u32;
-    for r in &regions {
+    for r in &images {
         for row in 0..r.height {
             let src = &r.data[(row as usize * r.width as usize * 4)
                 ..((row as usize + 1) * r.width as usize * 4)];
@@ -782,6 +825,62 @@ pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::Rgb
         y += r.height;
     }
     Ok(out)
+}
+
+pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::RgbaImage, String> {
+    let bridge = settled_bridge(doc_text, grants);
+    let width_pt = crate::render::DEFAULT_WIDTH_PT;
+    let mut regions: Vec<imaging::RgbaImage> = Vec::new();
+    for bi in 0..mathed_core::blocks::split_blocks(doc_text).len() {
+        if let Some(img) = block_region_image(&bridge, bi, width_pt) {
+            regions.push(img);
+        }
+    }
+    stack_vertically(regions).map_err(|_| "no block produced a rendered region".to_string())
+}
+
+/// Whole-document raster preview from a live bridge: compose the doc
+/// exactly as the editor draws it — every block's transformed text
+/// (with its inline kernel annotations spliced) followed by its
+/// output region below — into one image through typst_imaging. This
+/// is the graphical "what the document looks like" path shared by
+/// the headless `--doc-image` CLI and the editor's Ctrl+R preview.
+pub fn doc_screenshot_with(
+    bridge: &crate::kernel_bridge::KernelBridge,
+    doc_text: &str,
+) -> Result<imaging::RgbaImage, String> {
+    let scan = mathed_core::markers::scan(doc_text);
+    let segments = mathed_core::markers::resolve_segments(&scan);
+    let annotations = bridge.result_annotations();
+    let width_pt = crate::render::DEFAULT_WIDTH_PT;
+    let mut pieces: Vec<imaging::RgbaImage> = Vec::new();
+    for (bi, range) in mathed_core::blocks::split_blocks(doc_text)
+        .iter()
+        .enumerate()
+    {
+        if let Ok(img) = crate::render::render_block_range(
+            doc_text,
+            &scan,
+            &segments,
+            range.clone(),
+            &annotations,
+            width_pt,
+        ) {
+            pieces.push(img);
+        }
+        if let Some(img) = block_region_image(bridge, bi, width_pt) {
+            pieces.push(img);
+        }
+    }
+    stack_vertically(pieces).map_err(|_| "document produced no renderable content".to_string())
+}
+
+/// Headless whole-document screenshot (`--doc-image`): run every
+/// block (like [`region_screenshot`]) and rasterize the composed
+/// page — block text plus output regions — into one PNG.
+pub fn doc_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::RgbaImage, String> {
+    let bridge = settled_bridge(doc_text, grants);
+    doc_screenshot_with(&bridge, doc_text)
 }
 
 /// N8: compare the current doc against a previously written record
@@ -1012,7 +1111,8 @@ fn render_doc(
                             == Some("execute_result")
                             && v.get("mime")
                                 .and_then(|m| m.as_str())
-                                .is_some_and(|m| m.starts_with("image/"));                        if is_image_result
+                                .is_some_and(|m| m.starts_with("image/"));
+                        if is_image_result
                             && let (Some(mime), Some(data)) = (
                                 v.get("mime")
                                     .and_then(|m| m.as_str())
@@ -1407,6 +1507,32 @@ mod tests {
         let out = kernel_output(&silent).expect("output");
         assert!(out["data"].get("text/plain").is_none(), "{out}");
         assert_eq!(out["data"]["image/png"], "aGk=");
+    }
+
+    #[test]
+    fn nbformat_output_writes_svg_back_as_text() {
+        // The fold stores every image payload as base64 (so the
+        // data-URL embed works), but Jupyter notebooks store
+        // text-form MIME as raw text: the nbformat projection decodes
+        // `image/svg+xml` back to its text, while binary MIME stays
+        // base64.
+        use crate::kernel_bridge::KernelResult;
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"#ff0000\"/></svg>";
+        use base64::Engine;
+        let svg_b64 = base64::engine::general_purpose::STANDARD.encode(svg);
+        let r = KernelResult::Rich {
+            text: String::new(),
+            outputs: vec![
+                ("image/svg+xml".to_string(), svg_b64.clone()),
+                ("image/png".to_string(), "aGk=".to_string()),
+            ],
+        };
+        let out = kernel_output(&r).expect("output");
+        assert_eq!(
+            out["data"]["image/svg+xml"], svg,
+            "svg decoded back to text for nbformat"
+        );
+        assert_eq!(out["data"]["image/png"], "aGk=", "binary mime keeps base64");
     }
 
     #[test]
@@ -1946,6 +2072,67 @@ esac
             .chunks_exact(4)
             .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(painted, "template image painted pixels");
+    }
+
+    #[test]
+    fn doc_screenshot_composes_block_text_and_regions_into_one_page() {
+        // Followup: the whole-document raster preview renders the
+        // page exactly as the editor draws it — block text (with
+        // inline kernel annotations) followed by the output region
+        // with the rendered media figure — through typst_imaging.
+        let stub = stub_kernel_module();
+        let doc = concat!(
+            "= Plot cell\n\n",
+            "#1 plot #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\", name: fig)",
+        );
+        let mut bridge = crate::kernel_bridge::KernelBridge::with_kernel_config(
+            &["kernel"],
+            &["mathed"],
+            Some(stub.to_str().expect("stub path")),
+        );
+        bridge.refresh(doc);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !bridge.is_idle() {
+            bridge.poll();
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let img = doc_screenshot_with(&bridge, doc).expect("doc screenshot");
+        assert!(img.width > 0 && img.height > 0, "page has size");
+        // Both halves paint: heading text above, and the captioned
+        // figure (a raster image payload) below — real pixels, not
+        // an empty canvas.
+        let painted = img
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
+            .count();
+        assert!(painted > 100, "page painted {painted} px");
+        // The region half alone is a meaningful strip: run the
+        // region-only path on the same doc and confirm it stacks into
+        // its own image (the plot figure paints there too).
+        let reg = region_screenshot(doc, &["kernel"]).expect("region screenshot");
+        assert!(reg.width > 0 && reg.height > 0);
+    }
+
+    #[test]
+    fn doc_screenshot_renders_plain_documents_without_a_kernel() {
+        // No exec/kernel statements: the settled bridge spawns
+        // nothing; the page is just the block text rasterized.
+        let doc = "= A\n\n$ E = m c^2 $\n\nsome prose after the math\n";
+        let img = doc_screenshot(doc, &[]).expect("plain doc screenshot");
+        assert!(img.width > 0 && img.height > 0, "page has size");
+        let painted = img
+            .data
+            .chunks_exact(4)
+            .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
+            .count();
+        assert!(painted > 100, "plain page painted {painted} px");
+        // Three text blocks contribute real vertical extent (each
+        // block rasterizes separately and stacks).
+        assert!(img.height > 40, "page taller than a single line");
     }
 
     #[test]

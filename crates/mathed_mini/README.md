@@ -24,9 +24,11 @@ the doc stays the source of truth).
   Up/Down pick, Enter re-runs that block, Shift+Enter re-runs every
   listed block (the menu's run-all, same deduplicated set each time),
   `f` cycles a per-kind filter (all → exec → kernel), the selection
-  and filter survive reopening (clamped to the row set), Esc
-  dismisses. Rows are plain text escaped and reflowed at the window
-  width (never fixed-width widgets).
+  and filter survive reopening (clamped to the row set), a statement's
+  media rows fold under it with **Space** (`▼`/`▶` — the collapsible
+  reference-list treatment; folded children hide, Enter still
+  re-runs the group), and Esc dismisses. Rows are plain text escaped
+  and reflowed at the window width (never fixed-width widgets).
 - **Shortcut help** — `F1` opens the keyboard reference as the same
   kind of reflowable overlay; Esc closes.
 - **Run all** — `Ctrl+Shift+Enter` re-issues every block.
@@ -81,22 +83,40 @@ the doc stays the source of truth).
   menu (`Ctrl+K`) lists every figure as its own reference row
   (`[block n] exec: image/png · 12 kB — ✓ figure`), and the inline
   annotation next to the statement is a small reflowable `#image`
-  thumbnail of each payload. Two real-kernel hazards are handled:
+  thumbnail of each payload. Three real-kernel hazards are handled:
   kernel text renders as Typst string literals (a matplotlib
-  `<Figure size …>` is a Typst *label* opener), and the payload's
-  `/` is percent-encoded in the data URL (Typst's `VirtualPath`
+  `<Figure size …>` is a Typst *label* opener), the payload's `/`
+  is percent-encoded in the data URL (Typst's `VirtualPath`
   collapses base64's `//` before the world resolves the image — both
-  pinned by the plot e2e). `ctx.kernel` outputs carry a ready-made
-  `data_url` field so templates render figures directly
+  pinned by the plot e2e), and text-form wire payloads
+  (`image/svg+xml` arrives as raw text from a real kernel, only
+  binary MIME is base64) are normalized to base64 at the fold and
+  written back as text for `.ipynb` (pinned by the svg e2e).
+  `ctx.kernel` outputs carry a ready-made `data_url` field so
+  templates render figures directly
   (`#image(ctx.kernel.at(0).outputs.at(0).data_url)`). Non-image
   rich MIME (`text/html`) and payloads over 1 MiB keep the terse
   size marker — payloads are never dropped, base64/HTML is never
   dumped into region text.
+- **Media catalog** — `Ctrl+G` lists every rendered kernel figure
+  as a reference list with its actual media: each row is a small
+  typst-rasterized thumbnail (`#image("data:…")`, height 20pt)
+  next to a wrapping caption (`mime · size — statement`); Enter
+  jumps the caret to the producing statement (the references-panel
+  affordance applied to figures), Esc closes.
+- **Raster document preview** — `Ctrl+R` composes the whole page
+  exactly as the editor draws it (each block's text with its inline
+  annotations, then its output region) and rasterizes it through
+  typst_imaging into one scrollable overlay image (↑/↓ scroll, Esc
+  closes); the headless form is `--doc-image <doc> [--grants g]
+  --out page.png`.
 - **Headless region screenshot** — `--region-image <doc>
   [--grants g] --out page.png` runs every block and rasterizes each
   block's output region through the same typst_imaging pipeline into
   one stacked PNG (the printable notebook page, no window, no GPU);
-  `run_plot_e2e.sh` uses it to pixel-check a real matplotlib plot.
+  `run_plot_e2e.sh` uses it to pixel-check a real matplotlib plot
+  and `run_svg_e2e.sh` the same path for a real `image/svg+xml`
+  vector payload.
 
 ## Input + interchange (U-series)
 

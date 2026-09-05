@@ -345,6 +345,31 @@ pub fn render_doc(doc_text: &str, width_pt: f64) -> Result<RgbaImage, RenderErro
     render_markup(&doc_to_markup(doc_text), width_pt)
 }
 
+/// Rasterize one block's transformed text (with its inline kernel
+/// annotations) to an image — the block-text half of the
+/// whole-document raster composition behind
+/// `export::doc_screenshot` / the editor's Ctrl+R preview. It is
+/// [`layout_block`] minus the glyph index: the caller only needs
+/// pixels, so no caret/hit-test machinery is built. The annotations
+/// map is the bridge's `result_annotations()` (spliced after each
+/// statement body exactly as the editor splices them).
+pub fn render_block_range(
+    doc_text: &str,
+    scan: &mathed_core::markers::MarkerScan,
+    segments: &[mathed_core::markers::Segment],
+    range: std::ops::Range<usize>,
+    annotations: &std::collections::HashMap<usize, String>,
+    width_pt: f64,
+) -> Result<RgbaImage, RenderError> {
+    let opts = TransformOptions {
+        annotations: annotations.clone(),
+        ..Default::default()
+    };
+    let render =
+        mathed_core::transform::to_render_text_range(doc_text, scan, segments, range, &opts);
+    render_markup(&format!("{THEME_PRELUDE}{}", render.text), width_pt)
+}
+
 #[cfg(test)]
 mod tests {
     // clamp_reveal_to_block cases pass single-element

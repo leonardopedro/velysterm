@@ -32,3 +32,8 @@ dev-machine):
   `--run-all`, then rasterized by `mathed_mini --region-image` into a
   PNG whose pixels are checked (the rendered figure, through
   typst_imaging). The flake env adds `matplotlib` for this one.
+- `run_svg_e2e.sh` — vector-MIME acceptance: a real ipykernel
+  displaying an SVG publishes `image/svg+xml` as **raw text** on the
+  wire (only binary MIME is base64); the fold normalizes it to base64
+  for the data-URL embed, and `--region-image` rasterizes the vector
+  through typst_imaging into a pixel-checked PNG.

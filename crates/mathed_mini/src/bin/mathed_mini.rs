@@ -283,6 +283,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Rendered region screenshot -> {out_path}");
                 return Ok(());
             }
+            // Whole-document raster preview — run every block and
+            // compose the page (each block's text + its output
+            // region) into one PNG through typst_imaging: the
+            // graphical "what the document looks like" export, like
+            // --region-image but including the body text.
+            "--doc-image" => {
+                let path = rest.first().ok_or("--doc-image requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let mut grants: Vec<&str> = Vec::new();
+                let mut out: Option<&str> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--grants" => {
+                            grants = rest
+                                .get(i + 1)
+                                .ok_or("--grants requires a comma-separated list")?
+                                .split(',')
+                                .collect();
+                            i += 2;
+                        }
+                        "--out" => {
+                            out = Some(rest.get(i + 1).ok_or("--out requires a path")?);
+                            i += 2;
+                        }
+                        other => {
+                            return Err(format!("unexpected --doc-image argument: {other}").into());
+                        }
+                    }
+                }
+                let img = mathed_mini::export::doc_screenshot(&doc, &grants)
+                    .map_err(std::io::Error::other)?;
+                let out_path = out.unwrap_or("doc.png");
+                write_png(&img, out_path)?;
+                eprintln!("Rendered document screenshot -> {out_path}");
+                return Ok(());
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[1]);
                 return Ok(());

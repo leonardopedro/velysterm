@@ -90,6 +90,33 @@ pub(crate) fn b64_decoded_len(s: &str) -> usize {
     s.trim_end_matches('=').len() * 3 / 4
 }
 
+/// Normalize a kernel payload's wire string for the folded `Rich`
+/// outputs: binary MIME (`image/png`, …) arrives base64 on the
+/// Jupyter wire, but *text* MIME (`image/svg+xml`, `text/html`, …)
+/// arrives as raw text — and every consumer below (region data-URL
+/// figure, template `data_url`, media-catalog thumbnail) embeds the
+/// payload as `data:<mime>;base64,…`. A string that is already
+/// valid base64 is kept verbatim; anything else is base64-encoded
+/// from its UTF-8 bytes (the inverse — text back out — happens on
+/// the `.ipynb` export side, which writes text-form MIME as text).
+pub(crate) fn payload_to_base64(data: &str) -> String {
+    // Real raw text (an SVG document, HTML) always contains
+    // characters outside the base64 alphabet (`<`, `"`, …), so the
+    // alphabet test is the reliable discriminator — length alignment
+    // is not (a wire payload can legitimately be any length, and a
+    // truncated test stub stays verbatim).
+    let looks_like_b64 = !data.is_empty()
+        && data
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+    if looks_like_b64 {
+        data.to_string()
+    } else {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
+    }
+}
+
 fn fold_kernel_outputs(outputs: &[kernel_client::KernelOutput]) -> KernelResult {
     use kernel_client::KernelOutput;
     if let Some(KernelOutput::Error { ename, evalue, .. }) = outputs
@@ -117,13 +144,23 @@ fn fold_kernel_outputs(outputs: &[kernel_client::KernelOutput]) -> KernelResult 
                 text.push_str(data);
                 text.push('\n');
             }
-            KernelOutput::Result { mime, data }
-                if mime.starts_with("image/") && b64_decoded_len(data) <= RICH_MEDIA_MAX_BYTES =>
-            {
-                rich.push((mime.clone(), data.clone()));
+            KernelOutput::Result { mime, data } if mime.starts_with("image/") => {
+                // Image payloads are normalized to base64 first (a
+                // real kernel sends `image/svg+xml` as *text* on the
+                // wire), then size-gated: oversized media keeps the
+                // terse marker.
+                let norm = payload_to_base64(data);
+                if b64_decoded_len(&norm) <= RICH_MEDIA_MAX_BYTES {
+                    rich.push((mime.clone(), norm));
+                } else {
+                    text.push_str(&format!(
+                        "[{mime} · {}]\n",
+                        human_bytes(b64_decoded_len(&norm))
+                    ));
+                }
             }
-            // Non-image rich MIME (`text/html`, …) and oversized
-            // images keep the terse size marker.
+            // Non-image rich MIME (`text/html`, …) keeps the terse
+            // size marker.
             KernelOutput::Result { mime, data } => {
                 text.push_str(&format!("[{mime} · {}]\n", human_bytes(data.len())));
             }
@@ -3423,12 +3460,54 @@ esac
     }
 
     #[test]
+    fn svg_wire_text_is_normalized_to_base64_in_the_fold() {
+        use kernel_client::KernelOutput;
+        // A real ipykernel publishes image/svg+xml as raw *text* on
+        // the wire (only binary MIME like PNG is base64), while every
+        // media consumer below embeds the payload as
+        // `data:…;base64,…`: the fold must normalize the raw text to
+        // base64, and leave already-base64 payloads verbatim.
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"#ff0000\"/></svg>";
+        let folded = fold_kernel_outputs(&[KernelOutput::Result {
+            mime: "image/svg+xml".to_string(),
+            data: svg.to_string(),
+        }]);
+        match &folded {
+            KernelResult::Rich { outputs, .. } => {
+                assert_eq!(outputs.len(), 1, "svg carried as media: {outputs:?}");
+                let (mime, data) = &outputs[0];
+                assert_eq!(mime, "image/svg+xml");
+                // The stored payload round-trips back to the svg text.
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .expect("stored payload is base64");
+                assert_eq!(String::from_utf8(decoded).expect("utf8"), svg);
+            }
+            other => panic!("expected Rich fold, got {other:?}"),
+        }
+        // Binary payloads (already base64 on the wire) stay verbatim.
+        let png = "iVBORw0KGgo";
+        let folded = fold_kernel_outputs(&[KernelOutput::Result {
+            mime: "image/png".to_string(),
+            data: png.to_string(),
+        }]);
+        match &folded {
+            KernelResult::Rich { outputs, .. } => {
+                assert_eq!(outputs[0].1, png, "binary payload kept verbatim");
+            }
+            other => panic!("expected Rich fold, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn oversized_image_payloads_keep_the_size_marker() {
         use kernel_client::KernelOutput;
         // The region rasterizes rich media on the CPU: a payload over
         // the cap must not reach the renderer — it folds back to the
         // terse size marker (the verbatim payload is still on the run
-        // log).
+        // log). The marker names the decoded size, like the payload
+        // figures' captions.
         let big_b64 = "A".repeat(RICH_MEDIA_MAX_BYTES * 2);
         let folded = fold_kernel_outputs(&[KernelOutput::Result {
             mime: "image/png".to_string(),
@@ -3436,7 +3515,7 @@ esac
         }]);
         match &folded {
             KernelResult::StringValue(s) => {
-                assert!(s.contains("[image/png · 2.0 MB]"), "marker: {s:?}");
+                assert!(s.contains("[image/png · 1.5 MB]"), "marker: {s:?}");
             }
             other => panic!("oversized image must stay a marker, got {other:?}"),
         }
