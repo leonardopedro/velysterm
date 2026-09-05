@@ -38,11 +38,13 @@ pub fn stale_banner() -> String {
 /// already sorts, so the sort is normally a no-op but keeps the
 /// region total). Each line carries its timing annotation when one is
 /// supplied (N5 timing display: "· N ms" from the run log).
-fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>) -> Vec<String> {
-    let mut sorted: Vec<(usize, KernelResult)> =
-        outputs.iter().map(|(k, r)| (*k, r.clone())).collect();
+fn region_lines<'a>(
+    outputs: impl IntoIterator<Item = (usize, &'a KernelResult)>,
+    timings: &HashMap<usize, u64>,
+) -> Vec<String> {
+    let mut sorted: Vec<(usize, &'a KernelResult)> = outputs.into_iter().collect();
     sorted.sort_by_key(|(k, _)| *k);
-    let mut lines: Vec<String> = Vec::with_capacity(outputs.len());
+    let mut lines: Vec<String> = Vec::with_capacity(sorted.len());
     for (offset, result) in &sorted {
         let timing = timings
             .get(offset)
@@ -190,6 +192,15 @@ fn rows_table(s: &str) -> Option<String> {
 }
 
 pub fn region_markup(outputs: &[(usize, KernelResult)]) -> String {
+    region_markup_refs(outputs.iter().map(|(k, r)| (*k, r)))
+}
+
+/// [`region_markup`] over borrowed results — the live region-refresh
+/// path fingerprints and formats the block's outputs without cloning
+/// them (rich payloads included).
+pub fn region_markup_refs<'a>(
+    outputs: impl IntoIterator<Item = (usize, &'a KernelResult)>,
+) -> String {
     region_lines(outputs, &HashMap::new()).join("\n")
 }
 
@@ -202,7 +213,7 @@ pub fn region_markup_with_timings(
     outputs: &[(usize, KernelResult)],
     timings: &HashMap<usize, u64>,
 ) -> String {
-    region_lines(outputs, timings).join("\n")
+    region_lines(outputs.iter().map(|(k, r)| (*k, r)), timings).join("\n")
 }
 
 /// Render a block output region to an image at `width_pt` (the doc

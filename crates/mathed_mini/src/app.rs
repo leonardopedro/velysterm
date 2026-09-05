@@ -17,10 +17,14 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashMap;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
 use mathed_core::MathDoc;
 use mathed_core::blocks::{BlockId, BlockIndex};
 use mathed_core::glyphs::{CaretGeom, RectF};
-use mathed_core::markers::{resolve_segments, scan};
+use mathed_core::markers::{MarkerScan, resolve_segments, scan};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -53,7 +57,7 @@ use crate::references_panel::{
     ReferencesPanelData, open_references_panel, panel_height as references_panel_height,
     update_references_panel as update_references_panel_data,
 };
-use crate::render::{DEFAULT_WIDTH_PT, DocLayout, active_reveal_span};
+use crate::render::{DEFAULT_WIDTH_PT, DocLayout, reveal_span_in};
 use mathed_core::transform::TransformOptions;
 
 /// How long to keep polling the kernel worker after an edit. Tiny
@@ -85,6 +89,25 @@ struct UserEvent(accesskit_winit::Event);
 struct PreviewJob {
     dispatch_key: u64,
     rx: std::sync::mpsc::Receiver<Result<imaging::RgbaImage, String>>,
+}
+
+/// F3: fingerprint of the previous frame's memo-pre-pass inputs — the
+/// doc's revision (text), the bridge's content version (results,
+/// staleness, names, translator errors), the window width, the caret
+/// (reveal), and the open-overlay UI state. Every cached raster in
+/// the pre-pass consumes a subset of exactly these, so a frame whose
+/// fingerprint matches the previous one re-blits the cached rasters
+/// without re-deriving anything: idle and caret-blink frames cost
+/// ~nothing. Scroll offsets and the caret-visibility blink are
+/// deliberately excluded — they are viewport/draw-time state, not
+/// raster inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameFp {
+    doc_rev: u64,
+    content: u64,
+    width: u32,
+    caret: usize,
+    ui: u64,
 }
 
 /// Content fingerprint of a [`crate::kernel_bridge::KernelResult`]
@@ -136,9 +159,11 @@ fn overlay_memo_key(width_px: u32, content: &str) -> u64 {
 /// The editor's region shows exactly these — outputs and the stale
 /// banner — so the key is precise: a result landing in one block
 /// re-renders only that block's region.
-fn region_key(
+/// [`region_key`] over borrowed results — the live refresh path folds
+/// fingerprints out of the bridge's outputs without cloning them.
+fn region_key_from<'a>(
     width_px: u32,
-    outputs: &[(usize, crate::kernel_bridge::KernelResult)],
+    outputs: impl IntoIterator<Item = (usize, &'a crate::kernel_bridge::KernelResult)>,
     stale: bool,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -150,6 +175,23 @@ fn region_key(
         result_fingerprint(r).hash(&mut h);
     }
     h.finish()
+}
+
+/// Content fingerprint of a block's output-region raster (F3b): the
+/// block's outputs (each folded lossily via
+/// [`result_fingerprint`]), its stale flag, and the window width.
+/// The editor's region shows exactly these — outputs and the stale
+/// banner — so the key is precise: a result landing in one block
+/// re-renders only that block's region. The live path hashes
+/// borrowed outputs via [`region_key_from`]; this owned wrapper is
+/// what the tests pin the folding contract against.
+#[cfg_attr(not(test), allow(dead_code))]
+fn region_key(
+    width_px: u32,
+    outputs: &[(usize, crate::kernel_bridge::KernelResult)],
+    stale: bool,
+) -> u64 {
+    region_key_from(width_px, outputs.iter().map(|(o, r)| (*o, r)), stale)
 }
 
 /// Content fingerprint of everything
@@ -277,6 +319,30 @@ struct App {
     /// block layouts and the footer re-key (width is part of each
     /// content fingerprint).
     layout_width: u32,
+    /// F1: memoized transform front-end — `scan` + `resolve_segments`
+    /// are pure functions of the doc text, so an unchanged
+    /// [`MathDoc::revision`] proves this cached parse is still valid.
+    /// `redraw` re-runs the full-doc marker scan once per edit,
+    /// never per frame (the reveal computation used to re-scan the
+    /// whole document on every frame, on top of the block loop's
+    /// scan). `front_rev` is the revision the cache was built from
+    /// (`u64::MAX` before the first refresh forces a scan).
+    front_rev: u64,
+    front_scan: MarkerScan,
+    front_segments: Vec<mathed_core::markers::Segment>,
+    /// F2: bridge-derived views cached behind
+    /// [`KernelBridge::content_version`] — rebuilding every
+    /// annotation string / cloning every translator error per frame
+    /// was pure waste on frames where the bridge never moved
+    /// (caret motion, blink). Each entry is `(version, value)`;
+    /// callers share the map by `Arc`, so a hit is a refcount bump.
+    annotations_cache: Option<(u64, Arc<HashMap<usize, String>>)>,
+    errors_cache: Option<(u64, Arc<HashMap<usize, String>>)>,
+    footer_markup_cache: Option<(u64, String)>,
+    /// F3: fingerprint of the last frame's memo pre-pass (see
+    /// [`FrameFp`]). Equal ⇒ every cached raster's inputs are
+    /// unchanged ⇒ the pre-pass is skipped and the frame blits.
+    last_frame: Option<FrameFp>,
     /// (block-based caching — per-block reveal is handled by
     /// `block_layouts` eviction on reveal-block changes and
     /// per-block `TransformOptions` in `redraw`.)
@@ -455,6 +521,13 @@ impl App {
             block_offsets: Vec::new(),
             footer_layout: None,
             layout_width: 0,
+            front_rev: u64::MAX,
+            front_scan: MarkerScan::default(),
+            front_segments: Vec::new(),
+            annotations_cache: None,
+            errors_cache: None,
+            footer_markup_cache: None,
+            last_frame: None,
             pref_x: None,
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
@@ -612,6 +685,10 @@ impl App {
             .is_some_and(|(_, at)| at.elapsed() > STATUS_FLASH_MS)
         {
             self.status_flash = None;
+            // Drop the memoized raster too: the draw site blits it
+            // only while the flash is live, and without this the
+            // stale entry would linger on screen indefinitely.
+            self.memo_store.remove("status_flash", self.layout_width);
         }
     }
 
@@ -626,8 +703,12 @@ impl App {
         let blocks = self.block_index.blocks.clone();
         let stale = self.bridge.stale_blocks();
         for (idx, block) in blocks.iter().enumerate() {
-            let outputs = self.bridge.block_outputs(idx);
-            let key = region_key(width_px, &outputs, stale.contains(&idx));
+            // F2: borrowed outputs — the fingerprint fold and the
+            // markup build only read them, so cloning full results
+            // (rich payloads included) per block per frame was pure
+            // waste.
+            let outputs = self.bridge.block_outputs_ref(idx);
+            let key = region_key_from(width_px, outputs.iter().copied(), stale.contains(&idx));
             // Content-keyed (F3b): keep an unchanged region, drop one
             // whose outputs vanished, render one whose outputs or
             // stale state moved.
@@ -644,7 +725,7 @@ impl App {
                 markup.push_str(&crate::output_region::stale_banner());
                 markup.push('\n');
             }
-            markup.push_str(&crate::output_region::region_markup(&outputs));
+            markup.push_str(&crate::output_region::region_markup_refs(outputs));
             match crate::output_region::region_image(&markup, width_px as f64) {
                 Some(image) => {
                     self.region_cache
@@ -759,6 +840,93 @@ impl App {
         self.caret_changed();
         self.push_a11y_update();
         self.request_redraw();
+    }
+
+    /// F1: re-run the transform front-end (marker scan + segment
+    /// resolution) only when the doc text changed; an unchanged
+    /// [`MathDoc::revision`] proves the cached parse is fresh. Called
+    /// at the top of the memo pre-pass with the already-cloned text.
+    fn refresh_front(&mut self, text: &str, rev: u64) {
+        if self.front_rev == rev {
+            return;
+        }
+        let s = scan(text);
+        self.front_segments = resolve_segments(&s);
+        self.front_scan = s;
+        self.front_rev = rev;
+    }
+
+    /// F2: the inline-annotation markup map, rebuilt only when the
+    /// bridge's content version moved (results changed). The caller
+    /// shares the cached map by `Arc`, so caret-motion frames pay a
+    /// refcount bump instead of re-formatting every annotation.
+    fn bridge_annotations(&mut self) -> Arc<HashMap<usize, String>> {
+        let cv = self.bridge.content_version();
+        if let Some((v, map)) = &self.annotations_cache
+            && *v == cv
+        {
+            return map.clone();
+        }
+        let map = Arc::new(self.bridge.result_annotations());
+        self.annotations_cache = Some((cv, map.clone()));
+        map
+    }
+
+    /// F2: the translator-error map, version-gated like
+    /// [`Self::bridge_annotations`] — no per-frame full-map clone on
+    /// frames where the bridge never moved.
+    fn bridge_errors(&mut self) -> Arc<HashMap<usize, String>> {
+        let cv = self.bridge.content_version();
+        if let Some((v, map)) = &self.errors_cache
+            && *v == cv
+        {
+            return map.clone();
+        }
+        let map = Arc::new(self.bridge.translator_errors().clone());
+        self.errors_cache = Some((cv, map.clone()));
+        map
+    }
+
+    /// F2: the results-panel footer markup, version-gated the same
+    /// way (it folds every result + its label, so it only changes
+    /// when the bridge moved). `None` when there is nothing to show,
+    /// exactly like [`KernelBridge::result_panel_markup`].
+    fn bridge_footer_markup(&mut self) -> Option<String> {
+        let cv = self.bridge.content_version();
+        if let Some((v, s)) = &self.footer_markup_cache
+            && *v == cv
+        {
+            return Some(s.clone());
+        }
+        let markup = self.bridge.result_panel_markup();
+        self.footer_markup_cache = Some((cv, markup.clone().unwrap_or_default()));
+        markup
+    }
+
+    /// F3: fingerprint of the open-overlay UI state that feeds the
+    /// pre-pass memos (which overlays are open, menu selections,
+    /// folds, filter, the status flash). Scroll offsets and the caret
+    /// blink are viewport/draw-time state and deliberately excluded.
+    fn ui_fingerprint(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.kernel_menu.is_some().hash(&mut h);
+        self.kernel_menu_selected.hash(&mut h);
+        self.kernel_menu_filter.hash(&mut h);
+        let mut folded: Vec<usize> = self.kernel_menu_folded.iter().copied().collect();
+        folded.sort_unstable();
+        folded.hash(&mut h);
+        self.media_menu.is_some().hash(&mut h);
+        self.media_menu_selected.hash(&mut h);
+        self.help_overlay.hash(&mut h);
+        self.template_preview.is_some().hash(&mut h);
+        self.doc_preview.is_some().hash(&mut h);
+        if let Some((msg, at)) = &self.status_flash {
+            msg.hash(&mut h);
+            (at.elapsed() <= STATUS_FLASH_MS).hash(&mut h);
+        } else {
+            false.hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Memoize the raster for an overlay whose content is one Typst
@@ -1868,146 +2036,186 @@ impl App {
         // re-key naturally below/on refresh.
         self.layout_width = size.width;
 
-        let text = self.doc.text().to_string();
-        let reveal_span = active_reveal_span(&text, self.caret);
-        let scan = scan(&text);
-        let segments = resolve_segments(&scan);
-        let annotations = self.bridge.result_annotations();
-        let translator_errors = self.bridge.translator_errors().clone();
-        let reveal_ranges: Vec<std::ops::Range<usize>> = reveal_span.clone().into_iter().collect();
-
-        // Content-keyed block layouts (F2): a block re-lays out only
-        // when its content fingerprint changed — its doc slice, its
-        // (clamped) reveal ranges, the annotations/errors inside it,
-        // or the window width. An edit in another block, or a kernel
-        // result elsewhere, keeps this block's raster. Entries whose
-        // block id disappeared (splits/merges/deletions) are pruned.
-        for block in self.block_index.blocks.clone() {
-            let block_reveal = crate::render::clamp_reveal_to_block(&reveal_ranges, &block.range);
-            let key = block_layout_key(
-                size.width,
-                &text,
-                &block.range,
-                &block_reveal,
-                &annotations,
-                &translator_errors,
-            );
-            if self
-                .block_layouts
-                .get(&block.id)
-                .is_some_and(|e| e.key == key)
-            {
-                continue;
-            }
-            let opts = TransformOptions {
-                reveal: block_reveal,
-                annotations: annotations.clone(),
-                translator_errors: translator_errors.clone(),
-                ..Default::default()
-            };
-            if let Ok(layout) = crate::render::layout_block(
-                &text,
-                &scan,
-                &segments,
-                &block,
-                size.width as f64,
-                &opts,
-            ) {
-                self.block_layouts
-                    .insert(block.id, crate::memo::BlockLayout { key, layout });
-            }
-        }
-        let live: std::collections::HashSet<BlockId> =
-            self.block_index.blocks.iter().map(|b| b.id).collect();
-        self.block_layouts.retain(|id, _| live.contains(id));
-
-        // Footer (results panel), content-keyed (F3a): (markup,
-        // width) → raster; result changes and resizes re-layout it
-        // exactly when the rendered output could differ.
-        let footer_markup = self.bridge.result_panel_markup().unwrap_or_default();
-        let footer_key = overlay_memo_key(size.width, &footer_markup);
-        if !self
-            .footer_layout
-            .as_ref()
-            .is_some_and(|f| f.key == footer_key)
-        {
-            self.footer_layout = crate::render::layout_footer(&footer_markup, size.width as f64)
-                .ok()
-                .map(|layout| crate::memo::BlockLayout {
-                    key: footer_key,
-                    layout,
-                });
-        }
-
-        // Block output regions (N-series N1), content-keyed (F3b):
-        // refresh any block whose region fingerprint changed (a
-        // result landing elsewhere leaves the other regions cached).
-        // Rendered before the surface borrow so the compositing loop
-        // below only reads the cache.
-        self.refresh_region_cache(size.width);
-
-        // Overlay raster pre-pass (content-keyed memoization): an
-        // overlay's raster is recomputed only when its content or the
-        // window width changed, so caret-blink redraws of an open
-        // overlay are pure blits instead of fresh Typst compiles. The
-        // markup is built here (a cheap string pass) and memoized;
-        // the draw sites below only blit. Typst's own comemo
-        // memoization is scoped to a single compile pass, so this
-        // memo at the content seam is the extension point (see
-        // [`crate::memo`]).
+        // F3 idle-frame guard: every cached raster in the memo
+        // pre-pass below consumes a subset of exactly these inputs —
+        // the doc's text (revision), the bridge's content (results /
+        // staleness / names / errors), the window width, the caret
+        // (reveal), and the open-overlay UI state. When none moved
+        // since the last frame, the pre-pass is skipped wholesale and
+        // the frame is a pure blit: caret-blink and idle redraws cost
+        // ~nothing. The status flash is time-sensitive (its memo is
+        // built only while fresh), so an active flash forces the full
+        // path.
+        let doc_rev = self.doc.revision();
+        let content_ver = self.bridge.content_version();
+        let ui_fp = self.ui_fingerprint();
+        // Overlay rasters and the doc preview are memoized at the
+        // window width (the draw sites read this same slot).
         let win_px = size.width;
-        // Build each active overlay's content into an owned string
-        // first (the borrow must end before the memo &mut self call).
-        let kernel_markup = self.kernel_menu.as_ref().map(|rows| {
-            let mut markup = crate::kernel_menu::rows_markup_folded(
-                rows,
-                &self.kernel_menu_folded,
-                self.kernel_menu_selected,
-            );
-            markup.push_str(&crate::kernel_menu::footer_hint_markup(
-                rows.len(),
-                self.kernel_menu_filter,
-            ));
-            markup
-        });
-        if let Some(markup) = &kernel_markup {
-            self.memo_overlay_markup("kernel_menu", markup, win_px);
+        let frame = FrameFp {
+            doc_rev,
+            content: content_ver,
+            width: size.width,
+            caret: self.caret,
+            ui: ui_fp,
+        };
+        let idle =
+            self.status_flash.is_none() && self.last_frame.as_ref().is_some_and(|f| *f == frame);
+
+        if !idle {
+            let text = self.doc.text().to_string();
+            // F1: the front-end parse runs once per edit — an
+            // unchanged doc revision proves the cached scan/segments
+            // are fresh, and the reveal computation reads them
+            // instead of re-scanning the whole document per frame.
+            self.refresh_front(&text, doc_rev);
+            let reveal_span = reveal_span_in(&self.front_scan, &self.front_segments, self.caret);
+            let annotations = self.bridge_annotations();
+            let translator_errors = self.bridge_errors();
+            let reveal_ranges: Vec<Range<usize>> = reveal_span.into_iter().collect();
+
+            // Content-keyed block layouts (F2): a block re-lays out
+            // only when its content fingerprint changed — its doc
+            // slice, its (clamped) reveal ranges, the
+            // annotations/errors inside it, or the window width. An
+            // edit in another block, or a kernel result elsewhere,
+            // keeps this block's raster. Entries whose block id
+            // disappeared (splits/merges/deletions) are pruned.
+            for block in self.block_index.blocks.clone() {
+                let block_reveal =
+                    crate::render::clamp_reveal_to_block(&reveal_ranges, &block.range);
+                let key = block_layout_key(
+                    size.width,
+                    &text,
+                    &block.range,
+                    &block_reveal,
+                    annotations.as_ref(),
+                    translator_errors.as_ref(),
+                );
+                if self
+                    .block_layouts
+                    .get(&block.id)
+                    .is_some_and(|e| e.key == key)
+                {
+                    continue;
+                }
+                let opts = TransformOptions {
+                    reveal: block_reveal,
+                    annotations: annotations.as_ref().clone(),
+                    translator_errors: translator_errors.as_ref().clone(),
+                    ..Default::default()
+                };
+                if let Ok(layout) = crate::render::layout_block(
+                    &text,
+                    &self.front_scan,
+                    &self.front_segments,
+                    &block,
+                    size.width as f64,
+                    &opts,
+                ) {
+                    self.block_layouts
+                        .insert(block.id, crate::memo::BlockLayout { key, layout });
+                }
+            }
+            let live: std::collections::HashSet<BlockId> =
+                self.block_index.blocks.iter().map(|b| b.id).collect();
+            self.block_layouts.retain(|id, _| live.contains(id));
+
+            // Footer (results panel), content-keyed (F3a): (markup,
+            // width) → raster; result changes and resizes re-layout
+            // it exactly when the rendered output could differ.
+            let footer_markup = self.bridge_footer_markup().unwrap_or_default();
+            let footer_key = overlay_memo_key(size.width, &footer_markup);
+            if !self
+                .footer_layout
+                .as_ref()
+                .is_some_and(|f| f.key == footer_key)
+            {
+                self.footer_layout =
+                    crate::render::layout_footer(&footer_markup, size.width as f64)
+                        .ok()
+                        .map(|layout| crate::memo::BlockLayout {
+                            key: footer_key,
+                            layout,
+                        });
+            }
+
+            // Block output regions (N-series N1), content-keyed (F3b):
+            // refresh any block whose region fingerprint changed (a
+            // result landing elsewhere leaves the other regions cached).
+            // Rendered before the surface borrow so the compositing loop
+            // below only reads the cache.
+            self.refresh_region_cache(size.width);
+
+            // Overlay raster pre-pass (content-keyed memoization): an
+            // overlay's raster is recomputed only when its content or the
+            // window width changed, so caret-blink redraws of an open
+            // overlay are pure blits instead of fresh Typst compiles. The
+            // markup is built here (a cheap string pass) and memoized;
+            // the draw sites below only blit. Typst's own comemo
+            // memoization is scoped to a single compile pass, so this
+            // memo at the content seam is the extension point (see
+            // [`crate::memo`]).
+            // Build each active overlay's content into an owned string
+            // first (the borrow must end before the memo &mut self call).
+            let kernel_markup = self.kernel_menu.as_ref().map(|rows| {
+                let mut markup = crate::kernel_menu::rows_markup_folded(
+                    rows,
+                    &self.kernel_menu_folded,
+                    self.kernel_menu_selected,
+                );
+                markup.push_str(&crate::kernel_menu::footer_hint_markup(
+                    rows.len(),
+                    self.kernel_menu_filter,
+                ));
+                markup
+            });
+            if let Some(markup) = &kernel_markup {
+                self.memo_overlay_markup("kernel_menu", markup, win_px);
+            }
+            let media_markup = self.media_menu.as_ref().map(|rows| {
+                let mut markup = crate::media_menu::rows_markup(rows, self.media_menu_selected);
+                markup.push_str(&crate::media_menu::footer_hint_markup(rows.len()));
+                markup
+            });
+            if let Some(markup) = &media_markup {
+                self.memo_overlay_markup("media_menu", markup, win_px);
+            }
+            if self.help_overlay {
+                self.memo_overlay_markup("help", &crate::help_overlay::markup(), win_px);
+            }
+            let preview_text = self.template_preview.as_ref().map(|result| match result {
+                Ok(out) => out.clone(),
+                Err(e) => format!("template preview failed: {e}"),
+            });
+            if let Some(text) = &preview_text
+                && self.memo_template_preview(text, win_px)
+            {
+                // New content: the viewport restarts at the top.
+                self.template_preview_scroll = 0;
+            }
+            // Raster document preview (Ctrl+R): recompose only when the
+            // doc or the displayed results changed (the preview renders
+            // at a fixed width, so resizing never recompiles it).
+            if self.doc_preview.is_some() {
+                self.ensure_doc_preview_raster();
+            }
+            // Transient status flash (F4): memoized like the
+            // overlays, so blink frames blit it instead of
+            // recompiling. Only built while fresh; on expiry
+            // `expire_status_flash` drops both the flash and its
+            // memo entry.
+            if let Some((msg, at)) = &self.status_flash
+                && at.elapsed() <= STATUS_FLASH_MS
+            {
+                let markup = format!("#text(fill: rgb(\"#a0a0a0\"))[{msg}]");
+                self.memo_overlay_markup("status_flash", &markup, win_px);
+            }
         }
-        let media_markup = self.media_menu.as_ref().map(|rows| {
-            let mut markup = crate::media_menu::rows_markup(rows, self.media_menu_selected);
-            markup.push_str(&crate::media_menu::footer_hint_markup(rows.len()));
-            markup
-        });
-        if let Some(markup) = &media_markup {
-            self.memo_overlay_markup("media_menu", markup, win_px);
-        }
-        if self.help_overlay {
-            self.memo_overlay_markup("help", &crate::help_overlay::markup(), win_px);
-        }
-        let preview_text = self.template_preview.as_ref().map(|result| match result {
-            Ok(out) => out.clone(),
-            Err(e) => format!("template preview failed: {e}"),
-        });
-        if let Some(text) = &preview_text
-            && self.memo_template_preview(text, win_px)
-        {
-            // New content: the viewport restarts at the top.
-            self.template_preview_scroll = 0;
-        }
-        // Raster document preview (Ctrl+R): recompose only when the
-        // doc or the displayed results changed (the preview renders
-        // at a fixed width, so resizing never recompiles it).
-        if self.doc_preview.is_some() {
-            self.ensure_doc_preview_raster();
-        }
-        // Transient status flash (F4): memoized like the overlays, so
-        // blink frames blit it instead of recompiling.
-        if let Some((msg, at)) = &self.status_flash
-            && at.elapsed() <= STATUS_FLASH_MS
-        {
-            let markup = format!("#text(fill: rgb(\"#a0a0a0\"))[{msg}]");
-            self.memo_overlay_markup("status_flash", &markup, win_px);
-        }
+        // The pre-pass above consumed exactly the inputs folded into
+        // `frame`; record it so the next frame can prove nothing
+        // moved and skip straight to the blits.
+        self.last_frame = Some(frame);
 
         // Compute the selection up-front (owned) so it doesn't alias
         // the mutable `surface` borrow below.
@@ -2258,8 +2466,14 @@ impl App {
         }
         // Transient status flash (F4): bottom-left status line (e.g.
         // the memo hit-rate accounting reported on overlay close),
-        // memoized in the pre-pass; expired in `about_to_wait`.
-        if let Some(img) = self.memo_store.image("status_flash", win_px) {
+        // memoized in the pre-pass while fresh; expired (flash and
+        // memo) in `about_to_wait`. Drawn only while live.
+        if self
+            .status_flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() <= STATUS_FLASH_MS)
+            && let Some(img) = self.memo_store.image("status_flash", win_px)
+        {
             let top = win_h.saturating_sub(img.height as usize + 8);
             blit_over_bg_clipped(&mut buffer, win_w, win_h, 8, top, img);
         }
@@ -3139,8 +3353,8 @@ mod tests {
     #![allow(clippy::single_range_in_vec_init)]
     use super::{
         FAR_LEFT, FAR_RIGHT, block_layout_key, cite_popup_scope_text, draw_caret, region_key,
-        resolve_hit, selection_range, touched_marker_starts, touched_math_span_starts,
-        touched_space_run_starts,
+        region_key_from, resolve_hit, selection_range, touched_marker_starts,
+        touched_math_span_starts, touched_space_run_starts,
     };
     use crate::render::{DocLayout, active_reveal_span, layout_doc, layout_doc_with};
     use mathed_core::glyphs::{CaretGeom, V2};
@@ -3233,6 +3447,34 @@ mod tests {
         assert_ne!(ka, region_key(100, &out_c, false), "output count re-keys");
         assert_ne!(ka, region_key(100, &out_a, true), "stale flip re-keys");
         assert_ne!(ka, region_key(200, &out_a, false), "width re-keys");
+    }
+
+    /// F2: the borrowed-outputs key path (the live region refresh,
+    /// which must not clone payloads) folds identically to the owned
+    /// wrapper the tests pin above — no drift between the two entry
+    /// points.
+    #[test]
+    fn region_key_from_borrowed_equals_owned_wrapper() {
+        use crate::kernel_bridge::KernelResult;
+        let out = vec![
+            (10usize, KernelResult::Value(1.0)),
+            (
+                20,
+                KernelResult::Rich {
+                    text: "fig".to_owned(),
+                    outputs: vec![("image/png".to_owned(), "aGVsbG8=".to_owned())],
+                },
+            ),
+        ];
+        assert_eq!(
+            region_key(300, &out, false),
+            region_key_from(300, out.iter().map(|(o, r)| (*o, r)), false),
+            "borrowed folding must equal the owned folding"
+        );
+        assert_eq!(
+            region_key(300, &out, true),
+            region_key_from(300, out.iter().map(|(o, r)| (*o, r)), true)
+        );
     }
 
     #[test]

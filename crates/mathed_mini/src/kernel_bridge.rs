@@ -283,6 +283,17 @@ pub struct KernelBridge {
     /// without an annotation forever (only possible via a future
     /// worker bug — the worker answers every request today).
     pending: HashMap<usize, Instant>,
+    /// Monotonic counter bumped after every mutation of the
+    /// doc-derived state above (results, staleness maps, block
+    /// membership, names, translator errors, pending, run log).
+    /// Frontends memoize doc-derived rasters against it (the idle-
+    /// frame guard in the editor): an unchanged version proves none
+    /// of those inputs moved, so cached rasters stay valid without
+    /// re-deriving anything. Only actual mutators bump it — read
+    /// accessors never do. Bumped at the end of the public mutators
+    /// (`refresh_with_index`, `run_block`, `poll`, `clear_outputs`),
+    /// which every internal mutation funnels through.
+    content_version: u64,
 }
 
 impl Default for KernelBridge {
@@ -335,12 +346,25 @@ impl KernelBridge {
             translator_errors: HashMap::new(),
             live: HashSet::new(),
             pending: HashMap::new(),
+            content_version: 0,
         }
     }
 
     /// Latest results, keyed by each `\prob`/`\event`'s body offset.
     pub fn results(&self) -> &HashMap<usize, KernelResult> {
         &self.results
+    }
+
+    /// Monotonic content version (see the field docs): bumped
+    /// exactly when doc-derived state — results, staleness maps,
+    /// block membership, prob names, translator errors, pending
+    /// requests, or the run log — changed. Reads never bump.
+    pub fn content_version(&self) -> u64 {
+        self.content_version
+    }
+
+    fn bump_content(&mut self) {
+        self.content_version += 1;
     }
 
     /// Inline annotations keyed by each prob's body offset: small
@@ -887,6 +911,12 @@ impl KernelBridge {
         self.cur_hashes.retain(|k, _| self.live.contains(k));
         self.last_result_hashes.retain(|k, _| self.live.contains(k));
         self.pending.retain(|k, _| self.live.contains(k));
+        // Every doc-derived map was reconciled above — even a
+        // "nothing changed" refresh rewrote `live`/`translator_errors`
+        // and re-validated membership, and the editor re-keys its
+        // rasters on the resulting bump. Refresh is edit-driven, so
+        // this never fires on an idle frame.
+        self.bump_content();
         changed
     }
 
@@ -1148,6 +1178,7 @@ impl KernelBridge {
             self.exec_hashes.insert(stmt.span.start, h);
         }
 
+        self.bump_content();
         changed
     }
 
@@ -1180,6 +1211,7 @@ impl KernelBridge {
     pub fn clear_outputs(&mut self) {
         self.results.clear();
         self.last_result_hashes.clear();
+        self.bump_content();
     }
 
     /// N5: most recent client-observed round-trip time (ms) for the
@@ -1265,6 +1297,14 @@ impl KernelBridge {
     /// re-render their region.
     pub fn block_outputs(&self, block: usize) -> Vec<(usize, KernelResult)> {
         outputs_for_block(&self.results, &self.stmt_blocks, block)
+    }
+
+    /// Borrowed-outputs counterpart of
+    /// [`block_outputs`](Self::block_outputs) for the live region-
+    /// refresh path (which only fingerprints the outputs): same
+    /// grouping, no per-frame payload clones.
+    pub fn block_outputs_ref(&self, block: usize) -> Vec<(usize, &KernelResult)> {
+        outputs_ref_for_block(&self.results, &self.stmt_blocks, block)
     }
 
     /// Drain completed worker responses into
@@ -1370,6 +1410,9 @@ impl KernelBridge {
                     changed = true;
                 }
             }
+        }
+        if changed {
+            self.bump_content();
         }
         changed
     }
@@ -1849,6 +1892,26 @@ pub(crate) fn outputs_for_block(
     out
 }
 
+/// Borrowed counterpart of [`outputs_for_block`]: the same grouping
+/// without cloning the results. The live region-refresh path only
+/// folds content fingerprints out of the outputs, so cloning full
+/// `KernelResult`s (rich media payloads included) per block per
+/// frame was pure waste; the owned variant stays for the snapshot /
+/// export path, which needs real values.
+pub(crate) fn outputs_ref_for_block<'a>(
+    results: &'a HashMap<usize, KernelResult>,
+    stmt_blocks: &HashMap<usize, usize>,
+    block: usize,
+) -> Vec<(usize, &'a KernelResult)> {
+    let mut out: Vec<(usize, &'a KernelResult)> = results
+        .iter()
+        .filter(|(off, _)| stmt_blocks.get(off) == Some(&block))
+        .map(|(&k, r)| (k, r))
+        .collect();
+    out.sort_by_key(|(k, _)| *k);
+    out
+}
+
 /// The read view the whole-document screenshot composition needs.
 /// Implemented by the live [`KernelBridge`] and by the owned,
 /// `Send` [`ScreenshotSnapshot`], so export code can compose from
@@ -2239,6 +2302,38 @@ mod tests {
         let markup = ann.get(&key).expect("annotation for the prob");
         assert!(markup.contains("1.0000"), "annotation: {markup}");
         assert!(markup.contains("#text"), "annotation: {markup}");
+    }
+
+    /// F2: `content_version` bumps exactly on doc-derived mutations —
+    /// reads never move it, refresh and clear_outputs do. Frontends
+    /// memoize rasters against it (the idle-frame guard), so a missed
+    /// bump would freeze a stale raster and a spurious one only costs
+    /// a re-key.
+    #[test]
+    fn content_version_bumps_on_mutations_not_reads() {
+        let doc = "#1 a #2 \\model(#1,#2)\n\
+                   #3 vac #4 \\prob(#3,#4)";
+        let mut bridge = KernelBridge::new();
+        let v0 = bridge.content_version();
+        // Reads never bump.
+        let _ = bridge.results();
+        let _ = bridge.result_annotations();
+        let _ = bridge.translator_errors();
+        let _ = bridge.result_panel_markup();
+        let _ = bridge.stale_blocks();
+        let _ = bridge.run_log();
+        assert_eq!(bridge.content_version(), v0);
+        // Refresh mutates the scratch maps (and possibly results).
+        bridge.refresh(doc);
+        let v1 = bridge.content_version();
+        assert!(v1 > v0, "refresh must bump the content version");
+        bridge.refresh(doc);
+        assert!(bridge.content_version() > v1);
+        // clear_outputs drops results: another bump.
+        let v2 = bridge.content_version();
+        bridge.clear_outputs();
+        assert!(bridge.content_version() > v2);
+        assert!(bridge.results().is_empty());
     }
 
     #[test]

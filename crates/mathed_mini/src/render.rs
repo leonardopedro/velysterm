@@ -66,6 +66,19 @@ pub fn doc_to_render_with(doc_text: &str, opts: &TransformOptions) -> RenderOutp
 pub fn active_reveal_span(doc_text: &str, pos: usize) -> Option<std::ops::Range<usize>> {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
+    reveal_span_in(&scan, &segments, pos)
+}
+
+/// [`active_reveal_span`] over an already-computed scan pipeline —
+/// the editor's hot path reuses its memoized front-end instead of
+/// re-scanning the whole document per frame (the scan/segments are
+/// pure functions of the text, and the cached parse is fresh exactly
+/// when the doc's revision is unchanged).
+pub fn reveal_span_in(
+    scan: &mathed_core::markers::MarkerScan,
+    segments: &[mathed_core::markers::Segment],
+    pos: usize,
+) -> Option<std::ops::Range<usize>> {
     scan.stmts.iter().enumerate().find_map(|(idx, stmt)| {
         let start = segments
             .iter()
@@ -705,6 +718,38 @@ mod tests {
         let span = active_reveal_span(doc, inside)
             .expect("bib-key cite statement should still be a reveal span");
         assert_eq!(span, 0..doc.len());
+    }
+
+    /// F1: `reveal_span_in` over one precomputed scan must agree with
+    /// `active_reveal_span` (which re-scans) at every caret — the
+    /// editor's hot path reuses the cached front-end, so any drift
+    /// would change reveal behavior under memoization. Every char
+    /// boundary of a mixed doc is checked on both paths.
+    #[test]
+    fn reveal_span_in_equals_rescanning_active_reveal_span() {
+        let docs = [
+            // translator + model + prob mixed
+            "#3 #let translate(b) = { \"[]\" } #4 \\translator(#3,#4, name: \"ho\") x\n\
+             #1 a #2 \\model(#1,#2)\n\
+             #5 vacuum #6 \\prob(#5,#6, translator: \"ev\")",
+            // bib-key cite with no body segment
+            "\\cite(authorA89, authorB94)",
+            // plain prose, no statements
+            "hello world #1 x #2",
+        ];
+        for doc in docs {
+            let scan = scan(doc);
+            let segments = resolve_segments(&scan);
+            let mut at = 0;
+            while at <= doc.len() {
+                assert_eq!(
+                    reveal_span_in(&scan, &segments, at),
+                    active_reveal_span(doc, at),
+                    "reveal_span_in drifted from the rescanning path at {at} in {doc:?}"
+                );
+                at += 1;
+            }
+        }
     }
 
     #[test]

@@ -176,6 +176,28 @@ the doc stays the source of truth).
   rate)` — flashes in-editor at the bottom-left (3s) so the
   eviction/width policy can be tuned with data.
 
+  Two later rounds pushed the same seam to the *frame itself*:
+  **(F1)** the transform front-end is memoized against the doc's
+  revision — `scan` + segment resolution are pure functions of the
+  text, so an unchanged document (proven by a monotonic revision
+  counter on `MathDoc`, bumped on every text mutation, never on
+  reads) skips the full-doc parse passes entirely (previously the
+  reveal computation re-scanned the whole document *and* redraw
+  scanned again, twice per frame, plus a text clone); the reveal
+  span now reads the cached scan. **(F2)** the bridge's derived
+  views — inline annotation markup, translator errors, the footer
+  summary — are rebuilt only when the bridge's content actually
+  moved, behind one monotonic `content_version` bumped inside the
+  bridge's mutators (complete by construction: its state maps are
+  private); per-frame clones of rich kernel outputs for the region
+  fingerprints are gone too (borrowed-output folding). **(F3)** a
+  frame-level fingerprint — doc revision, bridge content version,
+  window width, caret, and the open-overlay UI state — gates the
+  whole memo pre-pass: when none of those moved (caret-blink and
+  idle redraws), the frame is pure blits, no re-derivation of any
+  kind. The status flash now cleans its memo entry on expiry (it
+  used to linger on screen).
+
 ## Input + interchange (U-series)
 
 Inside math (`$..$`), ASCII sequences complete to Unicode glyphs

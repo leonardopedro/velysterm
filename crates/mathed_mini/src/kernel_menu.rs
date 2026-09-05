@@ -51,7 +51,7 @@ fn is_menu_statement(kind: PropKind) -> bool {
 /// filter is part of the menu's *derived* state: it only narrows
 /// which rows the list shows, never what runs or what the doc
 /// contains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum MenuKindFilter {
     #[default]
     All,

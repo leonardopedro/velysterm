@@ -59,6 +59,14 @@ pub struct MathDoc {
     pub(crate) text: LoroText,
     undo: UndoManager,
     pub(crate) mirror: String,
+    /// Monotonic counter bumped on every *text* mutation (insert,
+    /// delete, undo, redo). Frontends memoize expensive doc-derived
+    /// state (the marker scan / segment resolution, content keys)
+    /// against it: an unchanged revision proves the text is
+    /// byte-identical, so the memo stays valid without re-hashing or
+    /// re-parsing. Only text mutations bump it — reads, marks, and
+    /// commits never do.
+    revision: u64,
 }
 
 impl Default for MathDoc {
@@ -85,6 +93,7 @@ impl MathDoc {
             text,
             undo,
             mirror,
+            revision: 0,
         }
     }
 
@@ -123,6 +132,14 @@ impl MathDoc {
         self.mirror.is_empty()
     }
 
+    /// Monotonic text-revision counter (see the field docs): bumped
+    /// exactly when the visible text changes, never on reads or
+    /// marks. Two snapshots with equal revisions have identical
+    /// text.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     pub fn insert(&mut self, at: usize, s: &str) -> ByteDelta {
         assert!(
             self.mirror.is_char_boundary(at),
@@ -134,6 +151,7 @@ impl MathDoc {
                 .expect("loro insert_utf8 failed");
             self.mirror.insert_str(at, s);
             self.validate_mirror();
+            self.revision += 1;
         }
         ByteDelta {
             range: at..at,
@@ -152,6 +170,7 @@ impl MathDoc {
                 .expect("loro delete_utf8 failed");
             self.mirror.replace_range(range.clone(), "");
             self.validate_mirror();
+            self.revision += 1;
         }
         ByteDelta {
             range,
@@ -207,6 +226,7 @@ impl MathDoc {
         let did = self.undo.undo().unwrap_or(false);
         self.mirror = self.text.to_string();
         if did {
+            self.revision += 1;
             diff_delta(&before, &self.mirror)
         } else {
             None
@@ -219,6 +239,7 @@ impl MathDoc {
         let did = self.undo.redo().unwrap_or(false);
         self.mirror = self.text.to_string();
         if did {
+            self.revision += 1;
             diff_delta(&before, &self.mirror)
         } else {
             None
@@ -531,5 +552,73 @@ mod tests {
         d.clear_segment_marks();
         d.commit();
         assert_eq!(d.segment_marks(), vec![]);
+    }
+
+    #[test]
+    fn revision_bumps_exactly_on_text_mutations() {
+        let mut d = MathDoc::new();
+        assert_eq!(d.revision(), 0);
+        // Reads never bump.
+        let _ = d.text();
+        let _ = d.len();
+        d.commit();
+        let _ = d.segment_marks();
+        assert_eq!(d.revision(), 0);
+        // Insert bumps; a no-op (empty) insert does not.
+        d.insert(0, "ab");
+        assert_eq!(d.revision(), 1);
+        d.insert(2, "");
+        assert_eq!(d.revision(), 1);
+        // Delete bumps; an empty delete does not. `replace` funnels
+        // through delete + insert, so it bumps twice.
+        d.delete(0..1);
+        assert_eq!(d.revision(), 2);
+        d.delete(1..1);
+        assert_eq!(d.revision(), 2);
+        d.replace(0..1, "xyz");
+        assert_eq!(d.revision(), 4);
+        // replace_many funnels through replace: the delete-only op
+        // bumps once (delete; its empty insert bumps nothing), the
+        // second op bumps twice (delete + insert). 4 + 1 + 2 = 7.
+        d.replace_many(vec![
+            ReplaceOp {
+                range: 2..3,
+                with: String::new(),
+            },
+            ReplaceOp {
+                range: 0..1,
+                with: "q".to_owned(),
+            },
+        ]);
+        assert_eq!(d.revision(), 7);
+        // A fresh snapshot starts at 0 again (document identity is
+        // new).
+        let bytes = d.snapshot();
+        let d2 = MathDoc::from_snapshot(&bytes).unwrap();
+        assert_eq!(d2.revision(), 0);
+        assert_eq!(d2.text(), d.text());
+    }
+
+    #[test]
+    fn revision_bumps_on_undo_redo_only_when_text_moves() {
+        let mut d = MathDoc::with_text("base");
+        d.commit();
+        let at_base = d.revision();
+        d.insert(4, " plus");
+        d.commit();
+        assert!(d.revision() > at_base);
+        // Undo returns to the exact base text; redo replays it.
+        let rev_after_insert = d.revision();
+        d.undo().expect("undo produced a change");
+        assert!(d.revision() > rev_after_insert);
+        let rev_after_undo = d.revision();
+        d.undo(); // nothing left to undo
+        assert_eq!(d.revision(), rev_after_undo);
+        d.redo().expect("redo produced a change");
+        assert!(d.revision() > rev_after_undo);
+        let rev_after_redo = d.revision();
+        d.redo(); // nothing left to redo
+        assert_eq!(d.revision(), rev_after_redo);
+        assert_eq!(d.text(), "base plus");
     }
 }
