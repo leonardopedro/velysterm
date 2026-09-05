@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             i += 2;
                         }
                         other => {
-                            return Err(format!("unexpected --run-all argument `{other}`").into())
+                            return Err(format!("unexpected --run-all argument `{other}`").into());
                         }
                     }
                 }

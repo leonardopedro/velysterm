@@ -1065,7 +1065,8 @@ impl KernelBridge {
         loop {
             let mut added = false;
             for (&off, &src) in &self.from_edges {
-                let (Some(&b), Some(&sb)) = (self.stmt_blocks.get(&off), self.stmt_blocks.get(&src))
+                let (Some(&b), Some(&sb)) =
+                    (self.stmt_blocks.get(&off), self.stmt_blocks.get(&src))
                 else {
                     continue;
                 };
@@ -1235,9 +1236,9 @@ fn resolve_from_offset(
     // A segment's span starts just AFTER its first (opening) marker
     // token, so the marker's byte range END is the anchor.
     let pos = markers.iter().find(|m| m.id == from)?.range.end;
-    let target = segments
-        .iter()
-        .find(|seg| seg.kind == PropKind::Exec && seg.span.as_ref().map(|s| s.start) == Some(pos))?;
+    let target = segments.iter().find(|seg| {
+        seg.kind == PropKind::Exec && seg.span.as_ref().map(|s| s.start) == Some(pos)
+    })?;
     target.span.as_ref().map(|s| s.start)
 }
 

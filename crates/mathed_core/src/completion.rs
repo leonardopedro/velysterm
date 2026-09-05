@@ -13,7 +13,6 @@
 
 use std::ops::Range;
 
-
 pub use crate::tables::{COMPLETIONS, CompletionEntry};
 
 /// A pending completion: replace `replace` with `with`; `preview` is

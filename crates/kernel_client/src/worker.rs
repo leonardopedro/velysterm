@@ -331,7 +331,9 @@ impl KernelWorker {
                 timeout_ms,
                 cap_bytes,
                 stdin,
-            } => self.handle_exec(block_id, command, args, grants, timeout_ms, cap_bytes, stdin),
+            } => self.handle_exec(
+                block_id, command, args, grants, timeout_ms, cap_bytes, stdin,
+            ),
             KernelRequest::Shutdown => {
                 unreachable!("run() breaks on Shutdown before dispatching")
             }
@@ -469,8 +471,7 @@ impl KernelWorker {
         } else {
             cmd.stdin(Stdio::piped());
         }
-        let mut child = match cmd.spawn()
-        {
+        let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
                 self.audit_exec(Some(grant.to_string()), &command, "failed");
@@ -1129,7 +1130,13 @@ mod tests {
         // N7: `cat` with piped stdin echoes it back — the pipe seam
         // works end to end through the worker.
         let h = Harness::with_grants(&["readonly"]);
-        let resp = h.send(exec_request_with_stdin(6, "cat", &[], "readonly", "piped\n"));
+        let resp = h.send(exec_request_with_stdin(
+            6,
+            "cat",
+            &[],
+            "readonly",
+            "piped\n",
+        ));
         match resp {
             BlockResponse::Exec(id, out) => {
                 assert_eq!(id, 6);

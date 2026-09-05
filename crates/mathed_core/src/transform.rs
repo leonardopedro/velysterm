@@ -2475,9 +2475,7 @@ mod tests {
     fn splice_points_are_grapheme_boundaries() {
         use crate::markers::{resolve_segments, scan};
         let family = "\u{1F469}\u{1F3FB}\u{200D}\u{1F52C}"; // 👩🏼‍🔬
-        let doc = format!(
-            "#1 {family} $x$ #2 \\prob(#1,#2)\n\n#3 e\u{301} #4 \\model(#3,#4)\n"
-        );
+        let doc = format!("#1 {family} $x$ #2 \\prob(#1,#2)\n\n#3 e\u{301} #4 \\model(#3,#4)\n");
         let scan = scan(&doc);
         let segments = resolve_segments(&scan);
         // Splice at each kernel statement's body end: annotation +
@@ -2508,6 +2506,10 @@ mod tests {
         }
         // The doc's multibyte runs survive the render whole.
         assert!(out.text.contains(family), "ZWJ family intact: {}", out.text);
-        assert!(out.text.contains("e\u{301}"), "combining base intact: {}", out.text);
+        assert!(
+            out.text.contains("e\u{301}"),
+            "combining base intact: {}",
+            out.text
+        );
     }
 }

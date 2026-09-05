@@ -351,10 +351,7 @@ pub fn ascii_of(glyph: char) -> Option<&'static str> {
 /// [`ascii_of`] with per-document overrides applied first — the
 /// `--mappings` overlay seam (U7): `glyph → ascii form` wins over
 /// the canonical table.
-pub fn ascii_of_overridden(
-    glyph: char,
-    overrides: &HashMap<char, String>,
-) -> Option<String> {
+pub fn ascii_of_overridden(glyph: char, overrides: &HashMap<char, String>) -> Option<String> {
     if let Some(a) = overrides.get(&glyph) {
         return Some(a.clone());
     }
