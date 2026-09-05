@@ -415,6 +415,31 @@ impl App {
         self.request_redraw();
     }
 
+    /// Re-run every row's block (Shift+Enter in the kernel menu) —
+    /// the notebook "run all" affordance from the list, scoped to the
+    /// menu's rows (each distinct block once, in order). Same refresh
+    /// contract as [`Self::run_kernel_menu_selected`].
+    fn run_all_kernel_menu(&mut self) {
+        let text = self.doc.text().to_string();
+        let Some(rows) = self.kernel_menu.clone() else {
+            return;
+        };
+        let mut any = false;
+        for block in crate::kernel_menu::blocks_to_run(&rows) {
+            any |= self.bridge.run_block(&text, block);
+        }
+        if any {
+            self.invalidate_annotations();
+        }
+        self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
+        self.kernel_menu = Some(crate::kernel_menu::rows_for_doc(
+            &text,
+            self.bridge.results(),
+            &self.bridge.stale_blocks(),
+        ));
+        self.request_redraw();
+    }
+
     /// Re-run the selected row's block (Enter in the kernel menu) —
     /// the notebook "run cell" affordance from the list. The menu
     /// stays open and its rows are recomputed, so the status column
@@ -1406,7 +1431,8 @@ impl App {
         // TUI text that wraps instead of clipping — drawn top-left;
         // Esc dismisses. Derived state; never touches the document.
         if let Some(rows) = &self.kernel_menu {
-            let markup = crate::kernel_menu::rows_markup(rows, self.kernel_menu_selected);
+            let mut markup = crate::kernel_menu::rows_markup(rows, self.kernel_menu_selected);
+            markup.push_str(&crate::kernel_menu::footer_hint_markup(rows.len()));
             if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
                 blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
             }
@@ -2038,10 +2064,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     Key::Named(NamedKey::Enter) => {
                         // Kernel menu: Enter re-runs the selected
-                        // row's block and refreshes the rows (the
-                        // menu stays open so the status updates).
+                        // row's block; Shift+Enter re-runs every
+                        // row's block (the menu's run-all). Rows are
+                        // refreshed either way, so the status column
+                        // updates live (the menu stays open).
                         if self.kernel_menu.is_some() {
-                            self.run_kernel_menu_selected();
+                            if self.mods.shift_key() {
+                                self.run_all_kernel_menu();
+                            } else {
+                                self.run_kernel_menu_selected();
+                            }
                             return;
                         }
                         if self.mods.control_key() && self.mods.shift_key() {

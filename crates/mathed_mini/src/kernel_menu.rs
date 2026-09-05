@@ -12,8 +12,10 @@
 //! `[block N] kind: snippet — status`, where status is the region
 //! verdict (`✓ stdout`, `✓ = value`, `✗ UK-code`, `· not run`, with a
 //! `(stale)` marker when the block's displayed output is out of
-//! date). Enter re-runs that row's block; Esc closes; Up/Down move
-//! the selection.
+//! date). Enter re-runs that row's block, Shift+Enter re-runs every
+//! row's block (the menu's "run all" — [`blocks_to_run`] is the
+//! shared block set both paths act on, so they can never drift
+//! apart); Esc closes; Up/Down move the selection.
 
 use mathed_core::markers::PropKind;
 use mathed_core::semantics::SemanticIndex;
@@ -153,10 +155,35 @@ pub fn rows_for_doc(
         .collect()
 }
 
+/// The ordered, deduplicated block list the menu's rows cover — the
+/// exact set the menu's "run all" (Shift+Enter) re-runs. Both the
+/// per-row Enter path (one block) and the run-all path derive from
+/// the same rows, so run-all can never drift from what the menu
+/// shows.
+pub fn blocks_to_run(rows: &[KernelMenuRow]) -> Vec<usize> {
+    let mut blocks: Vec<usize> = rows.iter().map(|r| r.block).collect();
+    blocks.sort_unstable();
+    blocks.dedup();
+    blocks
+}
+
+/// The dimmed one-line footer under the rows (a static hint — no
+/// user content, so no escaping needed), returned as ready markup
+/// the caller appends to the rows' markup block.
+pub fn footer_hint_markup(rows_len: usize) -> String {
+    let hint = if rows_len == 0 {
+        "no exec/kernel blocks — esc to close".to_string()
+    } else {
+        "enter: run block · shift+enter: run all · esc: close".to_string()
+    };
+    format!("#text(fill: rgb(\"#808080\"))[{hint}]\n")
+}
+
 /// The whole menu as one reflowable markup block: one escaped row per
 /// line, the selected row marked `▸` (green), the others `·` — drawn
 /// through the shared renderer at the window width, so long rows wrap
-/// instead of clipping (TUI-like but reflowable).
+/// instead of clipping (TUI-like but reflowable). The caller appends
+/// [`footer_hint_markup`] for the dimmed action hint line.
 pub fn rows_markup(rows: &[KernelMenuRow], selected: usize) -> String {
     let mut out = String::new();
     for (i, row) in rows.iter().enumerate() {
@@ -244,6 +271,48 @@ mod tests {
         stale_results.insert(off, KernelResult::StringValue("stale value\n".to_string()));
         let rows = rows_for_doc(doc, &stale_results, &[0]);
         assert!(rows[0].text.contains("✓ stale value (stale)"), "{rows:?}");
+    }
+
+    #[test]
+    fn blocks_to_run_dedups_and_orders_the_menus_blocks() {
+        fn row(block: usize) -> KernelMenuRow {
+            KernelMenuRow {
+                block,
+                offset: block * 10,
+                text: String::new(),
+            }
+        }
+        // Two rows may share a block (heading + its exec), and the
+        // rows arrive in document order, not block order: run-all
+        // must re-run each distinct block exactly once, in order.
+        let rows = vec![row(0), row(2), row(0), row(1)];
+        assert_eq!(blocks_to_run(&rows), vec![0, 1, 2]);
+        assert_eq!(blocks_to_run(&[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn footer_hint_stays_inside_the_reflowable_markup_block() {
+        let doc = "= A\n\
+                   #1 echo hi #2 \\exec(#1,#2, grants: \"readonly\")\n";
+        let rows = rows_for_doc(doc, &HashMap::new(), &[]);
+        // The app composes footer + rows into one markup block: it
+        // must stay parseable (no escaping gaps) and the footer must
+        // name the run-all action.
+        let mut markup = rows_markup(&rows, 0);
+        markup.push_str(&footer_hint_markup(rows.len()));
+        let parsed = typst::syntax::parse(&markup);
+        let (errors, _) = parsed.errors_and_warnings();
+        assert!(errors.is_empty(), "menu + footer parses: {errors:?}");
+        assert!(
+            markup.contains("shift+enter: run all"),
+            "footer advertises the run-all action: {markup}"
+        );
+        // An empty menu still draws a footer (never a bare overlay).
+        let empty = footer_hint_markup(0);
+        assert!(
+            empty.contains("no exec/kernel blocks"),
+            "empty-menu hint: {empty}"
+        );
     }
 
     #[test]
