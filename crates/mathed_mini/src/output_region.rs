@@ -48,18 +48,30 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
             .get(offset)
             .map(|ms| format!(" · {ms} ms"))
             .unwrap_or_default();
-        let line = match result {
+        match result {
             KernelResult::Value(p) => {
                 // Escape `=` so Typst does not read it as a heading.
-                format!("#text(rgb(\"#138000\"))[\\\\= {p:.4}{timing}]")
+                lines.push(format!("#text(rgb(\"#138000\"))[\\\\= {p:.4}{timing}]"));
             }
             KernelResult::StringValue(s) => {
                 // N9: NDJSON rows render as a Typst table (the
                 // notebook rich-output role); plain text stays the
                 // green StringValue line.
                 match rows_table(s) {
-                    Some(table) => table,
-                    None => format!("#text(rgb(\"#138000\"))[{s}{timing}]"),
+                    Some(table) => lines.push(table),
+                    None => lines.push(format!("#text(rgb(\"#138000\"))[{s}{timing}]")),
+                }
+            }
+            // Rich media: the accompanying text keeps the green line,
+            // then each payload renders as a captioned figure (the
+            // region's reference-style media list).
+            KernelResult::Rich { text, outputs } => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    lines.push(format!("#text(rgb(\"#138000\"))[{trimmed}{timing}]"));
+                }
+                for (mime, data) in outputs {
+                    lines.push(rich_media_line(mime, data));
                 }
             }
             KernelResult::Error {
@@ -73,12 +85,31 @@ fn region_lines(outputs: &[(usize, KernelResult)], timings: &HashMap<usize, u64>
                 } else {
                     format!(" — {hint}")
                 };
-                format!("#text(rgb(\"#c00000\"))[{code_name}: {message}{hint_part}{timing}]")
+                lines.push(format!(
+                    "#text(rgb(\"#c00000\"))[{code_name}: {message}{hint_part}{timing}]"
+                ));
             }
-        };
-        lines.push(line);
+        }
     }
     lines
+}
+
+/// Typst markup for one rich-media payload: a captioned figure that
+/// embeds the payload as a `data:` URL (`data:<mime>;base64,…`),
+/// resolved by `MiniWorld` and rasterized by `typst_imaging` — the
+/// reference-style treatment: each media output is a figure with a
+/// caption (mime · decoded size), never raw bytes or source in the
+/// text. Payloads are base64 per the Jupyter convention; the image
+/// reflows to the region width like any block.
+fn rich_media_line(mime: &str, data: &str) -> String {
+    let size = crate::kernel_bridge::human_bytes(crate::kernel_bridge::b64_decoded_len(data));
+    // `alt` is a plain string (a11y), the caption is content, the
+    // payload embeds as a data URL the world resolves. Base64 is
+    // inert inside the string literal, so a payload can never open
+    // Typst syntax.
+    format!(
+        "#figure(numbering: none, caption: [#text(9pt, fill: rgb(\"#666666\"))[{mime} · {size}]], alt: \"{mime} · {size}\", [#image(\"data:{mime};base64,{data}\", width: 100%)])\n"
+    )
 }
 
 /// N9: parse an exec's stdout as NDJSON rows — every non-empty line
@@ -288,5 +319,62 @@ mod tests {
     fn region_image_empty_markup_is_none() {
         assert!(region_image("", 600.0).is_none());
         assert!(region_image("   \n  ", 600.0).is_none());
+    }
+
+    #[test]
+    fn rich_media_region_renders_captioned_figures() {
+        // The rich-MIME path: the accompanying text stays the green
+        // line, each image payload becomes a captioned `#figure` that
+        // embeds the payload as a `data:` URL (mime · decoded size).
+        let outputs = vec![(
+            10,
+            KernelResult::Rich {
+                text: "plot ready\n".to_string(),
+                outputs: vec![("image/png".to_string(), "iVBORw0KGgo".to_string())],
+            },
+        )];
+        let m = region_markup(&outputs);
+        assert!(m.contains("plot ready"), "accompanying text kept: {m}");
+        assert!(m.contains("#figure("), "media renders as a figure: {m}");
+        assert!(
+            m.contains("#image(\"data:image/png;base64,iVBORw0KGgo\""),
+            "payload embedded as a data URL: {m}"
+        );
+        assert!(
+            m.contains("image/png · 8 B"),
+            "caption names mime + decoded size: {m}"
+        );
+        assert!(
+            m.contains("width: 100%"),
+            "reflows to the region width: {m}"
+        );
+        // The whole region parses as Typst (the payload string can
+        // never break out — base64 is inert inside quotes).
+        let parsed = typst::syntax::parse(&m);
+        let (errors, _) = parsed.errors_and_warnings();
+        assert!(errors.is_empty(), "rich region parses: {errors:?}");
+    }
+
+    #[test]
+    fn rich_media_region_rasterizes_through_typst_imaging() {
+        // End-to-end: a real PNG payload rendered as a `data:` URL
+        // through `MiniWorld` + `typst_imaging` paints actual pixels
+        // in the region image — the editor's MIME display path.
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+        let outputs = vec![(
+            10,
+            KernelResult::Rich {
+                text: String::new(),
+                outputs: vec![("image/png".to_string(), png_b64.to_string())],
+            },
+        )];
+        let m = region_markup(&outputs);
+        let img = region_image(&m, 600.0).expect("rich region renders");
+        assert!(img.width > 0 && img.height > 0, "region has size");
+        let painted = img
+            .data
+            .chunks_exact(4)
+            .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
+        assert!(painted, "figure painted the png");
     }
 }

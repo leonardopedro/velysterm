@@ -208,6 +208,14 @@ fn result_json(result: &crate::kernel_bridge::KernelResult) -> serde_json::Value
         crate::kernel_bridge::KernelResult::StringValue(s) => {
             serde_json::json!({ "string": s })
         }
+        crate::kernel_bridge::KernelResult::Rich { text, outputs } => serde_json::json!({
+            "rich": {
+                "text": text,
+                "outputs": outputs.iter().map(|(mime, data)| {
+                    serde_json::json!({ "mime": mime, "data": data })
+                }).collect::<Vec<_>>(),
+            }
+        }),
         crate::kernel_bridge::KernelResult::Error {
             code_name,
             message,
@@ -258,6 +266,30 @@ fn kernel_output(result: &crate::kernel_bridge::KernelResult) -> Option<serde_js
             "name": "stdout",
             "text": jup_lines(s),
         })),
+        // Rich media: one `execute_result` whose data dict carries
+        // the accompanying text as `text/plain` (Jupyter's own
+        // convention — the plain repr sits next to the rich ones)
+        // plus every payload under its mime — the faithful nbformat
+        // shape.
+        crate::kernel_bridge::KernelResult::Rich { text, outputs } => {
+            let mut data = serde_json::Map::new();
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                data.insert(
+                    "text/plain".to_string(),
+                    serde_json::Value::String(trimmed.to_string()),
+                );
+            }
+            for (mime, payload) in outputs {
+                data.insert(mime.clone(), serde_json::Value::String(payload.clone()));
+            }
+            Some(serde_json::json!({
+                "output_type": "execute_result",
+                "execution_count": null,
+                "metadata": {},
+                "data": data,
+            }))
+        }
         crate::kernel_bridge::KernelResult::Value(p) => Some(serde_json::json!({
             "output_type": "execute_result",
             "execution_count": null,
@@ -1246,6 +1278,37 @@ mod tests {
         // The folded result is still there for the record's region
         // shape (backward compatible).
         assert_eq!(run["result"]["string"], "= 0.5\n");
+    }
+
+    #[test]
+    fn rich_media_shapes_in_record_and_nbformat_output() {
+        // The Rich fold serializes two ways: the notebook record's
+        // `result` carries { text, outputs: [{mime, data}] } (the
+        // verbatim payloads), and the nbformat projection maps it to
+        // one execute_result whose data dict holds text/plain
+        // alongside every media mime — Jupyter's own shape.
+        use crate::kernel_bridge::KernelResult;
+        let r = KernelResult::Rich {
+            text: "plot ready\n".to_string(),
+            outputs: vec![("image/png".to_string(), "iVBORw0KGgo".to_string())],
+        };
+        let rec = result_json(&r);
+        assert_eq!(rec["rich"]["text"], "plot ready\n");
+        assert_eq!(rec["rich"]["outputs"][0]["mime"], "image/png");
+        assert_eq!(rec["rich"]["outputs"][0]["data"], "iVBORw0KGgo");
+        let out = kernel_output(&r).expect("rich has an output");
+        assert_eq!(out["output_type"], "execute_result");
+        assert_eq!(out["data"]["text/plain"], "plot ready");
+        assert_eq!(out["data"]["image/png"], "iVBORw0KGgo");
+        // A payload-only run (no accompanying text) drops the empty
+        // text/plain entry.
+        let silent = KernelResult::Rich {
+            text: String::new(),
+            outputs: vec![("image/png".to_string(), "aGk=".to_string())],
+        };
+        let out = kernel_output(&silent).expect("output");
+        assert!(out["data"].get("text/plain").is_none(), "{out}");
+        assert_eq!(out["data"]["image/png"], "aGk=");
     }
 
     #[test]

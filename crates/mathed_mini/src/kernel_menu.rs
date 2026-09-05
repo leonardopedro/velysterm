@@ -113,6 +113,14 @@ fn status(result: Option<&KernelResult>, block_stale: bool) -> String {
                 format!("✓ {head}")
             }
         }
+        // Rich media: the menu lists each payload as its own
+        // reference row, so the statement row's status stays short.
+        Some(KernelResult::Rich { outputs, .. }) => {
+            format!(
+                "✓ {}",
+                outputs.first().map(|(m, _)| m.as_str()).unwrap_or("media")
+            )
+        }
         None if block_stale => "· stale — run to update".to_string(),
         None => "· not run".to_string(),
     };
@@ -179,7 +187,7 @@ pub fn rows_for_doc_with(
     idx.kernel_statements
         .iter()
         .filter(|s| is_menu_statement(s.kind) && filter.allows(s.kind))
-        .map(|s| {
+        .flat_map(|s| {
             let block = block_of(s.span.start);
             let tag = match s.kind {
                 PropKind::Kernel => match s.lang.as_deref() {
@@ -190,7 +198,7 @@ pub fn rows_for_doc_with(
             };
             let body = snippet(&s.body_text);
             let kind_and_body = if body.is_empty() {
-                tag
+                tag.to_string()
             } else {
                 format!("{tag}: {body}")
             };
@@ -200,11 +208,37 @@ pub fn rows_for_doc_with(
                 kind_and_body,
                 status(results.get(&s.span.start), stale.contains(&block))
             );
-            KernelMenuRow {
+            let mut rows = vec![KernelMenuRow {
                 block,
                 offset: s.span.start,
                 text: esc_text(&text),
+            }];
+            // Rich media rows: every image payload a statement
+            // displayed becomes its own citation-style reference row
+            // under the statement (the same block re-runs). `✓`
+            // means the figure rendered; `(stale)` mirrors the region
+            // when the block's output is out of date.
+            if let Some(KernelResult::Rich { outputs, .. }) = results.get(&s.span.start) {
+                let stale_mark = if stale.contains(&block) {
+                    " (stale)"
+                } else {
+                    ""
+                };
+                for (mime, data) in outputs {
+                    let size = crate::kernel_bridge::human_bytes(
+                        crate::kernel_bridge::b64_decoded_len(data),
+                    );
+                    rows.push(KernelMenuRow {
+                        block,
+                        offset: s.span.start,
+                        text: esc_text(&format!(
+                            "[block {}] {}: {mime} · {size} — ✓ figure{stale_mark}",
+                            block, tag
+                        )),
+                    });
+                }
             }
+            rows
         })
         .collect()
 }
@@ -413,6 +447,65 @@ mod tests {
         assert!(MenuKindFilter::All.allows(PropKind::Kernel));
         assert!(!MenuKindFilter::Exec.allows(PropKind::Kernel));
         assert!(!MenuKindFilter::Kernel.allows(PropKind::Exec));
+    }
+
+    #[test]
+    fn rich_media_becomes_citation_style_reference_rows() {
+        let doc = "= A\n\
+                   #1 echo hi #2 \\exec(#1,#2, grants: \"readonly\")\n\n\
+                   #3 2 + 2 #4 \\kernel(#3,#4, lang: \"mathed\", grants: \"kernel\")\n";
+        let (idx, _blocks) = idx_for(doc);
+        let exec_off = idx
+            .kernel_statements
+            .iter()
+            .find(|s| s.kind == PropKind::Exec)
+            .expect("exec")
+            .span
+            .start;
+        let mut results = HashMap::new();
+        results.insert(
+            exec_off,
+            KernelResult::Rich {
+                text: "plot ready\n".to_string(),
+                outputs: vec![
+                    ("image/png".to_string(), "iVBORw0KGgo".to_string()),
+                    ("image/svg+xml".to_string(), "PHN2Zz4=".to_string()),
+                ],
+            },
+        );
+        let rows = rows_for_doc(doc, &results, &[]);
+        // Statement row + one reference row per payload, in order.
+        assert_eq!(rows.len(), 4, "statement + 2 media + kernel: {rows:?}");
+        assert!(
+            rows[0].text.contains("exec: echo hi — ✓ image/png"),
+            "statement row names the media status: {rows:?}"
+        );
+        assert!(
+            rows[1].text.contains("exec: image/png · 8 B — ✓ figure"),
+            "first media reference row: {rows:?}"
+        );
+        assert!(
+            rows[2]
+                .text
+                .contains("exec: image/svg+xml · 5 B — ✓ figure"),
+            "second media reference row: {rows:?}"
+        );
+        assert!(
+            rows[3].text.contains("kernel[mathed]: 2 + 2"),
+            "kernel row still listed: {rows:?}"
+        );
+        // The kernel-menu run-all set still dedups to the same blocks
+        // (media rows share their statement's block).
+        assert_eq!(blocks_to_run(&rows), vec![0, 1]);
+        // A stale block marks the media rows too (mirrors the region).
+        let rows = rows_for_doc(doc, &results, &[0]);
+        assert!(rows[1].text.contains("(stale)"), "{rows:?}");
+        // The whole list still parses as one reflowable markup block.
+        let mut markup = rows_markup(&rows, 0);
+        markup.push_str(&footer_hint_markup(rows.len(), MenuKindFilter::All));
+        let parsed = typst::syntax::parse(&markup);
+        let (errors, _) = parsed.errors_and_warnings();
+        assert!(errors.is_empty(), "menu with media rows parses: {errors:?}");
     }
 
     #[test]

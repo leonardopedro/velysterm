@@ -71,9 +71,17 @@ the doc stays the source of truth).
 - **Rich kernel MIME** — a real kernel's `display_data`/`execute_result`
   data dict keeps every string-valued payload (`text/plain` first,
   then `image/png`, `text/html`, …) through the run log, `ctx.kernel`,
-  and the `.ipynb` projection; the TUI region renders `text/plain` as
-  text and the rich payloads as a terse size marker (`[image/png ·
-  12 kB]`) — payloads are never dropped, base64/HTML is never dumped
+  and the `.ipynb` projection. The region **renders the media**: an
+  `image/*` payload displays as a captioned Typst `#figure` whose
+  `#image("data:<mime>;base64,…")` is resolved by `MiniWorld` and
+  rasterized by `typst_imaging` (the same CPU pipeline as the doc —
+  no GPU, no file access; the data URL *is* the payload). The
+  accompanying text stays a green line above the figures, each
+  caption names `mime · decoded size`, and the citation-style kernel
+  menu (`Ctrl+K`) lists every figure as its own reference row
+  (`[block n] exec: image/png · 12 kB — ✓ figure`). Non-image rich
+  MIME (`text/html`) and payloads over 1 MiB keep the terse size
+  marker — payloads are never dropped, base64/HTML is never dumped
   into region text.
 
 ## Input + interchange (U-series)

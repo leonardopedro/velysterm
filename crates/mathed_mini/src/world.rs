@@ -19,6 +19,30 @@ use typst::utils::{LazyHash, Protected};
 use typst::{Library, LibraryExt, World};
 use typst_layout::layout_frame as typst_layout_frame;
 
+/// Decode a `data:` URL the way the minimal world resolves image
+/// payloads: `data:<mime>;base64,<data>` → the raw bytes. Only the
+/// base64 form is supported (the Jupyter convention for binary MIME
+/// payloads); anything else returns `None` so the caller falls back
+/// to the normal `AccessDenied` file error. `None` is also returned
+/// for a valid base64 payload that is empty.
+pub(crate) fn decode_data_url(s: &str) -> Option<Bytes> {
+    let rest = s.strip_prefix("data:")?;
+    // `data:<mime>;base64,<data>` — the mime part is informational;
+    // Typst detects the image format from the decoded bytes.
+    let (params, payload) = rest.split_once(',')?;
+    if !params.ends_with(";base64") {
+        return None;
+    }
+    if payload.is_empty() {
+        return None;
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    Some(Bytes::new(decoded))
+}
+
 /// Load every font embedded in `typst-assets` into a book + slot
 /// list.
 fn load_fonts() -> (FontBook, Vec<Font>) {
@@ -173,8 +197,18 @@ impl World for MiniWorld {
         }
     }
 
-    fn file(&self, _id: FileId) -> FileResult<Bytes> {
-        // No external files in the minimal frontend.
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        // Data-URL images — the kernel MIME payloads rendered as
+        // `#image("data:image/png;base64,…")` — resolve here: the
+        // path string *is* the payload, so no filesystem access is
+        // involved. Everything else stays denied in the minimal
+        // frontend.
+        // The path arrives root-joined (`"/data:image/png;base64,…"`)
+        // — strip the leading slash before matching the scheme.
+        let path = id.vpath().get_with_slash().trim_start_matches('/');
+        if let Some(bytes) = decode_data_url(path) {
+            return Ok(bytes);
+        }
         Err(FileError::AccessDenied)
     }
 
@@ -184,5 +218,59 @@ impl World for MiniWorld {
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 1×1 opaque red PNG, base64-encoded (Jupyter's payload
+    /// convention for `image/png`).
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn decode_data_url_only_accepts_base64_payloads() {
+        let ok = decode_data_url("data:image/png;base64,AAAA");
+        assert!(ok.is_some(), "base64 data url decodes");
+        // The mime part is informational — only the base64 flag
+        // decides.
+        assert!(decode_data_url("data:application/octet-stream;base64,AAAA").is_some());
+        // URL-encoded (non-base64) data URLs are not supported.
+        assert!(
+            decode_data_url("data:image/png,hello").is_none(),
+            "raw (non-base64) payload refused"
+        );
+        // Junk base64 and empty payloads are refused.
+        assert!(decode_data_url("data:image/png;base64,!?!?").is_none());
+        assert!(decode_data_url("data:image/png;base64,").is_none());
+        // A non-data path is refused (never escapes to the fs).
+        assert!(decode_data_url("../etc/passwd").is_none());
+    }
+
+    #[test]
+    fn decode_data_url_round_trips_binary_payloads() {
+        let bytes = decode_data_url(&format!("data:image/png;base64,{TINY_PNG_B64}"))
+            .expect("png data url");
+        // 1×1 PNG: 70 raw bytes.
+        assert_eq!(bytes.len(), 70, "decoded png is 70 bytes");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "png magic");
+    }
+
+    #[test]
+    fn render_markup_embeds_data_url_images_through_typst_imaging() {
+        // The full pipeline the output region uses: a `#image` with a
+        // `data:` URL inside markup must lay out through `MiniWorld`
+        // (the data URL resolves in `World::file`) and rasterize via
+        // `typst_imaging` into real pixels — proving kernel MIME
+        // payloads render without any file access.
+        let markup = format!("#image(\"data:image/png;base64,{TINY_PNG_B64}\", width: 40pt)\n");
+        let img = crate::render::render_markup(&markup, 200.0).expect("renders");
+        // The 1×1 png scaled to 40pt wide must paint actual pixels.
+        let opaque = img
+            .data
+            .chunks_exact(4)
+            .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
+        assert!(opaque, "data-url image painted pixels");
     }
 }

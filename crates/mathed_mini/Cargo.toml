@@ -15,6 +15,9 @@ typst_imaging = { workspace = true }
 # into TermSpec/ModelSpec (P3 #10). Serde types only — no Bevy, no solver.
 unfer_protocol = { path = "../../../unfer/unfer_protocol" }
 serde_json = "1.0"
+# Data-URL image payloads (`#image("data:image/png;base64,…")`)
+# resolved by the minimal world — already in the lockfile.
+base64 = "0.22"
 
 # The probability kernel client (worker thread + Session). Pulls prob_kernel
 # (P3 #11: wire kernel_client into mathed_mini) so a \prob computes a real

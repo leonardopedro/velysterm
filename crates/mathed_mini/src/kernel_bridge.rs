@@ -46,6 +46,19 @@ pub enum KernelResult {
     Value(f64),
     /// A string result (DID, CID) from federation ops (C12).
     StringValue(String),
+    /// Rich media a kernel run displayed (`image/png`, `image/svg+xml`,
+    /// …): the Jupyter rich-repr of the result. The region renders
+    /// each payload as a Typst `#figure` via
+    /// `#image("data:<mime>;base64,…")` (resolved by `MiniWorld`,
+    /// rasterized by `typst_imaging`), while the run log keeps the
+    /// verbatim outputs for the record / `ctx.kernel` / `.ipynb`
+    /// consumers. `text` is the stream / `text/plain` output that
+    /// accompanied the media (rendered above the figures, so a plot
+    /// with progress output keeps both).
+    Rich {
+        text: String,
+        outputs: Vec<(String, String)>,
+    },
     /// An error: a short code/name, a human-readable message, and
     /// zero or more machine-readable [`RepairHint`]s (the
     /// Zero-language agent surface — a concrete fix the
@@ -64,6 +77,19 @@ pub enum KernelResult {
 /// result into that UK error (errors win: a failed run shows its
 /// failure, not a partial stream). v1 keeps the region's
 /// one-result-per-statement contract.
+/// Cap on one rich-media payload (decoded bytes) the region will
+/// rasterize: bigger payloads keep the terse size marker so the CPU
+/// renderer never decodes a monster image (a 1 MiB PNG can already
+/// represent millions of pixels).
+const RICH_MEDIA_MAX_BYTES: usize = 1024 * 1024;
+
+/// Approximate decoded size of a base64 payload (Jupyter's encoding
+/// for binary MIME): the pad-stripped length × 3/4, exact per
+/// base64 quantum.
+pub(crate) fn b64_decoded_len(s: &str) -> usize {
+    s.trim_end_matches('=').len() * 3 / 4
+}
+
 fn fold_kernel_outputs(outputs: &[kernel_client::KernelOutput]) -> KernelResult {
     use kernel_client::KernelOutput;
     if let Some(KernelOutput::Error { ename, evalue, .. }) = outputs
@@ -77,30 +103,45 @@ fn fold_kernel_outputs(outputs: &[kernel_client::KernelOutput]) -> KernelResult 
         };
     }
     let mut text = String::new();
+    let mut rich: Vec<(String, String)> = Vec::new();
     for o in outputs {
         match o {
             KernelOutput::Stream { text: t, .. } => text.push_str(t),
-            // `text/plain` results display as their text; every other
-            // MIME payload — the rich outputs a real kernel's
-            // display_data carries — is kept verbatim in the run
-            // record / `ctx.kernel` / `.ipynb` projection but shows a
-            // terse marker in the region (dumping base64 or HTML
-            // source into TUI text helps nobody).
+            // `text/plain` results display as their text. Image
+            // payloads — a real kernel's `display_data` rich repr —
+            // are carried into [`KernelResult::Rich`] so the region
+            // renders them as media (never base64 or HTML source
+            // dumped into TUI text); the verbatim outputs stay on the
+            // run record / `ctx.kernel` / `.ipynb` consumers.
             KernelOutput::Result { mime, data } if mime == "text/plain" => {
                 text.push_str(data);
                 text.push('\n');
             }
+            KernelOutput::Result { mime, data }
+                if mime.starts_with("image/") && b64_decoded_len(data) <= RICH_MEDIA_MAX_BYTES =>
+            {
+                rich.push((mime.clone(), data.clone()));
+            }
+            // Non-image rich MIME (`text/html`, …) and oversized
+            // images keep the terse size marker.
             KernelOutput::Result { mime, data } => {
                 text.push_str(&format!("[{mime} · {}]\n", human_bytes(data.len())));
             }
             KernelOutput::Error { .. } => {}
         }
     }
-    KernelResult::StringValue(text)
+    if rich.is_empty() {
+        KernelResult::StringValue(text)
+    } else {
+        KernelResult::Rich {
+            text,
+            outputs: rich,
+        }
+    }
 }
 
 /// A byte count rendered for the region's rich-MIME markers.
-fn human_bytes(n: usize) -> String {
+pub(crate) fn human_bytes(n: usize) -> String {
     if n < 1024 {
         format!("{n} B")
     } else if n < 1024 * 1024 {
@@ -281,6 +322,13 @@ impl KernelBridge {
                     KernelResult::StringValue(s) => {
                         format!(" #text(rgb(\"#138000\"))[{s}]")
                     }
+                    // Rich media: a terse inline marker (the media
+                    // itself renders in the block's output region, not
+                    // inline in the body).
+                    KernelResult::Rich { outputs, .. } => {
+                        let m = outputs.first().map(|(m, _)| m.as_str()).unwrap_or("media");
+                        format!(" #text(rgb(\"#138000\"))[ [{m}]]")
+                    }
                     KernelResult::Error { code_name, .. } => {
                         format!(" #text(rgb(\"#c00000\"))[ {code_name}]")
                     }
@@ -316,6 +364,20 @@ impl KernelBridge {
                         s.clone()
                     } else {
                         format!("{label}: {s}")
+                    }
+                }
+                // Rich media: a footer summary of the payloads
+                // (mime · size), e.g. `image/png · 12 kB`.
+                KernelResult::Rich { outputs, .. } => {
+                    let summary = outputs
+                        .iter()
+                        .map(|(m, d)| format!("{m} · {}", human_bytes(b64_decoded_len(d))))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if label.is_empty() {
+                        summary
+                    } else {
+                        format!("{label}: {summary}")
                     }
                 }
                 KernelResult::Error { code_name, .. } => {
@@ -3236,14 +3298,16 @@ esac
     }
 
     #[test]
-    fn rich_mime_results_mark_in_the_region_but_stay_verbatim_on_the_log() {
+    fn rich_mime_images_fold_to_media_while_text_stays_text() {
         use kernel_client::KernelOutput;
         // A real kernel's display_data may carry image/png or
         // text/html payloads alongside text/plain: the region fold
-        // renders the text/plain as text and the rich payloads as a
-        // terse size marker (never base64 or HTML source dumped into
-        // TUI text) — the verbatim payloads live on the run-log
-        // entry for the record / ctx / .ipynb consumers.
+        // keeps the text/plain + streams as text, carries the image
+        // payload into `Rich` (rendered as media — never base64
+        // dumped into TUI text), and leaves non-image rich MIME
+        // (`text/html`) as a terse size marker. The verbatim outputs
+        // still live on the run-log entry for the record / ctx /
+        // .ipynb consumers.
         let html = format!("<b>{}</b>", "x".repeat(5000));
         let folded = fold_kernel_outputs(&[
             KernelOutput::Result {
@@ -3260,23 +3324,48 @@ esac
             },
         ]);
         match &folded {
-            KernelResult::StringValue(s) => {
-                assert!(s.contains("n = 2"), "text/plain renders: {s:?}");
+            KernelResult::Rich { text, outputs } => {
+                assert!(text.contains("n = 2"), "text/plain renders: {text:?}");
                 assert!(
-                    s.contains("[image/png · 11 B]"),
-                    "png marker with size: {s:?}"
+                    text.contains("[text/html · 4.9 kB]"),
+                    "html marker with size: {text:?}"
                 );
                 assert!(
-                    s.contains("[text/html · 4.9 kB]"),
-                    "html marker with size: {s:?}"
+                    !text.contains("iVBOR"),
+                    "base64 never dumped into text: {text:?}"
                 );
-                assert!(!s.contains("iVBOR"), "base64 never dumped: {s:?}");
-                assert!(!s.contains("<b>"), "html source never dumped: {s:?}");
+                assert!(!text.contains("<b>"), "html source never dumped: {text:?}");
+                assert_eq!(
+                    outputs,
+                    &[("image/png".to_string(), "iVBORw0KGgo".to_string())],
+                    "image payload carried verbatim for media rendering"
+                );
             }
-            other => panic!("expected StringValue fold, got {other:?}"),
+            other => panic!("expected Rich fold, got {other:?}"),
         }
         // The payloads themselves are untouched for the rich
         // consumers (the fold only shapes the region's one result).
         assert_eq!(html.len(), 5007, "payload kept as built");
+    }
+
+    #[test]
+    fn oversized_image_payloads_keep_the_size_marker() {
+        use kernel_client::KernelOutput;
+        // The region rasterizes rich media on the CPU: a payload over
+        // the cap must not reach the renderer — it folds back to the
+        // terse size marker (the verbatim payload is still on the run
+        // log).
+        let big_b64 = "A".repeat(RICH_MEDIA_MAX_BYTES * 2);
+        let folded = fold_kernel_outputs(&[KernelOutput::Result {
+            mime: "image/png".to_string(),
+            data: big_b64.clone(),
+        }]);
+        match &folded {
+            KernelResult::StringValue(s) => {
+                assert!(s.contains("[image/png · 2.0 MB]"), "marker: {s:?}");
+            }
+            other => panic!("oversized image must stay a marker, got {other:?}"),
+        }
+        assert_eq!(big_b64.len(), RICH_MEDIA_MAX_BYTES * 2, "payload kept");
     }
 }

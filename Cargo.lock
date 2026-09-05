@@ -5837,6 +5837,7 @@ dependencies = [
  "accesskit 0.21.1",
  "accesskit_winit 0.29.2",
  "arboard",
+ "base64",
  "imaging",
  "imaging_vello_cpu",
  "kernel_client",
