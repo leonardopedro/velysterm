@@ -593,43 +593,74 @@ pub struct ReferencesEntry {
 /// `active_translator_span` in mathed_mini). Segments with
 /// `span: None` (dangling) are excluded.
 ///
-/// The tag is derived from the *rendered* body (markers hidden, cite
-/// labels spliced) so inner markers and property statements don't
-/// pollute it. The body is treated as a self-contained doc and run
-/// through [`crate::transform::to_render_text`], the same way the
-/// cite-popup body is re-laid out for recursive expansion.
+/// Derive one [`ReferencesEntry`] for a segment whose span contains
+/// the cursor, from the owning document text. The tag is derived
+/// from the *rendered* body (markers hidden, cite labels spliced)
+/// so inner markers and property statements don't pollute it; the
+/// body is treated as a self-contained doc and run through
+/// [`crate::transform::to_render_text`], the same way the cite-
+/// popup body is re-laid out for recursive expansion. `None` when
+/// the segment has no span. Consumers that can prove an entry is
+/// unchanged by range (the references panel's caret-move reuse)
+/// call it only for new ranges.
+pub fn derive_reference_entry(
+    doc_text: &str,
+    seg: &Segment,
+    cursor_byte: usize,
+) -> Option<ReferencesEntry> {
+    let span = seg.span.clone()?;
+    if !(span.start <= cursor_byte && cursor_byte <= span.end) {
+        return None;
+    }
+    let body = &doc_text[span.clone()];
+    // Re-scan and transform the body so inner markers are hidden
+    // and cite labels are spliced before we derive the tag.
+    let body_scan = scan(body);
+    let body_segs = resolve_segments(&body_scan);
+    let body_refs = scan_references(&body_scan);
+    let opts = crate::transform::TransformOptions {
+        references: body_refs,
+        ..Default::default()
+    };
+    let body_rendered = crate::transform::to_render_text(body, &body_scan, &body_segs, &opts).text;
+    Some(ReferencesEntry {
+        tag: derive_tag(&body_rendered),
+        segment_range: span,
+    })
+}
+
+/// The segment-resolved core of [`references_for_cursor`]: the
+/// containing-segment filter plus per-entry derivation, over
+/// pre-resolved segments. Consumers that already hold a
+/// revision-cached parse (the editor's front cache) call this
+/// directly and skip the whole-doc scan entirely; caret motion
+/// then pays only the cheap range filter, and the caller can reuse
+/// derived entries by range instead of re-deriving.
+pub fn references_for_cursor_segments(
+    doc_text: &str,
+    segments: &[Segment],
+    cursor_byte: usize,
+) -> Vec<ReferencesEntry> {
+    segments
+        .iter()
+        .filter_map(|seg| derive_reference_entry(doc_text, seg, cursor_byte))
+        .collect()
+}
+
+/// All marker-defined segments containing `cursor_byte`, each with a
+/// tag derived from its rendered body. The tag is derived from the
+/// *rendered* body (markers hidden, cite labels spliced) so inner
+/// markers and property statements don't pollute it. The body is
+/// treated as a self-contained doc and run through
+/// [`crate::transform::to_render_text`], the same way the cite-
+/// popup body is re-laid out for recursive expansion.
 pub fn references_for_cursor(
     doc_text: &str,
     marker_scan: &MarkerScan,
     cursor_byte: usize,
 ) -> Vec<ReferencesEntry> {
     let segments = resolve_segments(marker_scan);
-    segments
-        .into_iter()
-        .filter_map(|seg| {
-            let span = seg.span?;
-            if !(span.start <= cursor_byte && cursor_byte <= span.end) {
-                return None;
-            }
-            let body = &doc_text[span.clone()];
-            // Re-scan and transform the body so inner markers are
-            // hidden and cite labels are spliced before we derive
-            // the tag.
-            let body_scan = scan(body);
-            let body_segs = resolve_segments(&body_scan);
-            let body_refs = scan_references(&body_scan);
-            let opts = crate::transform::TransformOptions {
-                references: body_refs,
-                ..Default::default()
-            };
-            let body_rendered =
-                crate::transform::to_render_text(body, &body_scan, &body_segs, &opts).text;
-            Some(ReferencesEntry {
-                tag: derive_tag(&body_rendered),
-                segment_range: span,
-            })
-        })
-        .collect()
+    references_for_cursor_segments(doc_text, &segments, cursor_byte)
 }
 
 fn try_parse_marker(text: &str, at: usize) -> Option<Marker> {
@@ -1080,6 +1111,28 @@ mod tests {
             .find(|e| e.segment_range.start == 2 && e.segment_range.end == 8)
             .expect("outer segment present");
         assert_eq!(outer.tag, "x");
+    }
+
+    #[test]
+    fn segments_entry_point_matches_scan_entry_point() {
+        // The references panel calls the segment-resolved core
+        // (`references_for_cursor_segments`) with the editor's
+        // revision-cached parse; the public scan-taking API is a
+        // thin wrapper that resolves segments itself. Pin that the
+        // two entry points can never drift: same doc, same caret,
+        // identical entries — including nested segments and a caret
+        // inside both.
+        let doc = "#1 a #2 b #3 \\bold(#1,#3) \\italic(#2,#3) tail";
+        let s = scan(doc);
+        let segments = resolve_segments(&s);
+        for cursor in [0, 3, 9, 15, doc.len()] {
+            let via_scan = references_for_cursor(doc, &s, cursor);
+            let via_segments = references_for_cursor_segments(doc, &segments, cursor);
+            assert_eq!(
+                via_segments, via_scan,
+                "cursor {cursor}: segments entry diverged from scan entry"
+            );
+        }
     }
 
     // ── U1: Unicode collision & boundary pins ──────────────────

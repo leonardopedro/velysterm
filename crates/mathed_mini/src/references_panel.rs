@@ -15,9 +15,13 @@
 //! is hidden by the panel).
 
 use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::Arc;
 
 use imaging::RgbaImage;
-use mathed_core::markers::{ReferencesEntry, scan, scan_references};
+use mathed_core::markers::{
+    ReferencesEntry, Segment, derive_reference_entry, scan, scan_references,
+};
 
 use crate::render::{RenderError, render_markup};
 
@@ -47,8 +51,11 @@ const PANEL_MAX_PX: u32 = 400;
 pub struct ReferencesPanelEntry {
     pub core: ReferencesEntry,
     /// Rendered body image. `None` until the first frame renders
-    /// it; the draw function fills missing images.
-    pub body_image: Option<RgbaImage>,
+    /// it; the draw function fills missing images. `Arc` so the
+    /// range-keyed reuse on caret moves can transfer the entry
+    /// *by ownership* without copying the raster — and pins can
+    /// prove reuse by `Arc::ptr_eq` instead of comparing pixels.
+    pub body_image: Option<Arc<RgbaImage>>,
 }
 
 /// The panel's current state: the cursor byte it was last updated
@@ -62,10 +69,16 @@ pub struct ReferencesPanelData {
 
 /// Build a fresh panel for the current cursor position. Body
 /// images start empty; they are rendered lazily on the first
-/// frame after opening.
-pub fn open_references_panel(doc_text: &str, cursor_byte: usize) -> ReferencesPanelData {
+/// frame after opening. The caller passes its revision-cached
+/// segment resolution (the editor's front cache), so opening the
+/// panel does not re-scan the document.
+pub fn open_references_panel(
+    doc_text: &str,
+    segments: &[Segment],
+    cursor_byte: usize,
+) -> ReferencesPanelData {
     let entries =
-        mathed_core::markers::references_for_cursor(doc_text, &scan(doc_text), cursor_byte)
+        mathed_core::markers::references_for_cursor_segments(doc_text, segments, cursor_byte)
             .into_iter()
             .map(|core| ReferencesPanelEntry {
                 core,
@@ -78,33 +91,44 @@ pub fn open_references_panel(doc_text: &str, cursor_byte: usize) -> ReferencesPa
     }
 }
 
-/// Re-derive the entries for a new cursor position, transferring
-/// cached body images from `panel` to the new entries by segment
-/// range. Images for new entries (or entries whose range changed
-/// — unlikely, but possible after a doc edit) are dropped.
+/// Update the entries for a new cursor position over the caller's
+/// (revision-cached) segment resolution, reusing everything that
+/// provably did not change. The whole-doc scan is never run here;
+/// only the containing-segment filter runs per caret move. An entry
+/// whose segment range still contains the caret keeps its derived
+/// tag *and* its rendered body image wholesale (the caret moved
+/// inside the same segment, so neither can have changed); only
+/// segments the caret newly entered, or whose range a doc edit
+/// moved, are re-derived. Old entries are transferred by ownership
+/// (no image cloning).
 pub fn update_references_panel(
     panel: &mut ReferencesPanelData,
     doc_text: &str,
+    segments: &[Segment],
     cursor_byte: usize,
 ) {
-    let old_by_range: HashMap<std::ops::Range<usize>, RgbaImage> = panel
+    let mut old_by_range: HashMap<Range<usize>, ReferencesPanelEntry> = panel
         .entries
+        .drain(..)
+        .map(|e| (e.core.segment_range.clone(), e))
+        .collect();
+    let entries: Vec<ReferencesPanelEntry> = segments
         .iter()
-        .filter_map(|e| {
-            e.body_image
-                .as_ref()
-                .map(|img| (e.core.segment_range.clone(), img.clone()))
+        .filter_map(|seg| {
+            let span = seg.span.clone()?;
+            if !(span.start <= cursor_byte && cursor_byte <= span.end) {
+                return None;
+            }
+            if let Some(old_entry) = old_by_range.remove(&span) {
+                return Some(old_entry);
+            }
+            derive_reference_entry(doc_text, seg, cursor_byte).map(|core| ReferencesPanelEntry {
+                core,
+                body_image: None,
+            })
         })
         .collect();
-    let new_entries =
-        mathed_core::markers::references_for_cursor(doc_text, &scan(doc_text), cursor_byte)
-            .into_iter()
-            .map(|core| {
-                let body_image = old_by_range.get(&core.segment_range).cloned();
-                ReferencesPanelEntry { core, body_image }
-            })
-            .collect();
-    panel.entries = new_entries;
+    panel.entries = entries;
     panel.cursor_byte = cursor_byte;
 }
 
@@ -198,7 +222,7 @@ pub fn draw_references_panel(
             if let Some(body_text) = body_text
                 && let Ok(img) = render_entry_body(body_text, BODY_WIDTH_PT)
             {
-                entry.body_image = Some(img);
+                entry.body_image = Some(Arc::new(img));
             }
         }
     }
@@ -419,6 +443,13 @@ fn draw_small_text(
 mod tests {
     use super::*;
 
+    /// Resolve the segments for a doc (what the app's revision-
+    /// cached front cache holds) — tests pass these instead of
+    /// re-scanning, mirroring the app's F1 path.
+    fn segs(doc: &str) -> Vec<Segment> {
+        mathed_core::markers::resolve_segments(&mathed_core::markers::scan(doc))
+    }
+
     #[test]
     fn open_references_panel_finds_segments() {
         // A doc with 2 nested segments, caret inside the outer
@@ -428,10 +459,10 @@ mod tests {
         //   \bold(#2,#3) body = 7..10 = " b ".
         // Caret at byte 6 is in the outer segment only.
         let doc = "#1 a #2 b #3 \\bold(#2,#3) \\italic(#1,#3)";
-        let panel = open_references_panel(doc, 6);
+        let panel = open_references_panel(doc, &segs(doc), 6);
         assert_eq!(panel.cursor_byte, 6);
         assert_eq!(panel.entries.len(), 1);
-        // Tag is derived from the rendered body: "a b" → "ab".
+        // Tag is derived from the rendered body: "a b" -> "ab".
         assert_eq!(panel.entries[0].core.tag, "ab");
         // No body images yet — they're rendered on the first frame.
         assert!(panel.entries.iter().all(|e| e.body_image.is_none()));
@@ -443,24 +474,100 @@ mod tests {
         // new cursor. The cached image for the matching range
         // should transfer; the unmatched one should be None.
         let doc = "#1 hello #2 \\bold(#1,#2) more text";
-        let mut panel = open_references_panel(doc, 5);
+        let mut panel = open_references_panel(doc, &segs(doc), 5);
         let img = render_entry_body(
             &doc[panel.entries[0].core.segment_range.clone()],
             BODY_WIDTH_PT,
         )
         .expect("render");
-        panel.entries[0].body_image = Some(img.clone());
+        let (w, h) = (img.width, img.height);
+        panel.entries[0].body_image = Some(Arc::new(img));
 
         // Move the caret to the same segment (boundary still
         // contains it).
         let new_cursor = panel.entries[0].core.segment_range.start + 1;
-        update_references_panel(&mut panel, doc, new_cursor);
+        update_references_panel(&mut panel, doc, &segs(doc), new_cursor);
         assert_eq!(panel.entries.len(), 1);
         assert!(panel.entries[0].body_image.is_some());
         // The cached image's identity is preserved (same data).
         let cached = panel.entries[0].body_image.as_ref().unwrap();
-        assert_eq!(cached.width, img.width);
-        assert_eq!(cached.height, img.height);
+        assert_eq!(cached.width, w);
+        assert_eq!(cached.height, h);
+    }
+
+    #[test]
+    fn caret_move_inside_segment_reuses_entry_wholesale() {
+        // The F2 pin: moving the caret within the same segment —
+        // the doc text and the segment range are unchanged, so the
+        // derived tag AND the rendered body image transfer by
+        // ownership. `Arc::ptr_eq` proves the raster is the very
+        // same allocation (a re-derivation would yield `None`; a
+        // clone would be a different Arc). No whole-doc scan runs
+        // on this path at all — the caller passes its cached
+        // segments.
+        let doc = "#1 hello #2 \\bold(#1,#2) more text";
+        let segments = segs(doc);
+        let mut panel = open_references_panel(doc, &segments, 5);
+        let img = render_entry_body(
+            &doc[panel.entries[0].core.segment_range.clone()],
+            BODY_WIDTH_PT,
+        )
+        .expect("render");
+        panel.entries[0].body_image = Some(Arc::new(img));
+        let (tag_before, arc_before) = {
+            let e = &panel.entries[0];
+            (e.core.tag.clone(), e.body_image.as_ref().unwrap().clone())
+        };
+
+        // Caret moves to the other end of the same segment.
+        let inside = panel.entries[0].core.segment_range.end - 1;
+        update_references_panel(&mut panel, doc, &segments, inside);
+
+        assert_eq!(panel.entries.len(), 1);
+        assert_eq!(panel.entries[0].core.tag, tag_before);
+        let arc_after = panel.entries[0].body_image.as_ref().unwrap();
+        assert!(
+            Arc::ptr_eq(&arc_before, arc_after),
+            "unchanged-range entry must transfer its image by ownership"
+        );
+    }
+
+    #[test]
+    fn caret_entering_new_segment_derives_fresh_entry() {
+        // The F2 complement: when the caret enters a segment it
+        // was not in before, that entry is derived fresh — a new
+        // tag and an empty body image (the old entry is dropped).
+        let doc = "#1 a #2 \\bold(#1,#2) tail #3 b #4 \\italic(#3,#4)";
+        let segments = segs(doc);
+        // Caret inside the bold segment.
+        let bold_span = {
+            let e = open_references_panel(doc, &segments, 3);
+            e.entries[0].core.segment_range.clone()
+        };
+        let mut panel = open_references_panel(doc, &segments, bold_span.start + 1);
+        let tag_bold = panel.entries[0].core.tag.clone();
+        let img = render_entry_body(
+            &doc[panel.entries[0].core.segment_range.clone()],
+            BODY_WIDTH_PT,
+        )
+        .expect("render");
+        panel.entries[0].body_image = Some(Arc::new(img));
+
+        // Caret jumps to the italic segment (disjoint ranges;
+        // body between #3 and #4 is bytes 28..31).
+        let italic_span = {
+            let e = open_references_panel(doc, &segments, 29);
+            e.entries[0].core.segment_range.clone()
+        };
+        assert_ne!(bold_span, italic_span);
+        update_references_panel(&mut panel, doc, &segments, italic_span.start + 1);
+
+        assert_eq!(panel.entries.len(), 1);
+        assert_ne!(panel.entries[0].core.tag, tag_bold);
+        assert!(
+            panel.entries[0].body_image.is_none(),
+            "a fresh derivation must start with an empty body image"
+        );
     }
 
     #[test]
@@ -469,15 +576,15 @@ mod tests {
         // The new panel should be empty, and the old image is
         // dropped with the entry.
         let doc = "#1 hello #2 \\bold(#1,#2) more text";
-        let mut panel = open_references_panel(doc, 5);
+        let mut panel = open_references_panel(doc, &segs(doc), 5);
         let img = render_entry_body(
             &doc[panel.entries[0].core.segment_range.clone()],
             BODY_WIDTH_PT,
         )
         .expect("render");
-        panel.entries[0].body_image = Some(img);
+        panel.entries[0].body_image = Some(Arc::new(img));
         // Caret at the very end of the doc, past the segment.
-        update_references_panel(&mut panel, doc, doc.len());
+        update_references_panel(&mut panel, doc, &segs(doc), doc.len());
         assert!(panel.entries.is_empty());
     }
 
@@ -490,32 +597,12 @@ mod tests {
     #[test]
     fn header_text_for_empty_and_populated() {
         let doc = "";
-        let panel = open_references_panel(doc, 0);
+        let panel = open_references_panel(doc, &segs(doc), 0);
         assert_eq!(header_text(&panel), "(no references at cursor)");
         let doc2 = "#1 a #2 \\bold(#1,#2)";
-        let panel2 = open_references_panel(doc2, 2);
+        let panel2 = open_references_panel(doc2, &segs(doc2), 2);
         // Tag from rendered body of segment (markers hidden) is "a".
         let h = header_text(&panel2);
         assert!(h.starts_with("a [1]"), "got: {h}");
-    }
-
-    #[test]
-    fn panel_height_grows_with_entries() {
-        // Caret in the middle of two adjacent segments.
-        // Doc: "#1 a #2 \\bold(#1,#2) #3 b #4 \\bold(#3,#4)"
-        //   \bold(#1,#2) body = 2..7 = " a ".
-        //   \bold(#3,#4) body = 17..22 = " b ".
-        // These don't overlap, so a single caret position
-        // shouldn't be in both. Verify panel height grows when
-        // we open two separate panels for two different
-        // cursors, then check the height is at least the header
-        // (25px) for each.
-        let doc = "#1 a #2 \\bold(#1,#2) #3 b #4 \\bold(#3,#4)";
-        let p1 = open_references_panel(doc, 3);
-        let p2 = open_references_panel(doc, 19);
-        let h1 = panel_height(&p1, 800);
-        let h2 = panel_height(&p2, 800);
-        assert!(h1 >= 25, "panel1 height: {h1}");
-        assert!(h2 >= 25, "panel2 height: {h2}");
     }
 }

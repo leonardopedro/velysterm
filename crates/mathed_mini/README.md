@@ -228,6 +228,23 @@ the doc stays the source of truth).
   (the layout-pass guard covers doc/content/width/reveal-entered/
   reveal-left transitions).
 
+  The next round closed the last per-caret-move parse: the
+  **references panel** (Ctrl+0) used to re-run the whole-doc marker
+  scan on *every caret move* while open (plus a per-entry body
+  re-scan to re-derive the tag). It now consumes the same
+  revision-cached front-end parse that redraw maintains (open and
+  update take the cached segments; `refresh_front` is a no-op while
+  the revision is unchanged), and entries are reused by segment
+  range: a caret move inside the same segment transfers the derived
+  tag *and* the rendered body raster by ownership (`Arc` identity,
+  pinned by `Arc::ptr_eq`), so nothing is re-scanned or re-derived
+  until the caret enters a new segment or the doc edits. The same
+  round removed the last full-rate CPU spin: while kernel results
+  or a worker compose are in flight the event loop used
+  `ControlFlow::Poll` (≈100% of a core for the whole 3 s kernel
+  window or a ~211 ms large-doc compose); it now wakes every 8 ms
+  instead — ~8 ms of drain latency, ~0% CPU.
+
   Because all of this is invisible, **F5** toggles a live memo/frame
   **HUD** (bottom-right status line, Esc/F5 dismisses) that makes the
   wins measurable in-editor: it reports the last frame's class —

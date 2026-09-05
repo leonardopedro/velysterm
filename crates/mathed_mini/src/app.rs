@@ -76,6 +76,15 @@ use mathed_core::transform::TransformOptions;
 /// models resolve in milliseconds; this bounds the busy-poll window.
 const KERNEL_POLL_WINDOW: Duration = Duration::from_secs(3);
 
+/// Wake-up granularity while kernel results or a worker doc-preview
+/// compose are in flight. `ControlFlow::Poll` would spin the event
+/// loop at full rate (≈100% of a core) for the whole window — up to
+/// 3 s for a stalled kernel, or ~211 ms for a large-doc compose.
+/// Waking every 8 ms instead costs ~8 ms of drain latency, which is
+/// imperceptible (a frame is 16 ms), and turns the spin into ~0%
+/// CPU.
+const POLL_GRANULARITY: Duration = Duration::from_millis(8);
+
 type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
 /// Custom event type for the winit event loop — wraps AccessKit
@@ -756,15 +765,26 @@ impl App {
     /// new entries. The height cap uses the current window height
     /// (or 800 as a default if the window isn't created yet).
     fn update_references_panel(&mut self) {
-        if let Some(panel) = self.references_panel.as_mut() {
-            update_references_panel_data(panel, self.doc.text(), self.caret);
-            let win_h = self
-                .window
-                .as_ref()
-                .map(|w| w.inner_size().height as usize)
-                .unwrap_or(800);
-            self.references_panel_height = references_panel_height(panel, win_h);
+        if self.references_panel.is_none() {
+            return;
         }
+        // F1: reuse the revision-cached front-end parse — the same
+        // cache redraw's memo pre-pass maintains (`refresh_front` is
+        // a no-op while the doc revision is unchanged). A caret move
+        // with the panel open no longer re-scans the whole document;
+        // only the containing-segment filter and the range-keyed
+        // entry reuse run (see `references_panel`).
+        let rev = self.doc.revision();
+        let text = cached_doc_text(&mut self.text_cache, rev, self.doc.text());
+        self.refresh_front(&text, rev);
+        let panel = self.references_panel.as_mut().unwrap();
+        update_references_panel_data(panel, &text, &self.front_segments, self.caret);
+        let win_h = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().height as usize)
+            .unwrap_or(800);
+        self.references_panel_height = references_panel_height(panel, win_h);
     }
 
     /// Hook called from every caret-move/edit path: resets the
@@ -803,7 +823,17 @@ impl App {
             self.references_panel = None;
             self.references_panel_height = 0;
         } else {
-            self.references_panel = Some(open_references_panel(self.doc.text(), self.caret));
+            // F1: open off the revision-cached parse too, so opening
+            // the panel adds no scan beyond the one redraw already
+            // did for this revision.
+            let rev = self.doc.revision();
+            let text = cached_doc_text(&mut self.text_cache, rev, self.doc.text());
+            self.refresh_front(&text, rev);
+            self.references_panel = Some(open_references_panel(
+                &text,
+                &self.front_segments,
+                self.caret,
+            ));
             // Force a redraw with the panel open; the height will
             // be recomputed on the first frame.
             self.invalidate_doc();
@@ -3380,12 +3410,15 @@ impl ApplicationHandler<UserEvent> for App {
         // (the next blink redraw repaints without it).
         self.expire_status_flash();
 
-        // Busy-poll while kernel work or a worker preview compose is
-        // in flight (so a finished compose is drained promptly, not on
-        // the next blink); otherwise wake for the next blink.
+        // While kernel work or a worker preview compose is in
+        // flight, wake every [`POLL_GRANULARITY`] so a finished
+        // compose is drained promptly (not on the next blink) — but
+        // without spinning the event loop at full rate, which
+        // `ControlFlow::Poll` would do for the whole window;
+        // otherwise wake for the next blink.
         event_loop.set_control_flow(
             if self.kernel_deadline.is_some() || self.preview_job.is_some() {
-                ControlFlow::Poll
+                ControlFlow::WaitUntil(now + POLL_GRANULARITY)
             } else {
                 ControlFlow::WaitUntil(self.next_blink)
             },
