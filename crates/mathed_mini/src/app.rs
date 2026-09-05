@@ -110,6 +110,88 @@ struct FrameFp {
     ui: u64,
 }
 
+/// F3: inputs of the last block-layout pass beyond the frame inputs
+/// — the doc revision, the bridge content version, the window width,
+/// and whether reveal was active. Block-layout keys are built from
+/// exactly (doc slice + clamped reveal ranges + per-block
+/// annotations/errors + width), and the annotation/error maps only
+/// move with the content version, so when two non-idle frames match
+/// on all four with reveal empty both times, no key can have moved
+/// and the pass is skipped. Reveal is tracked separately because a
+/// caret entering/leaving a marker changes the clamped reveal ranges
+/// while the other inputs are still.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockPass {
+    doc: u64,
+    content: u64,
+    width: u32,
+    reveal_empty: bool,
+}
+
+/// F3: the skip decision for the block-layout pass (pure, so the
+/// soundness contract is pinned by a test). `true` only when the
+/// previous pass ran on the same doc revision, content version, and
+/// width and reveal is empty now and was empty then — i.e. every
+/// input of every block-layout key is provably unchanged.
+fn can_skip_layout_pass(
+    last: Option<&BlockPass>,
+    doc_rev: u64,
+    content_ver: u64,
+    width: u32,
+    reveal_empty_now: bool,
+) -> bool {
+    last.is_some_and(|p| {
+        p.doc == doc_rev
+            && p.content == content_ver
+            && p.width == width
+            && reveal_empty_now
+            && p.reveal_empty
+    })
+}
+
+/// F1: the owned doc text behind a revision key. An unchanged
+/// revision reuses the cached `Arc` (a refcount bump), so caret-
+/// motion frames stop copying the whole Loro mirror per frame; a
+/// moved revision copies once and re-keys. Complete by construction:
+/// [`MathDoc::revision`] bumps on every text mutation and never on
+/// reads, so a matching revision proves the cached text is the
+/// mirror's current content.
+fn cached_doc_text(cache: &mut Option<(u64, Arc<str>)>, rev: u64, mirror: &str) -> Arc<str> {
+    if let Some((r, t)) = cache
+        && *r == rev
+    {
+        return t.clone();
+    }
+    let t: Arc<str> = Arc::from(mirror);
+    *cache = Some((rev, t.clone()));
+    t
+}
+
+/// F2: content-keyed raster for a caret-anchored preedit overlay
+/// (the IME-composition underline and the ASCII→Unicode completion
+/// preview). These draw at the caret on every caret-visible frame;
+/// before, each was a fresh [`crate::render::render_preedit`] Typst
+/// compile per frame. The raster depends only on the text and the
+/// fixed render width, so it is memoized by content in the shared
+/// store (constant width slot): blink and caret-motion frames blit
+/// the cached raster and a compile happens only when the composed
+/// text actually changes.
+fn preedit_raster(
+    store: &mut crate::memo::MemoStore,
+    site: &'static str,
+    text: &str,
+) -> Option<imaging::RgbaImage> {
+    const WIDTH: u32 = 0; // fixed render width (`DEFAULT_WIDTH_PT`)
+    let key = overlay_memo_key(WIDTH, text);
+    if store.get(site, WIDTH, key).is_none() {
+        match crate::render::render_preedit(text, DEFAULT_WIDTH_PT) {
+            Ok(image) => store.insert(site, WIDTH, key, image),
+            Err(_) => store.remove(site, WIDTH),
+        }
+    }
+    store.image(site, WIDTH).cloned()
+}
+
 /// Content fingerprint of a [`crate::kernel_bridge::KernelResult`]
 /// for the doc-preview memo key: enough to know whether the
 /// rasterized preview (regions, inline annotations) can change. The
@@ -343,6 +425,17 @@ struct App {
     /// [`FrameFp`]). Equal ⇒ every cached raster's inputs are
     /// unchanged ⇒ the pre-pass is skipped and the frame blits.
     last_frame: Option<FrameFp>,
+    /// F1: revision-keyed owned copy of the doc text (see
+    /// [`cached_doc_text`]) — the per-frame mirror copy only happens
+    /// when the revision moved.
+    text_cache: Option<(u64, Arc<str>)>,
+    /// F3: inputs of the last block-layout pass (see [`BlockPass`]).
+    /// `None` before the first redraw.
+    last_pass: Option<BlockPass>,
+    /// F3: `(doc revision, bridge content version, width)` of the
+    /// last region refresh — when unchanged, every cached region is
+    /// still valid and the whole region walk is skipped.
+    region_pass: Option<(u64, u64, u32)>,
     /// (block-based caching — per-block reveal is handled by
     /// `block_layouts` eviction on reveal-block changes and
     /// per-block `TransformOptions` in `redraw`.)
@@ -528,6 +621,9 @@ impl App {
             errors_cache: None,
             footer_markup_cache: None,
             last_frame: None,
+            text_cache: None,
+            last_pass: None,
+            region_pass: None,
             pref_x: None,
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
@@ -700,6 +796,17 @@ impl App {
     /// stale block (N-series N2) gets the "stale — run to update"
     /// banner prepended to its region.
     fn refresh_region_cache(&mut self, width_px: u32) {
+        // F3: region keys consume the block set (moves only with the
+        // doc revision), the block outputs and stale flags (move only
+        // with the bridge content version), and the width — nothing
+        // else. When all three are unchanged since the last refresh
+        // (a caret / blink / reveal-only frame), every cached region
+        // is still valid and the whole walk is skipped.
+        let rev = self.doc.revision();
+        let cv = self.bridge.content_version();
+        if self.region_pass == Some((rev, cv, width_px)) {
+            return;
+        }
         let blocks = self.block_index.blocks.clone();
         let stale = self.bridge.stale_blocks();
         for (idx, block) in blocks.iter().enumerate() {
@@ -740,6 +847,7 @@ impl App {
         let live: std::collections::HashSet<BlockId> =
             self.block_index.blocks.iter().map(|b| b.id).collect();
         self.region_cache.retain(|id, _| live.contains(id));
+        self.region_pass = Some((rev, cv, width_px));
     }
 
     /// T9: toggle the rendered-template preview overlay (Ctrl+P).
@@ -1049,7 +1157,7 @@ impl App {
     /// when a raster exists, `Err` with the composition error
     /// message otherwise (drawn in red).
     fn ensure_doc_preview_raster(&mut self) {
-        let text = self.doc.text().to_string();
+        let text = cached_doc_text(&mut self.text_cache, self.doc.revision(), self.doc.text());
         self.doc_preview = Some(match self.warm_doc_preview_memo(&text) {
             None => Ok(()),
             Some(result) => result,
@@ -2063,63 +2171,104 @@ impl App {
             self.status_flash.is_none() && self.last_frame.as_ref().is_some_and(|f| *f == frame);
 
         if !idle {
-            let text = self.doc.text().to_string();
-            // F1: the front-end parse runs once per edit — an
-            // unchanged doc revision proves the cached scan/segments
-            // are fresh, and the reveal computation reads them
-            // instead of re-scanning the whole document per frame.
-            self.refresh_front(&text, doc_rev);
-            let reveal_span = reveal_span_in(&self.front_scan, &self.front_segments, self.caret);
-            let annotations = self.bridge_annotations();
-            let translator_errors = self.bridge_errors();
-            let reveal_ranges: Vec<Range<usize>> = reveal_span.into_iter().collect();
-
-            // Content-keyed block layouts (F2): a block re-lays out
-            // only when its content fingerprint changed — its doc
-            // slice, its (clamped) reveal ranges, the
-            // annotations/errors inside it, or the window width. An
-            // edit in another block, or a kernel result elsewhere,
-            // keeps this block's raster. Entries whose block id
-            // disappeared (splits/merges/deletions) are pruned.
-            for block in self.block_index.blocks.clone() {
-                let block_reveal =
-                    crate::render::clamp_reveal_to_block(&reveal_ranges, &block.range);
-                let key = block_layout_key(
-                    size.width,
-                    &text,
-                    &block.range,
-                    &block_reveal,
-                    annotations.as_ref(),
-                    translator_errors.as_ref(),
-                );
-                if self
-                    .block_layouts
-                    .get(&block.id)
-                    .is_some_and(|e| e.key == key)
-                {
-                    continue;
-                }
-                let opts = TransformOptions {
-                    reveal: block_reveal,
-                    annotations: annotations.as_ref().clone(),
-                    translator_errors: translator_errors.as_ref().clone(),
-                    ..Default::default()
-                };
-                if let Ok(layout) = crate::render::layout_block(
-                    &text,
-                    &self.front_scan,
-                    &self.front_segments,
-                    &block,
-                    size.width as f64,
-                    &opts,
-                ) {
-                    self.block_layouts
-                        .insert(block.id, crate::memo::BlockLayout { key, layout });
-                }
+            // F3: block layouts are content-keyed over exactly (doc
+            // slice + reveal + per-block annotations/errors + width),
+            // and the per-block annotation/error maps only move with
+            // the bridge's content version — so when the last layout
+            // pass ran on this doc revision, content version, and
+            // width, and reveal was empty both then and now, no
+            // block's key can have changed. A caret-motion frame
+            // (arrow-key autorepeat) therefore skips the layout work
+            // below and blits the cached rasters; only a real content
+            // change (edit / kernel result / resize / reveal
+            // enter-or-leave) re-enters it. Reveal is decided first
+            // because it reads the cached front parse, which is fresh
+            // exactly while the revision is unchanged.
+            let mut reveal_ranges: Vec<Range<usize>> = Vec::new();
+            if self.last_pass.as_ref().is_some_and(|p| {
+                p.doc == doc_rev && p.content == content_ver && p.width == size.width
+            }) {
+                reveal_ranges = reveal_span_in(&self.front_scan, &self.front_segments, self.caret)
+                    .into_iter()
+                    .collect();
             }
-            let live: std::collections::HashSet<BlockId> =
-                self.block_index.blocks.iter().map(|b| b.id).collect();
-            self.block_layouts.retain(|id, _| live.contains(id));
+            let can_skip_layouts = can_skip_layout_pass(
+                self.last_pass.as_ref(),
+                doc_rev,
+                content_ver,
+                size.width,
+                reveal_ranges.is_empty(),
+            );
+            if !can_skip_layouts {
+                // F1: the front-end parse runs once per edit — an
+                // unchanged doc revision proves the cached
+                // scan/segments are fresh, and the reveal
+                // computation reads them instead of re-scanning the
+                // whole document per frame. The doc text itself is
+                // also revision-cached: the copy from the Loro
+                // mirror happens once per edit; caret-motion frames
+                // bump the `Arc` instead.
+                let text = cached_doc_text(&mut self.text_cache, doc_rev, self.doc.text());
+                self.refresh_front(&text, doc_rev);
+                reveal_ranges = reveal_span_in(&self.front_scan, &self.front_segments, self.caret)
+                    .into_iter()
+                    .collect();
+                let annotations = self.bridge_annotations();
+                let translator_errors = self.bridge_errors();
+
+                // Content-keyed block layouts (F2): a block re-lays out
+                // only when its content fingerprint changed — its doc
+                // slice, its (clamped) reveal ranges, the
+                // annotations/errors inside it, or the window width. An
+                // edit in another block, or a kernel result elsewhere,
+                // keeps this block's raster. Entries whose block id
+                // disappeared (splits/merges/deletions) are pruned.
+                for block in self.block_index.blocks.clone() {
+                    let block_reveal =
+                        crate::render::clamp_reveal_to_block(&reveal_ranges, &block.range);
+                    let key = block_layout_key(
+                        size.width,
+                        &text,
+                        &block.range,
+                        &block_reveal,
+                        annotations.as_ref(),
+                        translator_errors.as_ref(),
+                    );
+                    if self
+                        .block_layouts
+                        .get(&block.id)
+                        .is_some_and(|e| e.key == key)
+                    {
+                        continue;
+                    }
+                    let opts = TransformOptions {
+                        reveal: block_reveal,
+                        annotations: annotations.as_ref().clone(),
+                        translator_errors: translator_errors.as_ref().clone(),
+                        ..Default::default()
+                    };
+                    if let Ok(layout) = crate::render::layout_block(
+                        &text,
+                        &self.front_scan,
+                        &self.front_segments,
+                        &block,
+                        size.width as f64,
+                        &opts,
+                    ) {
+                        self.block_layouts
+                            .insert(block.id, crate::memo::BlockLayout { key, layout });
+                    }
+                }
+                let live: std::collections::HashSet<BlockId> =
+                    self.block_index.blocks.iter().map(|b| b.id).collect();
+                self.block_layouts.retain(|id, _| live.contains(id));
+            }
+            self.last_pass = Some(BlockPass {
+                doc: doc_rev,
+                content: content_ver,
+                width: size.width,
+                reveal_empty: reveal_ranges.is_empty(),
+            });
 
             // Footer (results panel), content-keyed (F3a): (markup,
             // width) → raster; result changes and resizes re-layout
@@ -2322,7 +2471,7 @@ impl App {
                 winit::dpi::PhysicalSize::new(1_u32, height.max(1.0) as u32),
             );
             if let Some(preedit) = &self.ime_preedit
-                && let Ok(img) = crate::render::render_preedit(preedit, DEFAULT_WIDTH_PT)
+                && let Some(img) = preedit_raster(&mut self.memo_store, "ime_preedit", preedit)
             {
                 blit_over_bg_clipped(
                     &mut buffer,
@@ -2338,7 +2487,8 @@ impl App {
             // overlay at the caret; the document is untouched until
             // commit (Escape cancels, like IME).
             if let Some(pending) = &self.completion.pending
-                && let Ok(img) = crate::render::render_preedit(&pending.preview, DEFAULT_WIDTH_PT)
+                && let Some(img) =
+                    preedit_raster(&mut self.memo_store, "completion_preview", &pending.preview)
             {
                 blit_over_bg_clipped(
                     &mut buffer,
@@ -3494,6 +3644,93 @@ mod tests {
             block_layout_key(100, doc, &b0, &[], &empty, &empty),
             "same inputs, same key"
         );
+    }
+
+    #[test]
+    fn can_skip_layout_pass_decision() {
+        let p = super::BlockPass {
+            doc: 7,
+            content: 3,
+            width: 1200,
+            reveal_empty: true,
+        };
+        // No prior pass → must run.
+        assert!(!super::can_skip_layout_pass(None, 7, 3, 1200, true));
+        // Everything stable, reveal empty on both frames → skip.
+        assert!(super::can_skip_layout_pass(Some(&p), 7, 3, 1200, true));
+        // Any layout input moved → run.
+        assert!(
+            !super::can_skip_layout_pass(Some(&p), 8, 3, 1200, true),
+            "doc moved"
+        );
+        assert!(
+            !super::can_skip_layout_pass(Some(&p), 7, 4, 1200, true),
+            "content moved"
+        );
+        assert!(
+            !super::can_skip_layout_pass(Some(&p), 7, 3, 1199, true),
+            "width moved"
+        );
+        // Reveal entered → run even though the rest is stable.
+        assert!(
+            !super::can_skip_layout_pass(Some(&p), 7, 3, 1200, false),
+            "reveal entered"
+        );
+        // Reveal left: the previous pass had reveal, so its clamped
+        // ranges coloured the keys → run once to clear them.
+        let q = super::BlockPass {
+            reveal_empty: false,
+            ..p
+        };
+        assert!(
+            !super::can_skip_layout_pass(Some(&q), 7, 3, 1200, true),
+            "reveal left"
+        );
+        // ... and once cleared, the next frame skips again.
+        assert!(super::can_skip_layout_pass(Some(&p), 7, 3, 1200, true));
+    }
+
+    #[test]
+    fn cached_doc_text_reuses_allocation_on_unchanged_revision() {
+        let mut cache: Option<(u64, std::sync::Arc<str>)> = None;
+        let mirror = String::from("hello 世界, some doc text");
+        let a = super::cached_doc_text(&mut cache, 1, &mirror);
+        assert_eq!(&*a, &mirror);
+        // Same revision (a caret-motion frame): the Arc is reused, so
+        // no O(doc) copy happens.
+        let b = super::cached_doc_text(&mut cache, 1, &mirror);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "unchanged revision must reuse the allocation"
+        );
+        // A moved revision (an edit) copies once and re-keys.
+        let c = super::cached_doc_text(&mut cache, 2, &mirror);
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &c),
+            "a moved revision must re-key the cache"
+        );
+        assert_eq!(&*c, &mirror);
+    }
+
+    #[test]
+    fn preedit_raster_compiles_once_per_text_change() {
+        let mut store = crate::memo::MemoStore::new();
+        let text = "composed 中文 input";
+        let a = super::preedit_raster(&mut store, "ime_preedit", text).expect("preedit renders");
+        let b = super::preedit_raster(&mut store, "ime_preedit", text).expect("preedit renders");
+        assert_eq!(a.data, b.data, "same text, same raster");
+        let (hits, compiles, evictions) = store.take_accounting();
+        assert_eq!(compiles, 1, "the same composed text compiles once");
+        assert_eq!(hits, 1, "the second caret-visible frame is a hit");
+        assert_eq!(evictions, 0);
+        // A changed composition re-compiles (fresh text, fresh raster)
+        // instead of serving a stale blit.
+        let c = super::preedit_raster(&mut store, "ime_preedit", "composed 中文 inpuX")
+            .expect("preedit renders");
+        assert_ne!(a.data, c.data, "changed text must re-render");
+        let (hits, compiles, _) = store.take_accounting();
+        assert_eq!(compiles, 1);
+        assert_eq!(hits, 0);
     }
 
     #[test]

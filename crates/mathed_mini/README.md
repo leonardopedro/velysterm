@@ -198,6 +198,29 @@ the doc stays the source of truth).
   kind. The status flash now cleans its memo entry on expiry (it
   used to linger on screen).
 
+  The next round closed the three remaining per-frame costs that
+  survived that guard — the frames where *something* legitimately
+  moved (the caret) but the rasters didn't: **(F1)** the per-frame
+  `doc.text().to_string()` copy from the Loro mirror is gone — the
+  owned text is cached behind the same revision counter, so a
+  caret-motion frame bumps an `Arc` instead of copying the whole
+  document (the copy happens once per real edit). **(F2)** the two
+  caret-anchored overlays — the IME-composition underline and the
+  ASCII→Unicode completion preview — used to run a fresh
+  `render_preedit` Typst compile at their draw sites on every
+  caret-visible frame; both are now content-keyed rasters in the
+  shared store (a blink or caret frame blits, and a compile happens
+  only when the composed text actually changes). **(F3)** when a
+  frame's caret moves but the doc revision, bridge content version,
+  and width are unchanged and reveal is empty, every block-layout
+  and region key is *provably* unchanged (their inputs are exactly
+  those values, plus per-block annotation folds that only move with
+  the content version) — so arrow-key autorepeat skips the whole
+  block-layout loop *and* the region walk, leaving a pure
+  re-blit. The skip decisions are pure functions pinned by tests
+  (the layout-pass guard covers doc/content/width/reveal-entered/
+  reveal-left transitions).
+
 ## Input + interchange (U-series)
 
 Inside math (`$..$`), ASCII sequences complete to Unicode glyphs
