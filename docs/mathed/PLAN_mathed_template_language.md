@@ -1,14 +1,17 @@
 # mathed as a template language — implementation plan
 
-> **Status:** Phase 1 EXECUTED (2026-09-04): U1 + T1–T4 shipped and green —
-> mathed_core 164 / mathed_mini 141 tests, Bevy `mathed` checks clean,
-> `verify-invariants` 9/9 (commits in the as-built log, §6). This document
+> **Status:** Phases 1–3 EXECUTED (2026-09-04/05): U1 + T1–T4 (phase 1),
+> N1–N3 ∥ U2–U4 (phase 2), and T5 (phase 3) all shipped and green —
+> mathed_core 173 / mathed_mini 162 tests, Bevy `mathed` checks clean,
+> `verify-invariants` 9/9 (commits in the as-built logs, §6). N4 is **IN
+> PROGRESS**: its `[SYNC]` UK codes are staged in unfer's `codes.rs`
+> (uncommitted); the agent op + velysterm side remain. This document
 > is the **master entry point** for the full mathed language vision and the
 > authoritative plan for its starter scope: evolving the *existing* mathed
 > document pipeline (`mathed_core` + `mathed_mini`, Plan C C1–C16 green)
-> into a **Typst template language** (Jinja/ERB/XSLT class). Stages T1–T4
+> into a **Typst template language** (Jinja/ERB/XSLT class). Stages T1–T5
 > below are marked ✅ DONE and describe what shipped (as built, with
-> deviations called out); T5–T6 are the remaining starter work. The full
+> deviations called out); T6 is the remaining starter work. The full
 > plan — all three arcs — is §6 (roadmap) plus the sibling plans
 > `PLAN_mathed_utf8_ascii.md` (U-series) and
 > `PLAN_mathed_document_computing.md` (N-series).
@@ -68,8 +71,8 @@ machine semantics.
 ## 2. What exists today (ground truth)
 
 All references are to this repo (`velysterm`); Plan C (C1–C16) is complete
-and green. Test counts (current, after phase 1): mathed_core 164 /
-mathed_mini 141 / mathed 39 / kernel_client 36 / mathed_biblio 11.
+and green. Test counts (current, after phase 3): mathed_core 173 /
+mathed_mini 162 / mathed 39 / kernel_client 36 / mathed_biblio 11.
 
 | Surface | Where | What it gives the template story |
 |---|---|---|
@@ -297,7 +300,18 @@ byte-for-byte); `cargo check -p mathed -p mathed_mini`.
 `.typ` parses with zero syntax errors; `--export-typst` output unchanged for
 template-free docs.
 
-### Stage T5 — Egison matchers as the pattern engine (authoring-time, reusing B9b)
+### Stage T5 — Egison matchers as the pattern engine (authoring-time, reusing B9b) ✅ DONE (`52d2774`)
+
+> **As built:** shipped as an authoring-time tool only, exactly as
+> planned — `tools/mathed_rules/` with the fock_match-style Haskell
+> source (`MathedRules.hs`), golden fixtures (one notation rewrite, one
+> `Eql`-bound fragment selection), `build.sh`/`test.sh`, and a README.
+> Unfer's nix devShell pulls CUDA/cadabra/why3 and is not buildable on
+> this machine, so acceptance stays dev-machine: `test.sh` skips cleanly
+> when the GHC env is absent (env-gated). The Rust side ships an
+> `apply_mathed_rules` seam in `export.rs` that degrades to identity when
+> the binary is not present (+2 mini tests) — `--render-typst` works with
+> and without it.
 
 Per the project constraint, template *pattern matching* uses the Egison
 Template-Haskell matchers already staged — not a new matcher:
@@ -362,8 +376,11 @@ Haskell binary; T6 adds no unit tests.
 
 **As built (actual, phase 1): mathed_core 164, mathed_mini 141** — each
 stage shipped with richer coverage than the deltas above (T1 +3, T3 +2,
-T2 +1 core / +4 mini, T4 +3 mini + round-trip pins). Baselines for the
-remaining stages: **core 164, mini 141**.
+T2 +1 core / +4 mini, T4 +3 mini + round-trip pins). **Phases 2–3 raised
+the baselines to core 173 / mini 162** (T5 itself added +2 mini — the
+`apply_mathed_rules` identity-seam tests; the N/U stages that raised the
+rest are logged in their own plans, §6). Baselines for the remaining
+starter work: **core 173, mini 162**.
 
 ## 6. The full plan: arcs, dependencies, execution order
 
@@ -395,11 +412,11 @@ All three share the same surfaces — they are three views of one model:
 | Phase | Stages | Depends on | Why this order |
 |---|---|---|---|
 | 1 — template foundation | T1 → T4 | — | ✅ EXECUTED (commits in the as-built log below); established `DocumentContext` + the `template_splices` seam, the two seams the other arcs reuse; ends in a working `--render-typst` fixture |
-| 2 — notebook cells | N1 → N3 | T3 seam, existing `KernelBridge` | Block output regions and the run log need only the T3 seam; no new worker ops |
-| 2 — Unicode surface | U2 → U4 | — (independent) | Pure mathed_core/input work; parallel-safe with N1–N3. U1 (boundary fuzz) was pulled forward into phase 1 and is ✅ DONE |
-| 3 — egison rules | T5 | T4 (fixture), existing nix Haskell env | Authoring-time binary; dev-machine only; improves translators the T-series already ships |
-| 4 — scripted execution | N4 | N1–N3 | The `[SYNC]` `exec` op (unfer) is additive to a *proven* dispatch path; needs the owner's cross-repo sign-off |
-| 5 — docs & invariants | T6, U5, N5–N6 | everything above | Each sweeps its arc's DESIGN.md subsection + `verify-invariants` greps |
+| 2 — notebook cells | N1 → N3 | T3 seam, existing `KernelBridge` | ✅ EXECUTED — block output regions, run-block + hash staleness, run log (commits in the as-built log below) |
+| 2 — Unicode surface | U2 → U4 | — (independent) | ✅ EXECUTED — completion engine, cluster-aware editing, ASCII export (commits below). U1 (boundary fuzz) was pulled forward into phase 1 |
+| 3 — egison rules | T5 | T4 (fixture), existing nix Haskell env | ✅ EXECUTED — dev-machine `mathed-rules` source + goldens + scripts; Rust seam degrades to identity |
+| 4 — scripted execution | N4 | N1–N3 | ⏳ IN PROGRESS — `[SYNC]` UK codes 4908–4910 staged in unfer (uncommitted); agent op + velysterm side remain |
+| 5 — docs & invariants | T6, U5, N5–N6 | everything above | Remaining — each sweeps its arc's DESIGN.md subsection + `verify-invariants` greps |
 
 Rules that hold for every stage (Plan C parallel-execution rules):
 
@@ -448,12 +465,41 @@ never persist in the doc text; no editor-side process execution.
   identifiers. Verified end-to-end: a cover template renders doc
   heading/def/overlay-author markup into the `.typ`.
 
-Totals after phase 1: mathed_core 164 tests, mathed_mini 141, Bevy
-`mathed` checks clean, `verify-invariants` 9/9 — these are the baselines
-for every remaining stage (trajectory recalibrated in §5; U1's original
-planned deltas are kept for the record in the U plan). U1 was pulled
-forward into phase 1 and is marked ✅ DONE there; the roadmap's phase 2
-starts at U2.
+### As-built log (phases 2–3 executed 2026-09-05, commits on velysterm main)
+
+- `b479a77` **N1** block output regions (mathed_mini 146). As built:
+  block grouping derives from `split_blocks(doc_text)`, *not* the
+  render-derived `KernelStatement.block` field (reads 0 for every
+  statement in the single-render pipeline); new `output_region.rs`;
+  region cache refreshes only for damaged blocks.
+- `3e822c2` **N2** run-block + hash-derived staleness (mini 150). As
+  built: `Ctrl+Enter` run-block, stale gutter banner, `settle` poll
+  helper so tests drain in-flight responses (see the N plan).
+- `0c3d734` **N3** run log + `--export-json` `"blocks"` record (mini
+  154). As built: worker responses carry no `timing_ms`, so round-trip
+  time is measured client-side from the pending map.
+- `2a7efa3` **U2** ASCII→Unicode completion (core 170 / mini 157):
+  `completion.rs` (pure table + `completion_at`), a mathed_mini
+  preview-overlay controller, and the Bevy hook. Hardened: `insert()`
+  revalidates the pending completion against the current doc before
+  committing (a stale pending never commits a dead range).
+- `3b478c3` **U3** cluster-aware editing (core 173):
+  `prev_cluster_boundary` + `is_combining` in `wordnav.rs`, wired into
+  both frontends' backspace; the boundary proptest forced a mid-char
+  clamp fix.
+- `bd5704c` **U4** `--export-ascii` interchange projection (mini 160).
+- `52d2774` **T5** `tools/mathed_rules/` — Egison source + goldens +
+  scripts + README; env-gated `apply_mathed_rules` seam in `export.rs`
+  (identity when the binary is absent, +2 mini).
+
+Totals after phases 1–3: mathed_core 173 tests, mathed_mini 162, Bevy
+`mathed` checks clean, `verify-invariants` 9/9 — the baselines for every
+remaining stage (N4, T6, U5, N5–N6; trajectories recalibrated in §5 and
+the sibling plans). N4 is IN PROGRESS: its `[SYNC]` UK codes 4908–4910
+(`EXEC_GRANT_DENIED`, `EXEC_COMMAND_DENIED`, `EXEC_FAILED`) are staged in
+`../unfer/unfer_protocol/src/codes.rs` but **uncommitted** — the agent op,
+PROTOCOL.md section, `PropKind::Exec`, dispatch, and tests remain.
+U1's original planned deltas are kept for the record in the U plan.
 
 ## 7. Non-goals and risks
 

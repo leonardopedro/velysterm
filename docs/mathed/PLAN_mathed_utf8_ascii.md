@@ -1,9 +1,10 @@
 # mathed as a UTF-8 extension of ASCII — implementation plan (U-series)
 
-> **Status:** U1 EXECUTED (2026-09-04, `885a411` on velysterm main) — the
-> Unicode boundary fuzz is done and green (as-built note in the stage).
-> U2–U5 remain planned; remaining baselines are mathed_core 164 /
-> mathed_mini 141 tests (phase 1 of the T-series raised them). Arc 2 of
+> **Status:** U1–U4 EXECUTED (2026-09-04/05, commits in the stages below)
+> — boundary fuzz, ASCII→Unicode completion, cluster-aware editing, and
+> the ASCII interchange export are all shipped and green. Only U5 (docs
+> + invariants) remains; current baselines are mathed_core 173 /
+> mathed_mini 162 tests. Arc 2 of
 > the mathed language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
 > and the roadmap section): the mathed text format is **UTF-8 — a strict
 > superset of ASCII** — in which mathematics is first-class: the ASCII
@@ -108,7 +109,16 @@ proptests, +2 token-collision tests, +1 round-trip regression); the
 50k-case proptest run (C8 command) stays under its time budget with the
 larger corpus.
 
-### Stage U2 — ASCII → Unicode math completion (mathed_core + both frontends)
+### Stage U2 — ASCII → Unicode math completion (mathed_core + both frontends) ✅ DONE (`2a7efa3`)
+
+> **As built:** `mathed_core/src/completion.rs` — pure `completion_at`
+> table + matcher (core +6, richer than the +4 plan);
+> `mathed_mini/src/completion_ui.rs` — an IME-style preview-overlay
+> controller (preview/commit/cancel state machine, +3 headless mini
+> tests); Bevy `mathed` wired through `EditorState` (thin hook, `cargo
+> check` clean). Deviation folded in: `insert()` recomputes the pending
+> completion against the current doc before committing, so a stale
+> pending (e.g. after backspace) never commits a dead range.
 
 Property 3, input direction. A pure completion engine in mathed_core,
 frontends are thin hooks — exactly the `auto_marker_token` architecture
@@ -153,7 +163,14 @@ frontends are thin hooks — exactly the `auto_marker_token` architecture
 `->` in math in either frontend shows a preview and commits `→`; typing
 `\alpha` right after a real `\statement` does not corrupt the statement.
 
-### Stage U3 — caret / word-nav / geometry Unicode correctness (mathed_core + mathed_mini)
+### Stage U3 — caret / word-nav / geometry Unicode correctness (mathed_core + mathed_mini) ✅ DONE (`3b478c3`)
+
+> **As built:** wordnav was already char-safe; the real gap was
+> cluster-aware deletion — `prev_cluster_boundary` + `is_combining` added
+> to `wordnav.rs` (+3 core tests, the planned +3), wired into both
+> frontends' backspace with an explicit `commit()`. The boundary proptest
+> forced a mid-char clamp fix in `prev_cluster_boundary` (positions
+> inside a code point clamp to the boundary).
 
 Close the remaining Unicode gaps in the interaction model.
 
@@ -179,7 +196,12 @@ Close the remaining Unicode gaps in the interaction model.
 visually sits mid-glyph on a CJK+combining+math doc in `mathed_mini`
 (gui smoke on dev machine).
 
-### Stage U4 — ASCII interchange export (mathed_mini CLI)
+### Stage U4 — ASCII interchange export (mathed_mini CLI) ✅ DONE (`bd5704c`)
+
+> **As built:** `export_ascii` in `export.rs` + `--export-ascii <file>`
+> CLI arm (+3 mini tests, the planned +3): round-trip stability on the
+> U1 corpus, injective-subset re-import, and exotic-glyph flagging paths
+> all pinned.
 
 Property 3, output direction. The inverse projection: any mathed doc →
 ASCII-only Typst source.
@@ -217,10 +239,13 @@ Planned deltas (kept for the record): mathed_core 146 → 158 (+12: U1 +5,
 U2 +4 core, U3 +3); mathed_mini 116 → 121 (+5: U2 +2, U4 +3). Bevy
 `mathed` unchanged (thin hook only, U2).
 
-**As built / remaining baselines:** U1 shipped at mathed_core 158; the
-T-series phase 1 raised the baseline to **core 164 / mini 141**. The
-remaining U stages therefore land at core 164 → 171 (U2 +4, U3 +3) and
-mini 141 → 146 (U2 +2, U4 +3).
+**As built (phases 1–2):** U1 shipped at core 158; the T-series phase 1
+raised the baseline to core 164 / mini 141. The U-series then shipped at
+**core 173 / mini 162**: U2 core +6 (164→170, richer than the +4 plan)
+and mini +3 (154→157), U3 core +3 (170→173, exactly the +3 plan), U4
+mini +3 (157→160, the +3 plan); the extra mini tests came from the U2
+controller state machine. U5 adds docs only (0 tests). Current baselines:
+**core 173 / mini 162**.
 
 ## 4. Non-goals and risks
 

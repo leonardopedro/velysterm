@@ -1,7 +1,11 @@
 # mathed as a bash/Jupyter-class document-computing environment — implementation plan (N-series)
 
-> **Status:** PLANNED (2026-09-04; baselines refreshed after velysterm
-> phase 1 — mathed_mini 141 tests). No N-stage code changed yet. Arc 3 of
+> **Status:** N1–N3 EXECUTED (2026-09-05, commits in the stages below) —
+> block output regions, run-block + staleness, and the run log are
+> shipped and green. N4 is **IN PROGRESS**: its `[SYNC]` UK codes are
+> staged in unfer (uncommitted); the agent op + velysterm side remain.
+> N5–N6 remain planned. Current baselines: mathed_core 173 /
+> mathed_mini 162 tests. Arc 3 of
 > the mathed language vision (see `docs/mathed/PLAN_mathed_template_language.md`, §1
 > and the roadmap section): a document whose **blocks are cells**, whose
 > semantic segments are **live computations with inline outputs**, and
@@ -82,7 +86,14 @@ Decisions (locked):
 
 ## 2. Stages
 
-### Stage N1 — Block output regions (mathed_mini)
+### Stage N1 — Block output regions (mathed_mini) ✅ DONE (`b479a77`)
+
+> **As built (+5 mini, vs +4 planned):** block grouping derives from
+> `split_blocks(doc_text)` — `KernelStatement.block` is the
+> *render-derived* index and reads 0 for every statement in the
+> single-render pipeline. New `mathed_mini/src/output_region.rs`;
+> region cache in app.rs refreshes only for damaged blocks;
+> `region_markup` sorts by offset internally (document-order contract).
 
 1. `kernel_bridge.rs`: add `block_outputs(block: BlockId) -> Vec<(usize,
    &KernelResult)>` grouping by the statement's block index (walk the
@@ -104,7 +115,15 @@ Decisions (locked):
 **Acceptance:** `cargo test -p mathed_mini --lib`; a two-model doc shows
 two block regions with correct values/errors after one refresh.
 
-### Stage N2 — Run-block + staleness (mathed_mini)
+### Stage N2 — Run-block + staleness (mathed_mini) ✅ DONE (`3e822c2`)
+
+> **As built (+4 mini, vs +3 planned):** `run_block(block)` re-issues the
+> block's live requests through the shared request loop;
+> `Ctrl+Enter` + stale gutter banner wired in app.rs. Tests needed a
+> `settle` poll helper — `wait_for` returns as soon as a prob result
+> lands while the model's Success response is still in flight, so
+> `pending` wasn't drained (flaky). The bad-translator error path also
+> had to record freshness on its first `Err` arm.
 
 1. `kernel_bridge.rs`: `run_block(block: BlockId)` — re-issue the live
    kernel requests for that block only (extract the request-building
@@ -124,7 +143,13 @@ two block regions with correct values/errors after one refresh.
 **Acceptance:** `cargo test -p mathed_mini --lib`; gui smoke: editing a
 model dims dependent outputs until Ctrl+Enter.
 
-### Stage N3 — Run log + reproducible record (mathed_mini, export)
+### Stage N3 — Run log + reproducible record (mathed_mini, export) ✅ DONE (`0c3d734`)
+
+> **As built (+4 mini, vs +2 planned):** worker responses carry no
+> `timing_ms`, so round-trip time is measured client-side from the
+> pending map; `export_json` gains the `"blocks"` array (heading,
+> offsets, hashed bodies, run-log slice) as planned; a stale-result race
+> in the test needed `settle` instead of `wait_for`.
 
 1. `kernel_bridge.rs`: `run_log: Vec<RunEntry>` where `RunEntry{block,
    offsets, input_hashes, op, timing_ms, result}` — appended in `poll`
@@ -140,7 +165,15 @@ model dims dependent outputs until Ctrl+Enter.
 **Acceptance:** `cargo test -p mathed_mini --lib`; `--export-json` on
 the fixture shows one `blocks` entry per region with timing and hashes.
 
-### Stage N4 — Scripted segments: `\exec` via a granted worker op
+### Stage N4 — Scripted segments: `\exec` via a granted worker op ⏳ IN PROGRESS
+
+> **Partial (2026-09-05):** step 1's UK codes are staged — `4908`
+> `EXEC_GRANT_DENIED`, `4909` `EXEC_COMMAND_DENIED`, `4910`
+> `EXEC_FAILED` added to `../unfer/unfer_protocol/src/codes.rs`
+> (**uncommitted**; verified next-free against `SWIZZLE_IMPOSSIBLE` 4907
+> and `CONSENSUS_NOT_READY` 6001). The rest of step 1 — the agent op,
+> allowlist config, timeout/cap enforcement, audit, PROTOCOL.md section
+> — and all of step 2 are not started. The plan below is unchanged.
 
 The bash role. Two coordinated halves; the first is a `[SYNC]` step
 (touches unfer), the second is velysterm-only.
@@ -211,8 +244,11 @@ N2 +3, N3 +2, N4 +5, N5 +2); kernel_client +N4's client tests. Bevy
 `mathed` unchanged (bridge and regions are mathed_mini surfaces both
 frontends share).
 
-**As built / remaining baseline:** phase 1 (U1 + T1–T4) raised mathed_mini
-to **141**, so the N-series lands at 141 → 157 (+16, deltas unchanged).
+**As built (phases 1–2):** phase 1 raised mathed_mini to 141; N1–N3 then
+shipped at 146 / 150 / 154 (+5/+4/+4, richer than the +4/+3/+2 plan), and
+U2/U4/T5 raised the current baseline to **162**. The remaining stages
+land at 162 → 167 (N4 +5) → 169 (N5 +2); kernel_client 36 → +N4's
+client tests. Deltas unchanged.
 
 ## 3. Non-goals and risks
 
