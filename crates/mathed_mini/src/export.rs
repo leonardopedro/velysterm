@@ -412,6 +412,14 @@ pub fn export_typst_template(
     render_doc(doc_text, extra_ctx_json, std::collections::HashMap::new())
 }
 
+/// T9: headless template preview — the document rendered exactly as
+/// `--render-typst` would write it (templates expanded, `\base`
+/// wrapped), for the editor's preview overlay. The document is never
+/// modified; a failing template surfaces the eval error text.
+pub fn preview_template(doc_text: &str) -> Result<String, String> {
+    render_doc(doc_text, None, std::collections::HashMap::new())
+}
+
 /// N5: `--export-typst --with-outputs` — render the document with each
 /// block's computed output region spliced beneath its content (the
 /// printable notebook page). Regions are **derived state**: the bridge
@@ -1102,6 +1110,35 @@ mod tests {
         );
         let out = export_typst_template(doc, None).expect("filter export");
         assert!(out.contains("sum: a+b+c"), "helper `join` evaluated: {out}");
+    }
+
+    #[test]
+    fn preview_template_returns_base_composed_output() {
+        // T9: the headless preview is the same pipeline
+        // --render-typst uses: the base wraps body + templates.
+        let doc = concat!(
+            "#1 #let render(ctx) = \"#emph[t1]\" #2 ",
+            "\\template(#1,#2, name: t1)\n",
+            "#3 #let render(ctx) = \"#box[WRAP]\" + ctx.at(\"templates\").at(\"t1\") + \"#box[END]\" #4 ",
+            "\\base(#3,#4, name: wrap)",
+        );
+        let out = preview_template(doc).expect("preview");
+        assert!(out.contains("#box[WRAP]"), "preview prefix: {out}");
+        assert!(out.contains("#emph[t1]"), "preview carries the sub-template: {out}");
+        assert!(out.contains("#box[END]"), "preview suffix: {out}");
+    }
+
+    #[test]
+    fn preview_template_surfaces_eval_errors() {
+        // T9: a template body that fails at eval (a missing ctx key
+        // is a Typst runtime error) surfaces the error text — what
+        // the overlay shows — never a panic.
+        let doc = concat!(
+            "#1 #let render(ctx) = ctx.at(\"nope\") #2 ",
+            "\\template(#1,#2, name: bad)",
+        );
+        let err = preview_template(doc).unwrap_err();
+        assert!(err.contains("bad"), "names the failing template: {err}");
     }
 
     #[test]

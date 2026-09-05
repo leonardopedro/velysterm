@@ -146,6 +146,11 @@ struct App {
     /// glyph preview is drawn as an IME-style overlay at the
     /// caret; commit/cancel never touch the doc until commit.
     completion: CompletionUi,
+    /// T9: the rendered-template preview (Ctrl+P). The document is
+    /// rendered exactly as `--render-typst` would write it
+    /// (templates expanded, `\base` wrapped) and drawn as an
+    /// overlay strip; Escape dismisses. Never touches the document.
+    template_preview: Option<Result<String, String>>,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -227,6 +232,7 @@ impl App {
             show_marker_overlay: false,
             references_panel: None,
             references_panel_height: 0,
+            template_preview: None,
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -377,6 +383,18 @@ impl App {
                 self.region_cache.insert(block.id, img);
             }
         }
+    }
+
+    /// T9: toggle the rendered-template preview overlay (Ctrl+P).
+    /// Runs the same headless pipeline as `--render-typst`; the
+    /// document is never modified.
+    fn toggle_template_preview(&mut self) {
+        if self.template_preview.is_some() {
+            self.template_preview = None;
+        } else {
+            self.template_preview = Some(crate::export::preview_template(self.doc.text()));
+        }
+        self.request_redraw();
     }
 
     /// Run every block (Ctrl+Shift+Enter, N-series N5): the
@@ -671,6 +689,13 @@ impl App {
             // N5: clear outputs (Ctrl+Shift+K) — region only.
             "k" | "K" if self.mods.shift_key() => {
                 self.clear_outputs();
+                true
+            }
+            // T9: template preview (Ctrl+P) — render the document
+            // exactly as --render-typst would and show the output as
+            // an overlay strip; Escape dismisses.
+            "p" | "P" => {
+                self.toggle_template_preview();
                 true
             }
             "m" | "M" => {
@@ -1287,6 +1312,33 @@ impl App {
             }
         }
 
+        // T9: rendered-template preview overlay (Ctrl+P) — the
+        // headless --render-typst output as stacked underlined lines
+        // at the top left; Escape dismisses. The document is never
+        // touched.
+        if let Some(result) = &self.template_preview {
+            let text = match result {
+                Ok(out) => out.clone(),
+                Err(e) => format!("template preview failed: {e}"),
+            };
+            let mut y = 8usize;
+            for line in text.lines().take(12) {
+                if y > doc_h.saturating_sub(8) {
+                    break;
+                }
+                if line.is_empty() {
+                    y += 14;
+                    continue;
+                }
+                if let Ok(img) = crate::render::render_preedit(line, DEFAULT_WIDTH_PT) {
+                    blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, y, &img);
+                    y += img.height as usize + 4;
+                } else {
+                    y += 14;
+                }
+            }
+        }
+
         // Popup boxes.
         if !self.popup_stack.is_empty() {
             Self::draw_popup_boxes(
@@ -1861,11 +1913,14 @@ impl ApplicationHandler<UserEvent> for App {
                     Key::Named(NamedKey::Escape) => {
                         // ESC: a pending completion cancels with zero
                         // doc mutation (IME precedent, U-series U2);
-                        // otherwise a cite popup pops; otherwise
-                        // fall through to the event-loop exit
-                        // (cite_popup_boxes plan, Stage 4).
+                        // the T9 template preview dismisses; otherwise
+                        // a cite popup pops; otherwise fall through
+                        // to the event-loop exit (cite_popup_boxes
+                        // plan, Stage 4).
                         if self.completion.pending.is_some() {
                             self.completion.cancel();
+                            self.request_redraw();
+                        } else if self.template_preview.take().is_some() {
                             self.request_redraw();
                         } else if self.popup_stack.is_empty() {
                             event_loop.exit();
