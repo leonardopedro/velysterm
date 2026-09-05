@@ -108,6 +108,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return Ok(());
             }
+            // N10: one-way .ipynb projection — run every block (like
+            // --run-all) and write the notebook with the live run
+            // outputs; the doc stays the source of truth.
+            "--export-ipynb" => {
+                let path = rest
+                    .first()
+                    .ok_or("--export-ipynb requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let mut grants: Vec<&str> = Vec::new();
+                let mut out: Option<&str> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--grants" => {
+                            grants = rest
+                                .get(i + 1)
+                                .ok_or("--grants requires a comma-separated list")?
+                                .split(',')
+                                .collect();
+                            i += 2;
+                        }
+                        "--out" => {
+                            out = Some(rest.get(i + 1).ok_or("--out requires a path")?);
+                            i += 2;
+                        }
+                        other => {
+                            return Err(
+                                format!("unexpected --export-ipynb argument: {other}").into()
+                            );
+                        }
+                    }
+                }
+                let runs = mathed_mini::export::run_all_runs(&doc, &grants);
+                let nb = mathed_mini::export::export_ipynb_with_runs(&doc, &runs)
+                    .map_err(|e| std::io::Error::other(format!("ipynb export failed: {e}")))?;
+                if let Some(o) = out {
+                    std::fs::write(o, &nb)?;
+                    eprintln!("Projected {path} -> {o} (ipynb, one-way)");
+                } else {
+                    print!("{nb}");
+                }
+                return Ok(());
+            }
             // N8: open-doc staleness check against a record.
             "--check-record" => {
                 let doc_path = rest.first().ok_or("--check-record requires a doc path")?;

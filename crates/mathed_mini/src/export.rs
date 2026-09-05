@@ -213,6 +213,171 @@ fn result_json(result: &crate::kernel_bridge::KernelResult) -> serde_json::Value
     }
 }
 
+/// Jupyter multiline convention (`splitlines(keepends=True)`): text
+/// fields are arrays of lines each ending in `\n` — a trailing
+/// newline is appended when the payload lacks one, so the pinned
+/// export shape is stable.
+fn jup_lines(s: &str) -> Vec<String> {
+    let mut owned = s.to_string();
+    if !owned.ends_with('\n') {
+        owned.push('\n');
+    }
+    let mut out = Vec::new();
+    let mut rest = owned.as_str();
+    while let Some(i) = rest.find('\n') {
+        out.push(rest[..=i].to_string());
+        rest = &rest[i + 1..];
+    }
+    out
+}
+
+/// One kernel run's result as a Jupyter output object. `StringValue`
+/// → stdout stream, `Value` → `text/plain` execute_result, `Error`
+/// → error output (ename = the UK code name). `None` for results
+/// that carry nothing to display (empty stdout).
+fn kernel_output(result: &crate::kernel_bridge::KernelResult) -> Option<serde_json::Value> {
+    match result {
+        crate::kernel_bridge::KernelResult::StringValue(s) if s.is_empty() => None,
+        crate::kernel_bridge::KernelResult::StringValue(s) => Some(serde_json::json!({
+            "output_type": "stream",
+            "name": "stdout",
+            "text": jup_lines(s),
+        })),
+        crate::kernel_bridge::KernelResult::Value(p) => Some(serde_json::json!({
+            "output_type": "execute_result",
+            "execution_count": null,
+            "metadata": {},
+            "data": { "text/plain": jup_lines(&format!("= {p:.4}")) },
+        })),
+        crate::kernel_bridge::KernelResult::Error {
+            code_name, message, ..
+        } => Some(serde_json::json!({
+            "output_type": "error",
+            "ename": code_name,
+            "evalue": message,
+            "traceback": [],
+        })),
+    }
+}
+
+/// N10: one-way `.ipynb` projection (nbformat 4) of a mathed doc.
+/// Every line of each blank-line block becomes one cell, in document
+/// order: a heading line (`= …`) → a markdown cell (Typst `=`
+/// becomes Markdown `#`); a line holding kernel statements → a code
+/// cell whose source is that doc line verbatim and whose outputs
+/// come from the run record when one is supplied (stdout stream /
+/// text/plain / error — the Jupyter shapes); any other line → a
+/// markdown cell verbatim. Cells therefore follow block order; the
+/// run record is the only data not present in the doc. This is a
+/// projection, never a source: nothing in the notebook is ever
+/// parsed back into a document.
+pub fn export_ipynb(doc_text: &str) -> Result<String, String> {
+    export_ipynb_with_runs(doc_text, &[])
+}
+
+/// [`export_ipynb`] with the run record whose outputs the code cells
+/// carry (from `--run-all` / [`run_all_runs`]); empty = code cells
+/// with no outputs (a pure structural projection).
+pub fn export_ipynb_with_runs(
+    doc_text: &str,
+    runs: &[crate::kernel_bridge::RunEntry],
+) -> Result<String, String> {
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
+    let mut idx = SemanticIndex::default();
+    idx.build_index(doc_text, &segments, &[&render]);
+    let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+
+    // Runs by statement offset (a rerun appends another entry for the
+    // same offset — notebook reruns — so keep them in log order).
+    let mut runs_by_off: std::collections::HashMap<usize, Vec<&crate::kernel_bridge::RunEntry>> =
+        std::collections::HashMap::new();
+    for e in runs {
+        runs_by_off.entry(e.offset).or_default().push(e);
+    }
+
+    let mut cells: Vec<serde_json::Value> = Vec::new();
+    for r in &block_ranges {
+        let mut pos = r.start;
+        for line in doc_text[r.clone()].split_inclusive('\n') {
+            let line_start = pos;
+            pos += line.len();
+            let content = line.trim_end_matches(['\n', '\r']);
+            let trimmed = content.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Statement-bearing line → code cell (source verbatim;
+            // outputs from the run record at the contained offsets).
+            let stmt_offs: Vec<usize> = idx
+                .kernel_statements
+                .iter()
+                .filter(|s| s.span.start >= line_start && s.span.start < pos)
+                .map(|s| s.span.start)
+                .collect();
+            if !stmt_offs.is_empty() {
+                let mut outputs = Vec::new();
+                for off in &stmt_offs {
+                    if let Some(rs) = runs_by_off.get(off) {
+                        for e in rs {
+                            if let Some(o) = kernel_output(&e.result) {
+                                outputs.push(o);
+                            }
+                        }
+                    }
+                }
+                cells.push(serde_json::json!({
+                    "cell_type": "code",
+                    "execution_count": null,
+                    "metadata": {},
+                    "outputs": outputs,
+                    "source": jup_lines(trimmed),
+                }));
+                continue;
+            }
+            // Heading line → markdown cell (Typst `=` → `#`).
+            let heads = trimmed.chars().take_while(|c| *c == '=').count();
+            if heads > 0 && heads < trimmed.len() {
+                let md = format!("{} {}", "#".repeat(heads), trimmed[heads..].trim_start());
+                cells.push(serde_json::json!({
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": jup_lines(&md),
+                }));
+            } else if heads == trimmed.len() {
+                cells.push(serde_json::json!({
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": jup_lines(&"#".repeat(heads)),
+                }));
+            } else {
+                // Prose line → markdown cell verbatim.
+                cells.push(serde_json::json!({
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": jup_lines(trimmed),
+                }));
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "mathed",
+                "language": "mathed",
+                "name": "mathed",
+            },
+            "language_info": { "name": "mathed" },
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    })
+    .to_string())
+}
+
 pub fn export_markdown(doc_text: &str) -> String {
     let scan = scan(doc_text);
     let segments = resolve_segments(&scan);
@@ -430,15 +595,25 @@ pub fn preview_template(doc_text: &str) -> Result<String, String> {
     render_doc(doc_text, None, std::collections::HashMap::new(), &[])
 }
 
-/// N8: the headless notebook record — execute every block (refresh
-/// dispatches all kernel statements and execs; the bounded settle
-/// drains every response) and return the reproducible record:
-/// `export_json_with_runs`'s shape (the doc + its run log as JSON).
-/// `grants` enables the worker exec allowlist entries (deny-by-
-/// default otherwise); a hung worker degrades to the partial record
-/// after the bounded wait. Nothing is ever written into the doc
+/// N8: the headless notebook record — execute every block and return
+/// the reproducible record (`export_json_with_runs`'s shape: the doc
+/// plus its run log as JSON). Nothing is ever written into the doc
 /// text.
 pub fn run_all_record(doc_text: &str, grants: &[&str]) -> Result<String, String> {
+    Ok(export_json_with_runs(
+        doc_text,
+        &run_all_runs(doc_text, grants),
+    ))
+}
+
+/// N8/N10: run every block to completion (refresh dispatches all
+/// kernel statements and execs; the bounded settle drains every
+/// response) and return the run log — the shared engine behind
+/// `--run-all` and the `.ipynb` projection's live outputs. `grants`
+/// enables the worker exec allowlist entries (deny-by-default
+/// otherwise); a hung worker degrades to the partial log after the
+/// bounded wait.
+pub fn run_all_runs(doc_text: &str, grants: &[&str]) -> Vec<crate::kernel_bridge::RunEntry> {
     let mut bridge = if grants.is_empty() {
         crate::kernel_bridge::KernelBridge::new()
     } else {
@@ -453,7 +628,7 @@ pub fn run_all_record(doc_text: &str, grants: &[&str]) -> Result<String, String>
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    Ok(export_json_with_runs(doc_text, bridge.run_log()))
+    bridge.run_log().to_vec()
 }
 
 /// N8: compare the current doc against a previously written record
@@ -1231,6 +1406,74 @@ mod tests {
         assert!(
             out.contains("#table("),
             "the region renders the same rows as a table: {out}"
+        );
+    }
+
+    #[test]
+    fn ipynb_projection_maps_blocks_to_cells_with_run_outputs() {
+        // N10: lines of each block → cells in document order — the
+        // heading to a markdown cell (Typst `=` → Markdown `#`),
+        // statement lines to code cells (source verbatim) whose
+        // outputs come from the run record, prose to markdown cells.
+        let doc = "= Reproducible experiment\n\n\
+                   #1 a #2 \\model(#1,#2)\n\
+                   #3 echo run complete #4 \\exec(#3,#4, grants: \"readonly\")\n";
+        let runs = run_all_runs(doc, &["readonly"]);
+        assert_eq!(runs.len(), 1, "one exec run: {runs:?}");
+        let nb: serde_json::Value =
+            serde_json::from_str(&export_ipynb_with_runs(doc, &runs).expect("ipynb export"))
+                .expect("ipynb JSON");
+        assert_eq!(nb["nbformat"], 4);
+        let cells = nb["cells"].as_array().expect("cells");
+        assert_eq!(cells.len(), 3, "heading + model + exec cells: {cells:?}");
+        // Heading line → markdown cell with the Typst `=` converted.
+        assert_eq!(cells[0]["cell_type"], "markdown");
+        assert_eq!(cells[0]["source"][0], "# Reproducible experiment\n");
+        // Model line → code cell, source verbatim, no result → no
+        // outputs.
+        assert_eq!(cells[1]["cell_type"], "code");
+        assert_eq!(cells[1]["source"][0], "#1 a #2 \\model(#1,#2)\n");
+        assert_eq!(
+            cells[1]["outputs"].as_array().expect("outputs").len(),
+            0,
+            "models display no result"
+        );
+        // Exec line → code cell whose stdout stream comes from the
+        // run record.
+        assert_eq!(cells[2]["cell_type"], "code");
+        assert_eq!(
+            cells[2]["source"][0],
+            "#3 echo run complete #4 \\exec(#3,#4, grants: \"readonly\")\n"
+        );
+        let out = &cells[2]["outputs"][0];
+        assert_eq!(out["output_type"], "stream");
+        assert_eq!(out["name"], "stdout");
+        assert_eq!(out["text"][0], "run complete\n");
+    }
+
+    #[test]
+    fn ipynb_projection_is_stable_without_runs() {
+        // Pure structural projection: no run record → code cells with
+        // empty outputs, markdown prose verbatim, and byte-stable
+        // JSON for the fixed doc.
+        let doc = "= Title\n\nSome prose.\n\n#1 echo hi #2 \\exec(#1,#2, grants: \"readonly\")\n";
+        let a = export_ipynb(doc).expect("ipynb export");
+        assert_eq!(a, export_ipynb(doc).expect("stable"), "stable JSON");
+        let nb: serde_json::Value = serde_json::from_str(&a).expect("ipynb JSON");
+        let cells = nb["cells"].as_array().expect("cells");
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[0]["source"][0], "# Title\n");
+        assert_eq!(cells[1]["cell_type"], "markdown");
+        assert_eq!(cells[1]["source"][0], "Some prose.\n");
+        assert_eq!(cells[2]["cell_type"], "code");
+        assert_eq!(
+            cells[2]["source"][0],
+            "#1 echo hi #2 \\exec(#1,#2, grants: \"readonly\")\n"
+        );
+        assert_eq!(
+            cells[2]["outputs"].as_array().expect("outputs").len(),
+            0,
+            "no run record → no outputs"
         );
     }
 
