@@ -18,6 +18,12 @@ region** beneath it (derived state — never persisted into the doc text;
 the doc stays the source of truth).
 
 - **Run a cell** — `Ctrl+Enter` re-issues the block's kernel requests.
+- **Kernel statements menu** — `Ctrl+K` lists every `\exec` /
+  `\kernel` statement as a citation-style TUI list (kind, body
+  snippet, region status: `✓ …`, `✗ UK-code`, `· not run`, `stale`);
+  Up/Down pick, Enter re-runs that block, Esc dismisses. Rows are
+  plain text escaped and reflowed at the window width (never
+  fixed-width widgets).
 - **Run all** — `Ctrl+Shift+Enter` re-issues every block.
 - **Clear outputs** — `Ctrl+Shift+K` empties the regions only; the doc
   and the run log are untouched.

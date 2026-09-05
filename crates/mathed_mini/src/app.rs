@@ -151,6 +151,14 @@ struct App {
     /// (templates expanded, `\base` wrapped) and drawn as an
     /// overlay strip; Escape dismisses. Never touches the document.
     template_preview: Option<Result<String, String>>,
+    /// Kernel statements menu (N4/N11, Ctrl+K): the `\exec` /
+    /// `\kernel` rows (one per statement — kind, body snippet,
+    /// region status) as a citation-style list overlay. Derived from
+    /// the doc + the bridge's live results each time it opens or a
+    /// row re-runs; Enter re-runs the selected row's block, Up/Down
+    /// move, Esc dismisses. The document is never modified.
+    kernel_menu: Option<Vec<crate::kernel_menu::KernelMenuRow>>,
+    kernel_menu_selected: usize,
     /// While set, keep polling the kernel worker for async results.
     kernel_deadline: Option<Instant>,
     /// Cite popup stack (cite_popup_boxes plan, Stage 4). Each entry
@@ -233,6 +241,8 @@ impl App {
             references_panel: None,
             references_panel_height: 0,
             template_preview: None,
+            kernel_menu: None,
+            kernel_menu_selected: 0,
             caret_visible: true,
             next_blink: Instant::now() + BLINK_INTERVAL,
             cursor_pos: None,
@@ -387,6 +397,51 @@ impl App {
 
     /// T9: toggle the rendered-template preview overlay (Ctrl+P).
     /// Runs the same headless pipeline as `--render-typst`; the
+    /// Toggle the kernel statements menu (Ctrl+K): open = recompute
+    /// the `\exec` / `\kernel` rows from the current doc + bridge
+    /// state; close = dismiss. See [`Self::run_kernel_menu_selected`].
+    fn toggle_kernel_menu(&mut self) {
+        if self.kernel_menu.is_some() {
+            self.kernel_menu = None;
+        } else {
+            let text = self.doc.text().to_string();
+            self.kernel_menu = Some(crate::kernel_menu::rows_for_doc(
+                &text,
+                self.bridge.results(),
+                &self.bridge.stale_blocks(),
+            ));
+            self.kernel_menu_selected = 0;
+        }
+        self.request_redraw();
+    }
+
+    /// Re-run the selected row's block (Enter in the kernel menu) —
+    /// the notebook "run cell" affordance from the list. The menu
+    /// stays open and its rows are recomputed, so the status column
+    /// updates live; Esc dismisses.
+    fn run_kernel_menu_selected(&mut self) {
+        let text = self.doc.text().to_string();
+        let Some(row) = self
+            .kernel_menu
+            .as_ref()
+            .and_then(|rows| rows.get(self.kernel_menu_selected))
+            .cloned()
+        else {
+            return;
+        };
+        if self.bridge.run_block(&text, row.block) {
+            self.invalidate_annotations();
+        }
+        self.kernel_deadline = Some(Instant::now() + KERNEL_POLL_WINDOW);
+        // Refresh the rows so the region status column updates.
+        self.kernel_menu = Some(crate::kernel_menu::rows_for_doc(
+            &text,
+            self.bridge.results(),
+            &self.bridge.stale_blocks(),
+        ));
+        self.request_redraw();
+    }
+
     /// document is never modified.
     fn toggle_template_preview(&mut self) {
         if self.template_preview.is_some() {
@@ -689,6 +744,13 @@ impl App {
             // N5: clear outputs (Ctrl+Shift+K) — region only.
             "k" | "K" if self.mods.shift_key() => {
                 self.clear_outputs();
+                true
+            }
+            // Kernel statements menu (Ctrl+K): citation-style list of
+            // the \exec / \kernel rows; Enter re-runs the selected
+            // block, Esc dismisses (see toggle_kernel_menu).
+            "k" | "K" => {
+                self.toggle_kernel_menu();
                 true
             }
             // T9: template preview (Ctrl+P) — render the document
@@ -1339,6 +1401,17 @@ impl App {
             }
         }
 
+        // Kernel statements menu (Ctrl+K): the \exec / \kernel rows
+        // as one reflowable markup block at the window width — plain
+        // TUI text that wraps instead of clipping — drawn top-left;
+        // Esc dismisses. Derived state; never touches the document.
+        if let Some(rows) = &self.kernel_menu {
+            let markup = crate::kernel_menu::rows_markup(rows, self.kernel_menu_selected);
+            if let Ok(img) = crate::render::render_markup(&markup, size.width as f64) {
+                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
+            }
+        }
+
         // Popup boxes.
         if !self.popup_stack.is_empty() {
             Self::draw_popup_boxes(
@@ -1908,6 +1981,28 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.mods.control_key() && self.handle_ctrl_shortcut(&logical_key) {
                     return;
                 }
+                // Kernel menu navigation: while the menu is open,
+                // Up/Down move the selection (the citation-popup
+                // cycling precedent); every other key falls through.
+                if self.kernel_menu.is_some() {
+                    match &logical_key {
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.kernel_menu_selected = self.kernel_menu_selected.saturating_sub(1);
+                            self.request_redraw();
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            let n = self.kernel_menu.as_ref().map_or(0, |r| r.len());
+                            if n > 0 {
+                                self.kernel_menu_selected =
+                                    (self.kernel_menu_selected + 1).min(n - 1);
+                            }
+                            self.request_redraw();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 let shift = self.mods.shift_key();
                 match logical_key {
                     Key::Named(NamedKey::Escape) => {
@@ -1920,7 +2015,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if self.completion.pending.is_some() {
                             self.completion.cancel();
                             self.request_redraw();
-                        } else if self.template_preview.take().is_some() {
+                        } else if self.template_preview.take().is_some()
+                            || self.kernel_menu.take().is_some()
+                        {
                             self.request_redraw();
                         } else if self.popup_stack.is_empty() {
                             event_loop.exit();
@@ -1940,6 +2037,13 @@ impl ApplicationHandler<UserEvent> for App {
                         self.push_a11y_update();
                     }
                     Key::Named(NamedKey::Enter) => {
+                        // Kernel menu: Enter re-runs the selected
+                        // row's block and refreshes the rows (the
+                        // menu stays open so the status updates).
+                        if self.kernel_menu.is_some() {
+                            self.run_kernel_menu_selected();
+                            return;
+                        }
                         if self.mods.control_key() && self.mods.shift_key() {
                             // Run every block (N-series N5).
                             self.run_all_blocks();
