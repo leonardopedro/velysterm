@@ -1,14 +1,27 @@
 # mathed beyond the starter — the full-vision implementation plan (phases 4+)
 
-> **Status:** The starter vision is fully executed. Phases 1–5 of the
-> master plan (`PLAN_mathed_template_language.md`, §6) are all EXECUTED
-> and pushed: T1–T6, U1–U5, N1–N6, with N4's `[SYNC]` half committed
-> (`d677d1f` on unfer). Ground truth today: mathed_core **174** /
-> mathed_mini **172** / kernel_client **24** tests, Bevy `mathed` checks
-> clean, `verify-invariants` **18/18**, both trees clean (velysterm
-> `a0bcc65..e8e8f27`). **This document is the master plan for the next
-> development phases** — the ones that push mathed from *starter* to
-> *genuine alternative*:
+> **Status:** The starter vision is fully executed and pushed (T1–T6,
+> U1–U5, N1–N6, N4's `[SYNC]` half `d677d1f` on unfer). The full-vision
+> phases below are in execution (all stage commits on velysterm main):
+>
+> - **Phase 4 — template maturity: ✅ EXECUTED** — T7 `874f8b6`
+>   (`\base` composition), T8 `c3ea2c6` (egison assoc/distrib/
+>   select-pattern ops), T9 `fab531e` (`preview_template` + Ctrl+P).
+> - **Phase 5 — Unicode surface: ✅ EXECUTED** — U6 `7ecc4d9`
+>   (grapheme clusters), U7 `df58918` (canonical `tables.rs`),
+>   U8 `710496b` (splice cluster contract).
+> - **Phase 6 — computing depth: N7–N8 ✅ EXECUTED, N9 🚧 IN
+>   PROGRESS** — N7 `c594a75` (pipes + `data`, cleanups
+>   `38fadfc`/`2557ad7`/`8f97b88`, `[SYNC]` half `87a6253` on unfer),
+>   N8 `5bbcf0c` (`--run-all` record). N9's rows→table half is written
+>   in `output_region.rs` (uncommitted); its `ctx.exec` figure half +
+>   the three tests are next, then N10, N11, Phase 7.
+>
+> Ground truth today (measured, exactly on the planned trajectory):
+> mathed_core **181** / mathed_mini **189** / kernel_client **26**
+> tests; remaining planned deltas +0/+9/+2 → 181 / **198** / **28**.
+> **This document is the master plan for the next development phases**
+> — the ones that push mathed from *starter* to *genuine alternative*:
 >
 > 1. **A template language for Typst** (Jinja/ERB/XSLT class) — the T7–T10
 >    stages below: composition and layouts, filter libraries, and the
@@ -41,7 +54,7 @@ is depth, not architecture:
 
 | Starter shipped | Alternative needs |
 |---|---|
-| One `\template` per doc, ctx as a lowered Typst dict literal | **Composition**: a `\layout` that wraps the doc body + other templates' outputs; filter/macro helpers (`builtin_template.typ`) |
+| One `\template` per doc, ctx as a lowered Typst dict literal | **Composition**: a `\base` that wraps the doc body + other templates' outputs; filter/macro helpers (`builtin_template.typ`) |
 | Two egison ops (`rewrite`, `select`) over pre-sliced input | **A rule engine**: a growing op table (associativity/distributivity/normal-form rewrites, compound selection patterns) applied before template eval |
 | Code-point + combining-mark deletion | **Full grapheme clusters** (ZWJ emoji, flags, skin tones) across every editing op |
 | Two tables (completion in, export-inverse out), maintained separately | **One canonical `tables.rs`** both directions read; `--ctx`-overlayable; round-trip property-tested |
@@ -84,7 +97,7 @@ plan.
 
 ### Phase 4 — template language maturity (T7 → T8 → T9)
 
-#### Stage T7 — composition: `\base`, sub-template outputs, filters (mathed_core + mathed_mini)
+#### Stage T7 — composition: `\base`, sub-template outputs, filters (mathed_core + mathed_mini) ✅ DONE (`874f8b6`)
 
 1. `crates/mathed_core/src/markers.rs`: `PropKind::Base` (`of("base")`),
    `is_base()`, not `is_kernel()` — sibling of `Template` (T2). Enforce
@@ -119,7 +132,7 @@ plan.
 report (base + one sub-template) renders through `--render-typst` and
 parses with zero `typst::syntax::parse` errors.
 
-#### Stage T8 — the egison rule engine grows up (tools/mathed_rules + the export seam)
+#### Stage T8 — the egison rule engine grows up (tools/mathed_rules + the export seam) ✅ DONE (`c3ea2c6`)
 
 1. `tools/mathed_rules/haskell/MathedRules.hs`: the op table grows —
    `rewrite` (adjoint contraction; shipped) and `select` (self-ref;
@@ -148,7 +161,7 @@ unfer flake, read-only use); `--render-typst` with the bin applies an
 assoc rewrite to a math body; without the bin the identity path is
 unchanged.
 
-#### Stage T9 — template authoring UX (mathed_mini)
+#### Stage T9 — template authoring UX (mathed_mini) ✅ DONE (`fab531e`)
 
 1. Base bodies collapse to `▸ base: name` code panels — the shared
    translator/template panel machinery (T4 as built) with zero new
@@ -170,7 +183,7 @@ over the template panel.
 
 ### Phase 5 — Unicode surface completion (U6 → U7 → U8)
 
-#### Stage U6 — full grapheme-cluster editing (mathed_core)
+#### Stage U6 — full grapheme-cluster editing (mathed_core) ✅ DONE (`7ecc4d9`)
 
 1. `crates/mathed_core/Cargo.toml`: add `unicode-segmentation`
    (additive; confirmed not currently a dependency).
@@ -187,7 +200,7 @@ over the template panel.
 stays under its time budget with the larger corpus; every reported
 boundary lands on a cluster edge, never mid-sequence.
 
-#### Stage U7 — one canonical mapping table (mathed_core)
+#### Stage U7 — one canonical mapping table (mathed_core) ✅ DONE (`df58918`)
 
 1. New `mathed_core/src/tables.rs`: the U2 completion table (ASCII run →
    glyph) and the U4 export-inverse table (glyph → ASCII Typst form)
@@ -205,7 +218,7 @@ boundary lands on a cluster edge, never mid-sequence.
 existing U2/U4 pin passes unchanged; the table is the single source of
 truth for both directions.
 
-#### Stage U8 — Unicode contract on the output pipeline (mathed_core + mathed_mini)
+#### Stage U8 — Unicode contract on the output pipeline (mathed_core + mathed_mini) ✅ DONE (`710496b`)
 
 1. Spec + tests: the transform/splice pipeline never splits a grapheme
    cluster — splices (annotations, template_splices, regions) land on
@@ -222,7 +235,7 @@ mid-cluster.
 
 ### Phase 6 — document-computing depth (N7 → N8 → N9 → N10 → N11)
 
-#### Stage N7 — stdin piping, `data` vocabulary, `from:` staleness
+#### Stage N7 — stdin piping, `data` vocabulary, `from:` staleness ✅ DONE (`c594a75`; `[SYNC]` half `87a6253` on unfer)
 
 1. **[SYNC] additive `stdin` field** (unfer repo, additive-only per the
    frozen contract): the exec op payload gains `stdin: String` (default
@@ -247,7 +260,7 @@ mid-cluster.
 two-segment pipe (produce → filter) runs end-to-end on a dev machine
 with `MATHED_EXEC_GRANTS` set.
 
-#### Stage N8 — the headless notebook record (mathed_mini CLI)
+#### Stage N8 — the headless notebook record (mathed_mini CLI) ✅ DONE (`5bbcf0c`)
 
 1. `bin/mathed_mini.rs`: `--run-all <doc> [--grants …] [--out
    record.json]` — headless execution of every block (the N2 run-block
@@ -265,7 +278,7 @@ with `MATHED_EXEC_GRANTS` set.
 experiment fixture writes a stable record JSON with one entry per block,
 timing + hashes included.
 
-#### Stage N9 — rich outputs: rows and figures (mathed_mini)
+#### Stage N9 — rich outputs: rows and figures (mathed_mini) 🚧 IN PROGRESS
 
 1. `output_region.rs`: exec stdout whose lines are `key=value` pairs (or
    NDJSON rows) renders as a **Typst table** in the region — a `rows`
@@ -395,6 +408,13 @@ smoke) green; all trees clean after the push.
 | N11 | — | +4 | +2 |
 | **Totals** | 174 → **181** | 172 → **198** | 24 → **28** |
 
+**As-built through N8** (measured in the tree, on plan): the executed
+stages shipped exactly their planned core/kernel_client deltas and all
+but one of their mini deltas — core **181** (174 + T7 1 + U6 3 + U7 2 +
+U8 1), mini **189** (172 + T7 4 + T8 2 + T9 2 + U8 2 + N7 4 + N8 3),
+kernel_client **26** (24 + N7 2). Remaining planned deltas: N9 +3 mini,
+N10 +2 mini, N11 +4 mini +2 kernel_client → 181 / **198** / **28**.
+
 Starter precedent: every phase shipped richer than planned (T-series
 +18 over plan, N-series +9 over plan), so the "as built" numbers will
 likely exceed these.
@@ -403,9 +423,9 @@ likely exceed these.
 
 | Phase | Stages | Depends on | Why this order |
 |---|---|---|---|
-| 4 — template maturity | T7 → T8 → T9 | starter T1–T6 | T7 first (ctx gains `body`/`templates`; everything else in the arc consumes it); T8 before T9 so preview shows rule-rewritten output |
-| 5 — Unicode completion | U6 → U7 → U8 | starter U1–U5 | U6 before U7 (cluster rules feed the table's round-trip corpus); runs ∥ phase 4 (disjoint files: wordnav/tables vs translate/export seams — U7 touches `tables.rs` and U8 touches `export.rs` where T7/T8 also work; sequence the two arcs' export.rs edits or land them in separate commits) |
-| 6 — computing depth | N7 → N8 → N9 → N10 → N11 | starter N1–N6 | N7's `[SYNC]` first (the stdin field gates the pipe tests); N8 before N9 (the record feeds exec rows to templates); N10 before N11 (the ipynb projection consumes kernel cells); N11's `[SYNC]` op + australVM sample last |
+| 4 — template maturity | T7 → T8 → T9 | starter T1–T6 | T7 first (ctx gains `body`/`templates`; everything else in the arc consumes it); T8 before T9 so preview shows rule-rewritten output — ✅ EXECUTED (`874f8b6`, `c3ea2c6`, `fab531e`) |
+| 5 — Unicode completion | U6 → U7 → U8 | starter U1–U5 | U6 before U7 (cluster rules feed the table's round-trip corpus); runs ∥ phase 4 (disjoint files: wordnav/tables vs translate/export seams — U7 touches `tables.rs` and U8 touches `export.rs` where T7/T8 also work; sequence the two arcs' export.rs edits or land them in separate commits) — ✅ EXECUTED (`7ecc4d9`, `df58918`, `710496b`) |
+| 6 — computing depth | N7 → N8 → N9 → N10 → N11 | starter N1–N6 | N7's `[SYNC]` first (the stdin field gates the pipe tests); N8 before N9 (the record feeds exec rows to templates); N10 before N11 (the ipynb projection consumes kernel cells); N11's `[SYNC]` op + australVM sample last — N7 ✅ (`c594a75`, `[SYNC]` `87a6253`), N8 ✅ (`5bbcf0c`), N9 🚧 in progress; N10–N11 pending |
 | 7 — docs & invariants | T10, U9, N11 | everything above | single sweep at the end, as in the starter |
 
 Parallelization follows Plan C's parallel rule: phases 4, 5, 6 are three
@@ -414,11 +434,17 @@ T7/T8/U8/N9, tables.rs U7) need sequencing or separate commits.
 
 ## 5. Cross-repo rules and `[SYNC]` steps
 
-1. Only **N7-1** is `[SYNC]` (the additive `stdin` field on the exec op
-   payload + PROTOCOL.md). Everything else modifies velysterm files
-   only; reading `../unfer`/`../australVM` stays allowed.
+1. Only **N7-1** and **N11-1** are `[SYNC]` — N7's additive `stdin`
+   field on the exec op payload + PROTOCOL.md, and N11's additive
+   `kernel_exec` op + UK-4911/4912/4913 + PROTOCOL.md (both on unfer).
+   Everything else modifies velysterm files only; reading
+   `../unfer`/`../australVM` stays allowed. N11 additionally writes the
+   australVM `examples/modules/mathed_kernel/` sample module
+   (cross-repo by design, like the N4 `[SYNC]` half).
 2. Frozen-contract rule holds: additive NDJSON fields and additive
-   PROTOCOL.md sections only — no new UK codes, no op renames.
+   PROTOCOL.md sections only — no op renames, no field changes, and no
+   new UK codes except N11's three (`KERNEL_GRANT_DENIED` 4911 /
+   `KERNEL_LANG_DENIED` 4912 / `KERNEL_FAILED` 4913).
 3. Every stage ends in a commit with its acceptance command green; the
    repo CI (check, test, smoke, verify-invariants) stays green
    throughout.
