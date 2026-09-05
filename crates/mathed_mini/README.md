@@ -117,7 +117,12 @@ the doc stays the source of truth).
   **background worker thread** from an owned `ScreenshotSnapshot`
   (never a frame stall), so Ctrl+R re-opens as a blit instead of a
   compile — a stale compose (the doc or results moved on mid-flight)
-  is dropped by its memo-key guard.
+  is dropped by its memo-key guard. The same worker now *refreshes*
+  an open preview: editing with Ctrl+R up never runs a synchronous
+  whole-doc compile per keystroke — the stale raster stays on
+  screen and swaps when the fresh compose lands after the editor
+  quiets down (the loop busy-polls while a compose is in flight so
+  the swap is prompt).
 - **Paginated A4 export** — `--pages-image <doc> [--grants g]
   --out base` writes one PNG per page (`base.1.png`, …). The page
   breaks come from **Typst's own page model**
@@ -220,6 +225,18 @@ the doc stays the source of truth).
   re-blit. The skip decisions are pure functions pinned by tests
   (the layout-pass guard covers doc/content/width/reveal-entered/
   reveal-left transitions).
+
+  Because all of this is invisible, **F5** toggles a live memo/frame
+  **HUD** (bottom-right status line, Esc/F5 dismisses) that makes the
+  wins measurable in-editor: it reports the last frame's class —
+  `blit` (the idle guard skipped the whole pre-pass), `caret` (the
+  layout/region pass was provably skipped), or `full` (real work
+  ran) — plus the memo store's **lifetime** counters (never reset by
+  the overlay-close report, so per-interval deltas stay honest
+  mid-session) and the compile rate since the last tick. The line is
+  itself a content-keyed raster rebuilt at most every 250ms, so the
+  HUD compiles Typst a few times a second while every other frame
+  blits it.
 
 ## Input + interchange (U-series)
 

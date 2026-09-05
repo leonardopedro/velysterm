@@ -25,6 +25,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+R", "rasterized document preview (overlay)"),
     ("Ctrl+P", "rendered-template preview (overlay)"),
     ("Ctrl+M", "toggle marker overlay"),
+    (
+        "F5",
+        "live memo/frame HUD (blit vs caret vs full, memo counters)",
+    ),
     ("Ctrl+C/X/V, Ctrl+A", "copy / cut / paste / select all"),
     ("Esc", "close the top overlay or popup"),
     ("? / F1", "this help"),

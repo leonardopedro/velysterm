@@ -92,6 +92,14 @@ pub struct MemoStore {
     pub hits: u64,
     pub compiles: u64,
     pub evictions: u64,
+    /// Lifetime counters — the same three events, never reset by
+    /// [`MemoStore::take_accounting`]. The in-editor HUD reads these
+    /// (see `App::toggle_hud`) so the per-interval readout is stable
+    /// even when an overlay close takes the report accounting in the
+    /// middle of a HUD session.
+    life_hits: u64,
+    life_compiles: u64,
+    life_evictions: u64,
 }
 
 impl MemoStore {
@@ -110,6 +118,9 @@ impl MemoStore {
             hits: 0,
             compiles: 0,
             evictions: 0,
+            life_hits: 0,
+            life_compiles: 0,
+            life_evictions: 0,
         }
     }
 
@@ -122,6 +133,7 @@ impl MemoStore {
             return None;
         }
         self.hits += 1;
+        self.life_hits += 1;
         self.touch(site, width);
         self.memos.get(&(site, width)).map(|m| &m.image)
     }
@@ -145,6 +157,7 @@ impl MemoStore {
     /// budget. Records one compile.
     pub fn insert(&mut self, site: &'static str, width: u32, key: u64, image: imaging::RgbaImage) {
         self.compiles += 1;
+        self.life_compiles += 1;
         if let Some(old) = self.memos.get(&(site, width)) {
             self.total_bytes = self.total_bytes.saturating_sub(old.image.data.len() as u64);
         }
@@ -162,6 +175,7 @@ impl MemoStore {
             {
                 self.total_bytes = self.total_bytes.saturating_sub(old.image.data.len() as u64);
                 self.evictions += 1;
+                self.life_evictions += 1;
             }
         }
     }
@@ -202,6 +216,14 @@ impl MemoStore {
         self.compiles = 0;
         self.evictions = 0;
         a
+    }
+
+    /// Lifetime (never-reset) counters: (hits, compiles, evictions)
+    /// since the store was created. The HUD reads these so its
+    /// per-interval deltas are unaffected by
+    /// [`MemoStore::take_accounting`] resets.
+    pub fn lifetime(&self) -> (u64, u64, u64) {
+        (self.life_hits, self.life_compiles, self.life_evictions)
     }
 }
 
@@ -295,5 +317,20 @@ mod tests {
         assert!(s.get("a", 1, 1).is_none());
         let (hits, _, _) = s.take_accounting();
         assert_eq!(hits, 0, "a post-remove get is a miss, not a hit");
+    }
+
+    #[test]
+    fn lifetime_counters_survive_take_accounting_resets() {
+        let mut s = MemoStore::new();
+        s.insert("hud", 0, 1, rgba(3, 3));
+        assert!(s.get("hud", 0, 1).is_some());
+        assert_eq!(s.lifetime(), (1, 1, 0));
+        // The overlay-close report takes the accounting (resetting
+        // it) — the HUD's lifetime readout must be unaffected.
+        let (hits, compiles, evictions) = s.take_accounting();
+        assert_eq!((hits, compiles, evictions), (1, 1, 0));
+        assert_eq!(s.lifetime(), (1, 1, 0));
+        assert!(s.get("hud", 0, 1).is_some());
+        assert_eq!(s.lifetime(), (2, 1, 0));
     }
 }

@@ -44,6 +44,11 @@ const IDLE_PREFETCH_DELAY: Duration = Duration::from_millis(400);
 /// after an overlay close reports its memo accounting.
 const STATUS_FLASH_MS: Duration = Duration::from_millis(3000);
 
+/// F5: how often the live memo/frame HUD re-renders its readout — a
+/// time-gated content-keyed memo, so it compiles Typst at a few Hz
+/// at most while every other frame blits the cached line.
+const HUD_TICK: Duration = Duration::from_millis(250);
+
 /// Sentinel x (frame points) far to the left/right of any realistic
 /// page width, used to hit-test "start/end of this visual row" with
 /// `GlyphIndex::byte_for_point` (`move_home`/`move_end`).
@@ -126,6 +131,30 @@ struct BlockPass {
     content: u64,
     width: u32,
     reveal_empty: bool,
+}
+
+/// F5: how much derived work the most recent redraw actually did —
+/// the live HUD shows it so the memo guards' effect (which frames
+/// compile Typst vs which are pure blits) is measurable in-editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameClass {
+    /// The idle guard matched: the whole pre-pass was skipped.
+    Blit,
+    /// The caret moved but no layout/region key could change (F3):
+    /// the layout/region pass was skipped, the rest re-blitted.
+    CaretSkip,
+    /// Content actually changed: the full pre-pass ran.
+    Full,
+}
+
+impl FrameClass {
+    fn label(self) -> &'static str {
+        match self {
+            FrameClass::Blit => "blit",
+            FrameClass::CaretSkip => "caret",
+            FrameClass::Full => "full",
+        }
+    }
 }
 
 /// F3: the skip decision for the block-layout pass (pure, so the
@@ -436,6 +465,17 @@ struct App {
     /// last region refresh — when unchanged, every cached region is
     /// still valid and the whole region walk is skipped.
     region_pass: Option<(u64, u64, u32)>,
+    /// F5: live memo/frame HUD toggle (bottom-right status line —
+    /// frame class + memo lifetime counters + compile rate), so the
+    /// memoization's effect is measurable in-editor. Not an overlay:
+    /// Esc / F5 dismiss it.
+    hud: bool,
+    /// F5: baseline (wall clock + memo lifetime counters) of the HUD's
+    /// current per-interval tick.
+    hud_state: Option<(std::time::Instant, (u64, u64, u64))>,
+    /// F5: classification of the most recent redraw (see
+    /// [`FrameClass`]); reported by the HUD.
+    last_frame_class: FrameClass,
     /// (block-based caching — per-block reveal is handled by
     /// `block_layouts` eviction on reveal-block changes and
     /// per-block `TransformOptions` in `redraw`.)
@@ -624,6 +664,9 @@ impl App {
             text_cache: None,
             last_pass: None,
             region_pass: None,
+            hud: false,
+            hud_state: None,
+            last_frame_class: FrameClass::Blit,
             pref_x: None,
             bridge: KernelBridge::new(),
             pipeline: PipelineCache::default(),
@@ -927,6 +970,14 @@ impl App {
             // warmed while the editor is quiet, so re-opening is a
             // pure blit.
             self.preview_wanted = true;
+            // Refresh-in-place: when a (stale) raster from earlier
+            // content is still memoized, dispatch a worker compose
+            // for the current content right away — the overlay opens
+            // as a blit of the old raster and swaps when the fresh
+            // one lands, instead of compiling the whole doc inline.
+            if self.memo_store.image("doc_preview", 0).is_some() {
+                self.dispatch_doc_preview_job();
+            }
         }
         self.request_redraw();
     }
@@ -1156,39 +1207,49 @@ impl App {
     /// The doc_preview open-state value mirrors the memo: `Ok(())`
     /// when a raster exists, `Err` with the composition error
     /// message otherwise (drawn in red).
+    /// Keep the Ctrl+R doc-preview state in sync with its memo.
+    /// Compose synchronously only when nothing has ever been composed
+    /// (a cold open stays immediate). When the preview is open and the
+    /// content moved but a raster from the previous content is still
+    /// on screen, no synchronous whole-doc compile happens per edit:
+    /// the worker refresh (`prefetch_doc_preview_if_idle`) swaps it
+    /// after the editor quiets down, so typing in a large document
+    /// with the preview open no longer stalls on a compile per
+    /// keystroke.
     fn ensure_doc_preview_raster(&mut self) {
         let text = cached_doc_text(&mut self.text_cache, self.doc.revision(), self.doc.text());
+        let key = self.doc_preview_key(&text);
+        if self.memo_store.get("doc_preview", 0, key).is_some() {
+            self.doc_preview = Some(Ok(()));
+            return;
+        }
+        if self.memo_store.image("doc_preview", 0).is_some() {
+            // A stale raster is on screen; the worker refresh will
+            // swap it — never compile inline here.
+            return;
+        }
         self.doc_preview = Some(match self.warm_doc_preview_memo(&text) {
             None => Ok(()),
             Some(result) => result,
         });
     }
 
-    /// F4: prefetch the Ctrl+R doc-preview raster while the editor is
-    /// idle — the user has opened the preview before, no overlay is
-    /// open, no kernel results are in flight, and the doc has been
-    /// quiet for [`IDLE_PREFETCH_DELAY`]. The compose runs on a
-    /// worker thread (F1) from an owned
+    /// Dispatch one worker doc-preview compose for the *current*
+    /// content. No-op while a compose is already in flight, while
+    /// kernel results are in flight (the raster would be stale on
+    /// arrival), or when the memo already holds the current content
+    /// (the hit is counted for the report). The compose runs on a
+    /// worker thread from an owned
     /// [`ScreenshotSnapshot`](crate::kernel_bridge::ScreenshotSnapshot),
-    /// so prefetching never stalls a frame; the result lands via
-    /// [`Self::drain_preview_job`]. Warming here (not on open) means
-    /// Ctrl+R opens with a pure blit; the accounting counts the
-    /// prefetch compile honestly against the hit rate.
-    fn prefetch_doc_preview_if_idle(&mut self) {
-        if !self.preview_wanted || self.doc_preview.is_some() || self.preview_job.is_some() {
+    /// so it never stalls a frame; the result lands via
+    /// [`Self::drain_preview_job`].
+    fn dispatch_doc_preview_job(&mut self) {
+        if self.preview_job.is_some() || self.kernel_deadline.is_some() {
             return;
         }
-        if self.kernel_deadline.is_some() {
-            // Results in flight would make the raster stale at once.
-            return;
-        }
-        if std::time::Instant::now().duration_since(self.last_edit) < IDLE_PREFETCH_DELAY {
-            return;
-        }
-        let text = self.doc.text().to_string();
+        let text = cached_doc_text(&mut self.text_cache, self.doc.revision(), self.doc.text());
         let key = self.doc_preview_key(&text);
-        // Already warm for this content — nothing to dispatch (and
-        // the hit is counted for the report).
+        // Already warm for this content — nothing to dispatch.
         if self.memo_store.get("doc_preview", 0, key).is_some() {
             return;
         }
@@ -1211,6 +1272,23 @@ impl App {
             dispatch_key: key,
             rx,
         });
+    }
+
+    /// F4: while the editor is quiet, keep the Ctrl+R raster warm on
+    /// a worker thread — both *before* the preview is ever opened
+    /// (the user has opened it before, so re-opening is a blit) and
+    /// *while* it is open (the doc or the results moved: the stale
+    /// raster stays on screen and swaps when the fresh compose
+    /// lands). Either way, no per-keystroke synchronous whole-doc
+    /// compile happens while the preview is open.
+    fn prefetch_doc_preview_if_idle(&mut self) {
+        if !self.preview_wanted || self.preview_job.is_some() {
+            return;
+        }
+        if std::time::Instant::now().duration_since(self.last_edit) < IDLE_PREFETCH_DELAY {
+            return;
+        }
+        self.dispatch_doc_preview_job();
     }
 
     /// Drain a finished background doc-preview compose (F1): insert
@@ -1236,9 +1314,16 @@ impl App {
                 match result {
                     Ok(image) => {
                         self.memo_store.insert("doc_preview", 0, current_key, image);
+                        self.request_redraw();
                     }
-                    Err(_) => {
+                    Err(e) => {
                         self.memo_store.remove("doc_preview", 0);
+                        // While the preview is open, surface the
+                        // failure like the synchronous path does.
+                        if self.doc_preview.is_some() {
+                            self.doc_preview = Some(Err(e));
+                        }
+                        self.request_redraw();
                     }
                 }
             }
@@ -1274,6 +1359,77 @@ impl App {
             std::time::Instant::now(),
         ));
         self.request_redraw();
+    }
+
+    /// F5: toggle the live memo/frame HUD — a bottom-right status
+    /// line reporting the last frame's class (`blit` = the idle guard
+    /// skipped everything, `caret` = the layout/region pass was
+    /// skipped, `full` = real work ran) and the memo store's lifetime
+    /// counters plus the compile rate since the previous tick. This
+    /// makes the memoization wins measurable while using the editor.
+    /// Esc dismisses like the other transient lines. The counters are
+    /// lifetime (never reset by the overlay-close report), so the
+    /// per-interval deltas stay honest mid-session.
+    fn toggle_hud(&mut self) {
+        self.hud = !self.hud;
+        if self.hud {
+            self.hud_state = Some((std::time::Instant::now(), self.memo_store.lifetime()));
+        } else {
+            self.hud_state = None;
+            self.memo_store.remove("hud", self.layout_width);
+        }
+        self.request_redraw();
+    }
+
+    /// F5: rebuild the HUD's memoized readout at most once per
+    /// [`HUD_TICK`]. Content-keyed like the overlays, so the line
+    /// compiles Typst a few times a second at most while every other
+    /// frame blits it. Runs outside the idle guard (it is a
+    /// measurement tool: it must reflect the *last* frame's class and
+    /// the current counters even on pure-blit frames).
+    fn refresh_hud_memo(&mut self, width_px: u32) {
+        const SITE: &str = "hud";
+        if !self.hud {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let Some((last_tick, last_counts)) = self.hud_state else {
+            self.hud_state = Some((now, self.memo_store.lifetime()));
+            return;
+        };
+        if now.duration_since(last_tick) < HUD_TICK {
+            return;
+        }
+        let counts = self.memo_store.lifetime();
+        let (dh, dc, de) = (
+            counts.0.saturating_sub(last_counts.0),
+            counts.1.saturating_sub(last_counts.1),
+            counts.2.saturating_sub(last_counts.2),
+        );
+        let secs = now.duration_since(last_tick).as_secs_f64().max(0.001);
+        let cps = dc as f64 / secs;
+        let total = counts.0 + counts.1;
+        let pct = if total == 0 {
+            100.0
+        } else {
+            counts.0 as f64 * 100.0 / total as f64
+        };
+        let mut markup = format!(
+            "frame {} · {}h/{}c/{}e since tick · Σ {}h/{}c/{}e ({:.0}%) · {cps:.1} c/s",
+            self.last_frame_class.label(),
+            dh,
+            dc,
+            de,
+            counts.0,
+            counts.1,
+            counts.2,
+            pct,
+        );
+        if de > 0 {
+            markup.push_str(&format!(" · {de} evicted"));
+        }
+        self.hud_state = Some((now, counts));
+        self.memo_overlay_markup(SITE, &markup, width_px);
     }
 
     /// Recompute the open menu's rows from the current doc + bridge
@@ -2169,6 +2325,9 @@ impl App {
         };
         let idle =
             self.status_flash.is_none() && self.last_frame.as_ref().is_some_and(|f| *f == frame);
+        // F5: what the HUD reports — `Blit` when the idle guard skips
+        // the pre-pass, otherwise the layout-pass decision below.
+        let mut frame_class = FrameClass::Blit;
 
         if !idle {
             // F3: block layouts are content-keyed over exactly (doc
@@ -2199,6 +2358,11 @@ impl App {
                 size.width,
                 reveal_ranges.is_empty(),
             );
+            frame_class = if can_skip_layouts {
+                FrameClass::CaretSkip
+            } else {
+                FrameClass::Full
+            };
             if !can_skip_layouts {
                 // F1: the front-end parse runs once per edit — an
                 // unchanged doc revision proves the cached
@@ -2363,8 +2527,12 @@ impl App {
         }
         // The pre-pass above consumed exactly the inputs folded into
         // `frame`; record it so the next frame can prove nothing
-        // moved and skip straight to the blits.
+        // moved and skip straight to the blits. The frame class feeds
+        // the F5 HUD; its readout re-renders outside the idle guard
+        // (it must reflect the last frame even on pure-blit frames).
+        self.last_frame_class = frame_class;
         self.last_frame = Some(frame);
+        self.refresh_hud_memo(win_px);
 
         // Compute the selection up-front (owned) so it doesn't alias
         // the mutable `surface` borrow below.
@@ -2626,6 +2794,15 @@ impl App {
         {
             let top = win_h.saturating_sub(img.height as usize + 8);
             blit_over_bg_clipped(&mut buffer, win_w, win_h, 8, top, img);
+        }
+        // Live memo/frame HUD (F5): bottom-right status line, raster
+        // rebuilt at most [`HUD_TICK`]-apart by `refresh_hud_memo`.
+        if self.hud
+            && let Some(img) = self.memo_store.image("hud", win_px)
+        {
+            let top = win_h.saturating_sub(img.height as usize + 8);
+            let left = win_w.saturating_sub(img.width as usize + 8);
+            blit_over_bg_clipped(&mut buffer, win_w, win_h, left, top, img);
         }
 
         let _ = buffer.present();
@@ -3150,13 +3327,16 @@ impl ApplicationHandler<UserEvent> for App {
         // (the next blink redraw repaints without it).
         self.expire_status_flash();
 
-        // Busy-poll during kernel work; otherwise wake for the next
-        // blink.
-        event_loop.set_control_flow(if self.kernel_deadline.is_some() {
-            ControlFlow::Poll
-        } else {
-            ControlFlow::WaitUntil(self.next_blink)
-        });
+        // Busy-poll while kernel work or a worker preview compose is
+        // in flight (so a finished compose is drained promptly, not on
+        // the next blink); otherwise wake for the next blink.
+        event_loop.set_control_flow(
+            if self.kernel_deadline.is_some() || self.preview_job.is_some() {
+                ControlFlow::Poll
+            } else {
+                ControlFlow::WaitUntil(self.next_blink)
+            },
+        );
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -3342,6 +3522,13 @@ impl ApplicationHandler<UserEvent> for App {
                             || self.doc_preview.take().is_some()
                         {
                             self.request_redraw();
+                        } else if self.hud {
+                            // The live HUD dismisses like the other
+                            // transient lines (F5 toggles it too).
+                            self.hud = false;
+                            self.hud_state = None;
+                            self.memo_store.remove("hud", self.layout_width);
+                            self.request_redraw();
                         } else if self.popup_stack.is_empty() {
                             event_loop.exit();
                         } else {
@@ -3353,6 +3540,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // Shortcut help overlay (TUI convention: F1
                         // is help everywhere).
                         self.toggle_help_overlay();
+                    }
+                    Key::Named(NamedKey::F5) => {
+                        // Live memo/frame HUD: which frames actually
+                        // compile Typst vs pure-blit (see toggle_hud).
+                        self.toggle_hud();
                     }
                     Key::Named(NamedKey::Backspace) => {
                         self.backspace();
@@ -3710,6 +3902,13 @@ mod tests {
             "a moved revision must re-key the cache"
         );
         assert_eq!(&*c, &mirror);
+    }
+
+    #[test]
+    fn frame_class_labels_are_stable() {
+        assert_eq!(super::FrameClass::Blit.label(), "blit");
+        assert_eq!(super::FrameClass::CaretSkip.label(), "caret");
+        assert_eq!(super::FrameClass::Full.label(), "full");
     }
 
     #[test]
