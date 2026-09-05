@@ -245,6 +245,27 @@ the doc stays the source of truth).
   window or a ~211 ms large-doc compose); it now wakes every 8 ms
   instead — ~8 ms of drain latency, ~0% CPU.
 
+  The next round closed the last open-overlay draw-site seam: the
+  **cite popup boxes** (Ctrl+N) were re-scanning the whole document
+  *per popup* and running a fresh Typst compile *per popup* at draw
+  time on **every** redraw while any box was open — including
+  caret-blink frames. The boxes are now rendered into a cache keyed
+  by (doc revision, popup stack, window width): one whole-doc scan
+  and one compile per popup per edit/push/pop/resize, and every
+  other frame blits the cached bodies and anchors (Arc-shared
+  rasters, so the pre-borrow snapshot is a refcount bump). Fixing
+  the draw site exposed a latent feature bug: every box resolved
+  its body in the *topmost* box's body, so the common single-popup
+  case — whose scope is its own body — drew an empty frame. The
+  cache now walks the plan's per-box scope chain (first box
+  resolves in the base doc, each nested box in the previous box's
+  body; a bib-key box falls back to the base doc), pinned by tests
+  including a body that cites at depth two. The same round stopped
+  the event loop from repainting an **unfocused** window at the
+  blink rate forever: the caret blink is frozen while unfocused
+  (caret left visible, timer resumed on focus-in) and the loop
+  sleeps (`ControlFlow::Wait`) instead of waking every ~530 ms.
+
   Because all of this is invisible, **F5** toggles a live memo/frame
   **HUD** (bottom-right status line, Esc/F5 dismisses) that makes the
   wins measurable in-editor: it reports the last frame's class —

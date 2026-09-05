@@ -41,7 +41,7 @@ pub struct CiteLabelPos {
 }
 
 impl CiteLabelPos {
-    fn from_caret(geom: mathed_core::glyphs::CaretGeom, label_w: f64) -> Self {
+    pub(crate) fn from_caret(geom: mathed_core::glyphs::CaretGeom, label_w: f64) -> Self {
         Self {
             x: f64::from(geom.x),
             top: f64::from(geom.top),
@@ -205,29 +205,20 @@ fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Resolve a cite's `[N]` label position from the cached
-/// [`DocLayout`].
-///
-/// `target` is the auto-assigned number `N` of the cite to find.
-/// Returns `None` when the cite or its glyph is not found (e.g. the
-/// label was hidden in the current reveal mode).
-pub fn cite_label_pos(doc_text: &str, layout: &DocLayout, target: u64) -> Option<CiteLabelPos> {
-    let scan = scan(doc_text);
-    let refs = scan_references(&scan);
-    let entry = refs.iter().find(|e| e.numbers.contains(&target))?;
-    let stmt = scan.stmts.get(entry.stmt_idx)?;
-    // The label is rendered at stmt.range.start. Look up the closest
-    // glyph at that byte offset.
-    let geom = layout.glyphs.caret_for_byte(stmt.range.start)?;
-    let label_width = cite_label_width(entry) * layout.width as f64 / BOX_MAX_WIDTH_PT;
-    Some(CiteLabelPos::from_caret(geom, label_width))
+/// The anchored `[N]` label width (pt) of a cite entry inside a
+/// given layout — the raw per-character estimate scaled to the
+/// layout's actual width. Exposed for the popup-box cache, which
+/// stores the anchor once per (doc revision, stack, width) instead
+/// of re-scanning the document to derive it on every frame.
+pub(crate) fn cite_label_anchor_width(entry: &ReferenceEntry, layout: &DocLayout) -> f64 {
+    cite_label_width(entry) * layout.width as f64 / BOX_MAX_WIDTH_PT
 }
 
 /// Approximate the rendered width of a cite's `[N]` label, in points
 /// (used as a rough horizontal anchor for the box). The exact value
 /// depends on Typst's font metrics; for v1 we estimate from the
 /// label's character count.
-fn cite_label_width(entry: &ReferenceEntry) -> f64 {
+pub(crate) fn cite_label_width(entry: &ReferenceEntry) -> f64 {
     let label = mathed_core::markers::cite_label_text(entry);
     // ~7 pt per char at the default font size.
     label.chars().count() as f64 * 7.0

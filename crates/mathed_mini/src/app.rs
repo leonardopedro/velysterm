@@ -643,6 +643,17 @@ struct App {
     /// the same `N`. The deepest entry is the *front* of the stack —
     /// the one drawn on top of all the others.
     popup_stack: Vec<u32>,
+    /// Cached popup-box renders for the current (doc revision,
+    /// popup stack, window width) triple; `None` while the stack is
+    /// empty. The draw site blits the cached bodies and label
+    /// anchors — the whole-doc scan and per-popup Typst renders run
+    /// once per rebuild, not on every redraw.
+    popup_render: Option<PopupRender>,
+    /// Whether the window currently has keyboard focus. While
+    /// unfocused nothing visible animates (the caret blink is
+    /// frozen), so the event loop sleeps instead of repainting at
+    /// the blink rate.
+    focused: bool,
     /// "Show every hidden marker" toggle (Ctrl+M). Drives
     /// `TransformOptions::show_hidden` in `redraw`, matching the
     /// Bevy `mathed` frontend: every `#id` marker renders as
@@ -724,6 +735,8 @@ impl App {
             completion: CompletionUi::new(),
             kernel_deadline: None,
             popup_stack: Vec::new(),
+            popup_render: None,
+            focused: true,
             show_marker_overlay: false,
             references_panel: None,
             references_panel_height: 0,
@@ -1682,83 +1695,57 @@ impl App {
     /// referenced content. Boxes are stacked top-to-bottom in stack
     /// order, anchored below their cite's `[N]` label. The base doc
     /// is **not** re-laid-out — the boxes are drawn on top of the
-    /// blitted cached image.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_popup_boxes(
-        doc_text: &str,
-        popup_stack: &[u32],
-        buffer: &mut [u32],
-        win_w: usize,
-        win_h: usize,
-        block_layouts: &HashMap<BlockId, crate::memo::BlockLayout>,
-        block_index: &BlockIndex,
-        block_offsets: &[(BlockId, f32)],
-    ) {
-        // Compute the "current scope" text — the base doc, or the
-        // body of the topmost open box when the stack is non-empty
-        // (so a nested Ctrl+N is resolved relative to the parent
-        // box, not the document).
-        let scope = cite_popup_scope_text(doc_text, popup_stack);
+    /// blitted cached image. The bodies + anchors come from
+    /// [`App::popup_render`] (rebuilt only when the doc revision /
+    /// stack / width moved), so blink and caret-motion frames blit
+    /// instead of re-scanning the document and re-compiling Typst.
+    fn draw_popup_boxes(buffer: &mut [u32], win_w: usize, win_h: usize, boxes: &[PopupBoxRender]) {
         let mut y_cursor = 0.0;
-        for &target in popup_stack.iter() {
-            let target = target as u64;
-            // Find the block containing this cite's label, then use
-            // that block's layout for screen positioning.
-            let scan = mathed_core::markers::scan(doc_text);
-            let refs = mathed_core::markers::scan_references(&scan);
-            let entry = match refs.iter().find(|e| e.numbers.contains(&target)) {
-                Some(e) => e,
-                None => continue,
-            };
-            let stmt = match scan.stmts.get(entry.stmt_idx) {
-                Some(s) => s,
-                None => continue,
-            };
-            let cite_byte = stmt.range.start;
-            let (block_layout, _top) = {
-                let bid = block_offsets
-                    .iter()
-                    .find(|(id, _)| {
-                        block_index.blocks.iter().any(|b| {
-                            b.id == *id && b.range.start <= cite_byte && cite_byte <= b.range.end
-                        })
-                    })
-                    .or_else(|| block_offsets.first())
-                    .map(|(id, top)| (*id, *top));
-                match bid.and_then(|(id, top)| block_layouts.get(&id).map(|l| (l, top))) {
-                    Some(pair) => pair,
-                    None => continue,
-                }
-            };
-            let Some(label_pos) = crate::cite_popup::cite_label_pos(doc_text, block_layout, target)
-            else {
-                continue;
-            };
-            // The body is resolved in the *scope* text so recursive
-            // expansion uses the right numbering.
-            let body = crate::cite_popup::resolve_popup_body(&scope, target);
-            let body_img = body.as_ref().and_then(|b| {
-                let opts = mathed_core::transform::TransformOptions::default();
-                crate::cite_popup::render_popup_body(b, &opts)
-            });
-            let (body_ref, body_h) = match &body_img {
-                Some((img, _, _h)) => (Some(img), img.height as f64),
-                None => (None, 60.0),
-            };
-            let top = (label_pos.bottom + y_cursor).round() as usize;
-            let width = label_pos.label_width.max(200.0) as usize;
+        for b in boxes {
+            let top = (b.label.bottom + y_cursor).round() as usize;
+            let width = b.label.label_width.max(200.0) as usize;
             draw_popup_box(
                 buffer,
                 win_w,
                 win_h,
-                label_pos.x.round().max(0.0) as usize,
+                b.label.x.round().max(0.0) as usize,
                 top,
                 width,
-                body_ref,
+                b.body.as_ref().map(|a| a.as_ref()),
             );
             // Stack: each subsequent box sits below the previous.
-            y_cursor += body_h + 8.0;
+            y_cursor += b.body_h + 8.0;
         }
+    }
+
+    /// Refresh [`App::popup_render`] when the doc revision, the
+    /// popup stack, or the window width changed; otherwise keep it.
+    /// The rebuild runs one whole-doc scan and one Typst render per
+    /// popup — once per edit / push / pop / resize, never per frame
+    /// (the draw site used to do both on *every* redraw while any
+    /// box was open).
+    fn refresh_popup_render(&mut self, width_px: u32) {
+        if self.popup_stack.is_empty() {
+            self.popup_render = None;
+            return;
+        }
+        let rev = self.doc.revision();
+        if popup_render_fresh(self.popup_render.as_ref(), rev, &self.popup_stack, width_px) {
+            return;
+        }
+        let boxes = compute_popup_render(
+            self.doc.text(),
+            &self.popup_stack,
+            &self.block_layouts,
+            &self.block_index,
+            &self.block_offsets,
+        );
+        self.popup_render = Some(PopupRender {
+            rev,
+            stack: self.popup_stack.clone(),
+            width_px,
+            boxes,
+        });
     }
 
     /// Re-run the kernel on the current document and open a polling
@@ -2609,6 +2596,14 @@ impl App {
         self.last_frame = Some(frame);
         self.refresh_hud_memo(win_px);
 
+        // Rebuild the cached popup boxes when the doc revision, the
+        // popup stack, or the window width changed, and snapshot the
+        // boxes (Arc bodies, cheap) before the mutable `surface`
+        // borrow below. A matching key is a no-op: blink and
+        // caret-motion frames blit the same boxes.
+        self.refresh_popup_render(win_px);
+        let popup_boxes = self.popup_render.as_ref().map(|r| r.boxes.clone());
+
         // Compute the selection up-front (owned) so it doesn't alias
         // the mutable `surface` borrow below.
         let sel = self.selection();
@@ -2827,18 +2822,10 @@ impl App {
             blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, m);
         }
 
-        // Popup boxes.
-        if !self.popup_stack.is_empty() {
-            Self::draw_popup_boxes(
-                self.doc.text(),
-                &self.popup_stack,
-                &mut buffer,
-                win_w,
-                doc_h,
-                &self.block_layouts,
-                &self.block_index,
-                &self.block_offsets,
-            );
+        // Popup boxes (bodies + anchors cached in `popup_render`
+        // keyed by doc revision / stack / width; blink frames blit).
+        if let Some(boxes) = &popup_boxes {
+            Self::draw_popup_boxes(&mut buffer, win_w, doc_h, boxes);
         }
 
         // Footer.
@@ -3001,6 +2988,145 @@ fn draw_caret(buffer: &mut [u32], win_w: usize, win_h: usize, geom: CaretGeom) {
             *px ^= 0x00FF_FFFF;
         }
     }
+}
+
+/// One cached popup box: the anchored `[N]` label position in the
+/// base layout plus the rendered body raster. Every field is a pure
+/// function of (doc revision, popup stack, window width), so blink
+/// and caret-motion frames blit these instead of re-scanning the
+/// document and re-compiling Typst per popup on every redraw.
+#[derive(Clone)]
+struct PopupBoxRender {
+    label: crate::cite_popup::CiteLabelPos,
+    /// The rendered body raster, shared by `Arc` so the per-frame
+    /// snapshot before the `surface` borrow is a refcount bump, not
+    /// an image copy.
+    body: Option<Arc<imaging::RgbaImage>>,
+    /// Height of the body area in pixels (60.0 placeholder when the
+    /// body could not be resolved/rendered).
+    body_h: f64,
+}
+
+/// The [`App::popup_render`] cache: the rendered boxes for one
+/// (doc revision, popup stack, window width) triple.
+struct PopupRender {
+    rev: u64,
+    stack: Vec<u32>,
+    width_px: u32,
+    boxes: Vec<PopupBoxRender>,
+}
+
+/// `true` when the cached popup render still matches the current
+/// (doc revision, popup stack, window width). Anything else forces a
+/// rebuild — and a matching triple proves a blink or caret-motion
+/// frame can blit the cached boxes unchanged.
+fn popup_render_fresh(
+    cached: Option<&PopupRender>,
+    rev: u64,
+    stack: &[u32],
+    width_px: u32,
+) -> bool {
+    cached.is_some_and(|p| p.rev == rev && p.stack == stack && p.width_px == width_px)
+}
+
+/// Whether the caret blink should toggle now: the interval elapsed
+/// *and* the window is focused (an unfocused window has nothing
+/// visible to animate, so the blink timer is frozen there).
+fn caret_blink_due(focused: bool, now: Instant, next_blink: Instant) -> bool {
+    focused && now >= next_blink
+}
+
+/// Compute the rendered popup boxes for (doc_text, popup_stack): one
+/// whole-doc scan + one Typst render per popup, plus the anchored
+/// label positions against the current block layouts. Pure — the
+/// caller re-invokes it only when `popup_render_fresh` says the key
+/// moved. Boxes whose target is missing from the document are
+/// omitted (they were skipped at draw time before, and skipping
+/// here keeps the stack heights identical).
+fn compute_popup_render(
+    doc_text: &str,
+    popup_stack: &[u32],
+    block_layouts: &HashMap<BlockId, crate::memo::BlockLayout>,
+    block_index: &BlockIndex,
+    block_offsets: &[(BlockId, f32)],
+) -> Vec<PopupBoxRender> {
+    // One whole-doc scan per rebuild (not per frame); the per-box
+    // scopes below are resolved against it and the previous box's
+    // body.
+    let scan = mathed_core::markers::scan(doc_text);
+    let refs = mathed_core::markers::scan_references(&scan);
+    let mut boxes = Vec::with_capacity(popup_stack.len());
+    // Per-box scope chain (cite_popup_boxes plan, Stage 4): the
+    // first box resolves `stack[0]` in the base doc; each nested box
+    // resolves in the *previous* box's body (a bib-key box has no
+    // body, so the scope falls back to the base doc — the same
+    // fallback `cite_popup_scope_text` uses for push checks). The
+    // old draw code resolved every box in the topmost box's body, so
+    // the common single-popup case — whose scope is its own body —
+    // rendered an empty frame.
+    let mut prev_body: Option<String> = None;
+    for &target in popup_stack {
+        let target = target as u64;
+        let scope: &str = prev_body.as_deref().unwrap_or(doc_text);
+        let body = crate::cite_popup::resolve_popup_body(scope, target);
+        prev_body = match &body {
+            Some(crate::cite_popup::PopupBody::DocumentRef { body_text, .. }) => {
+                Some(body_text.clone())
+            }
+            _ => None,
+        };
+        let entry = match refs.iter().find(|e| e.numbers.contains(&target)) {
+            Some(e) => e,
+            None => continue,
+        };
+        let stmt = match scan.stmts.get(entry.stmt_idx) {
+            Some(s) => s,
+            None => continue,
+        };
+        let cite_byte = stmt.range.start;
+        // Find the block containing this cite's label, then use
+        // that block's layout for screen positioning.
+        let block_layout = {
+            let bid = block_offsets
+                .iter()
+                .find(|(id, _)| {
+                    block_index.blocks.iter().any(|b| {
+                        b.id == *id && b.range.start <= cite_byte && cite_byte <= b.range.end
+                    })
+                })
+                .or_else(|| block_offsets.first())
+                .map(|(id, _)| *id);
+            match bid.and_then(|id| block_layouts.get(&id)) {
+                Some(l) => l,
+                None => continue,
+            }
+        };
+        let geom = match block_layout.glyphs.caret_for_byte(cite_byte) {
+            Some(g) => g,
+            None => continue,
+        };
+        let label = crate::cite_popup::CiteLabelPos::from_caret(
+            geom,
+            crate::cite_popup::cite_label_anchor_width(entry, block_layout),
+        );
+        let body_img = body.as_ref().and_then(|b| {
+            let opts = mathed_core::transform::TransformOptions::default();
+            crate::cite_popup::render_popup_body(b, &opts)
+        });
+        let (body, body_h) = match body_img {
+            Some((img, _, _)) => {
+                let h = img.height as f64;
+                (Some(Arc::new(img)), h)
+            }
+            None => (None, 60.0),
+        };
+        boxes.push(PopupBoxRender {
+            label,
+            body,
+            body_h,
+        });
+    }
+    boxes
 }
 
 /// Cite-popup box overlay (cite_popup_boxes plan, Stage 5). Draws a
@@ -3390,9 +3516,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
-        // Caret blink: toggle visibility at the blink interval.
+        // Caret blink: toggle visibility at the blink interval,
+        // only while the window is focused. Unfocused there is
+        // nothing visible to animate, so the blink timer is frozen
+        // (Focused(false) also freezes the caret visible) and the
+        // loop sleeps below instead of repainting every blink tick.
         let now = Instant::now();
-        if now >= self.next_blink {
+        if caret_blink_due(self.focused, now, self.next_blink) {
             self.caret_visible = !self.caret_visible;
             self.next_blink = now + BLINK_INTERVAL;
             self.request_redraw();
@@ -3419,8 +3549,13 @@ impl ApplicationHandler<UserEvent> for App {
         event_loop.set_control_flow(
             if self.kernel_deadline.is_some() || self.preview_job.is_some() {
                 ControlFlow::WaitUntil(now + POLL_GRANULARITY)
-            } else {
+            } else if self.focused {
                 ControlFlow::WaitUntil(self.next_blink)
+            } else {
+                // Unfocused and nothing in flight: nothing visible
+                // animates — sleep until the next event instead of
+                // repainting at the blink rate forever.
+                ControlFlow::Wait
             },
         );
     }
@@ -3437,6 +3572,19 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) => self.request_redraw(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if focused {
+                    // Resume the blink on focus-in.
+                    self.reset_blink();
+                } else {
+                    // Freeze the caret visible on blur (a hidden
+                    // caret would look like a focus bug); the blink
+                    // timer is paused until `Focused(true)`.
+                    self.caret_visible = true;
+                }
+                self.request_redraw();
+            }
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::Ime(ime) => self.handle_ime(ime),
             WindowEvent::ModifiersChanged(m) => {
@@ -3786,13 +3934,136 @@ mod tests {
     // into a `Vec<usize>`, changing the semantics.
     #![allow(clippy::single_range_in_vec_init)]
     use super::{
-        FAR_LEFT, FAR_RIGHT, block_layout_key, cite_popup_scope_text, draw_caret, region_key,
-        region_key_from, resolve_hit, selection_range, touched_marker_starts,
-        touched_math_span_starts, touched_space_run_starts,
+        FAR_LEFT, FAR_RIGHT, PopupRender, block_layout_key, caret_blink_due, cite_popup_scope_text,
+        compute_popup_render, draw_caret, popup_render_fresh, region_key, region_key_from,
+        resolve_hit, selection_range, touched_marker_starts, touched_math_span_starts,
+        touched_space_run_starts,
     };
+    use crate::memo::BlockLayout;
     use crate::render::{DocLayout, active_reveal_span, layout_doc, layout_doc_with};
+    use mathed_core::blocks::BlockIndex;
     use mathed_core::glyphs::{CaretGeom, V2};
     use mathed_core::transform::TransformOptions;
+    use std::collections::HashMap;
+
+    #[test]
+    fn popup_render_fresh_gates_on_rev_stack_width() {
+        // The draw site rebuilds the cached popup boxes only when
+        // the (doc revision, popup stack, window width) key moved —
+        // a matching key proves a blink or caret-motion frame can
+        // blit the cached boxes (the old code re-scanned the doc and
+        // re-compiled Typst per popup on *every* redraw).
+        let cached = PopupRender {
+            rev: 7,
+            stack: vec![1, 2],
+            width_px: 1200,
+            boxes: Vec::new(),
+        };
+        assert!(popup_render_fresh(Some(&cached), 7, &[1, 2], 1200));
+        assert!(!popup_render_fresh(None, 7, &[1, 2], 1200), "cold");
+        assert!(
+            !popup_render_fresh(Some(&cached), 8, &[1, 2], 1200),
+            "doc edit moves the revision"
+        );
+        assert!(
+            !popup_render_fresh(Some(&cached), 7, &[1], 1200),
+            "push/pop changes the stack"
+        );
+        assert!(
+            !popup_render_fresh(Some(&cached), 7, &[1, 2], 1199),
+            "resize changes the width"
+        );
+    }
+
+    #[test]
+    fn caret_blink_due_freezes_unfocused_windows() {
+        // An unfocused window has nothing visible to animate: the
+        // blink timer is frozen there (and `about_to_wait` sleeps)
+        // instead of repainting every [`BLINK_INTERVAL`] forever.
+        let now = std::time::Instant::now();
+        let past = now - std::time::Duration::from_millis(600);
+        let future = now + std::time::Duration::from_millis(600);
+        assert!(caret_blink_due(true, now, past), "focused + elapsed");
+        assert!(!caret_blink_due(true, now, future), "focused, not yet due");
+        assert!(
+            !caret_blink_due(false, now, past),
+            "unfocused: blink frozen even past the deadline"
+        );
+    }
+
+    #[test]
+    fn compute_popup_render_renders_doc_ref_body_once() {
+        // A single-block doc with one cite: the cache produces one
+        // box whose body is the rendered ` a ` (the segment between
+        // #1 and #2), anchored at the cite statement's label. This
+        // pins the fixed scope chain: the first box resolves in the
+        // base doc (the old draw code resolved it in its own body,
+        // rendering an empty frame).
+        let doc = "#1 a #2 \\cite(#1,#2) tail";
+        let mut block_index = BlockIndex::default();
+        block_index.update(doc);
+        assert_eq!(block_index.blocks.len(), 1, "no blank lines ⇒ one block");
+        let layout = layout_doc(doc, 600.0).expect("doc lays out");
+        let bid = block_index.blocks[0].id;
+        let mut layouts = HashMap::new();
+        layouts.insert(bid, BlockLayout { key: 0, layout });
+        let offsets = vec![(bid, 0.0)];
+
+        let boxes = compute_popup_render(doc, &[1], &layouts, &block_index, &offsets);
+        assert_eq!(boxes.len(), 1, "cite [1] exists");
+        let b = &boxes[0];
+        assert!(b.body.is_some(), "the doc-ref body renders");
+        assert!(b.body_h > 0.0);
+        assert!(
+            b.label.x >= 0.0 && b.label.bottom >= b.label.top,
+            "sane anchor"
+        );
+
+        // Nested chain: a second box resolves in the *first* box's
+        // body. ` a ` has no cites, so the nested box is an empty
+        // frame — but the first box still rendered.
+        let two = compute_popup_render(doc, &[1, 1], &layouts, &block_index, &offsets);
+        assert_eq!(two.len(), 2, "stack order preserved");
+        assert!(two[0].body.is_some());
+        assert!(two[1].body.is_none(), "nothing cited inside ` a `");
+        assert_eq!(two[1].body_h, 60.0);
+
+        // A body that itself cites renders at the next depth: the
+        // base doc's cite [2] has body ` x \cite(y) `, and the
+        // nested box for target 1 (a bib-key cite inside that body)
+        // renders its placeholder.
+        let nested_doc = "#1 x \\cite(y) #2 \\cite(#1,#2)";
+        let mut nested_index = BlockIndex::default();
+        nested_index.update(nested_doc);
+        let nested_layout = layout_doc(nested_doc, 600.0).expect("nested doc lays out");
+        let nid = nested_index.blocks[0].id;
+        let mut nested_layouts = HashMap::new();
+        nested_layouts.insert(
+            nid,
+            BlockLayout {
+                key: 0,
+                layout: nested_layout,
+            },
+        );
+        let nested_offsets = vec![(nid, 0.0)];
+        let nested = compute_popup_render(
+            nested_doc,
+            &[2, 1],
+            &nested_layouts,
+            &nested_index,
+            &nested_offsets,
+        );
+        assert_eq!(nested.len(), 2);
+        assert!(nested[0].body.is_some(), "box for base cite [2]");
+        assert!(
+            nested[1].body.is_some(),
+            "box for cite [1] inside that body"
+        );
+
+        // Dangling target: the box is omitted, not drawn empty.
+        let dangling = compute_popup_render(doc, &[2], &layouts, &block_index, &offsets);
+        assert!(dangling.is_empty(), "cite [2] does not exist");
+    }
 
     #[test]
     fn touched_marker_starts_finds_markers_the_selection_spans() {
