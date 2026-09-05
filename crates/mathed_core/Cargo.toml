@@ -13,6 +13,7 @@ serde_json = "1"
 thiserror = { workspace = true }
 typst = { workspace = true }
 unicode-math-class = { workspace = true }
+unicode-segmentation = "1"
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -371,43 +371,21 @@ pub fn prev_cluster_boundary(text: &str, at: usize) -> usize {
     if at == 0 {
         return 0;
     }
-    let mut p = at;
-    // 1. Combining tail: marks / ZWJ / variation selectors attach to
-    //    the char before them.
-    loop {
-        let prev = char_start_before(text, p);
-        let c = text[prev..p].chars().next().unwrap();
-        if is_combining(c) {
-            p = prev;
-            if p == 0 {
-                return 0;
-            }
-        } else {
-            break;
-        }
+    // U6: full extended grapheme-cluster boundaries via
+    // unicode-segmentation's GraphemeCursor — ZWJ emoji families,
+    // skin tones, regional-indicator flag pairs, keycaps, and
+    // combining marks all delete as one unit. The previous
+    // hand-rolled walk covered marks and ZWJ but not RI pairs or
+    // skin-tone sequences. The public API is unchanged; callers
+    // (both frontends' backspace) need no edits.
+    let mut cursor = unicode_segmentation::GraphemeCursor::new(at, text.len(), true);
+    match cursor.prev_boundary(text, 0) {
+        Ok(Some(prev)) => prev,
+        // Defensive: GraphemeCursor returns None only at the very
+        // start (already handled); any other failure falls back to
+        // the previous char boundary.
+        _ => char_start_before(text, at),
     }
-    // 2. The base char.
-    let mut start = char_start_before(text, p);
-    // 3. ZWJ sequences: a ZWJ before the base joins it to the
-    //    preceding base (emoji ZWJ families) — walk back through
-    //    (ZWJ, base) pairs.
-    loop {
-        if start == 0 {
-            break;
-        }
-        let before = char_start_before(text, start);
-        let c = text[before..start].chars().next().unwrap();
-        if c == '\u{200D}' {
-            start = before;
-            if start == 0 {
-                break;
-            }
-            start = char_start_before(text, start);
-        } else {
-            break;
-        }
-    }
-    start
 }
 
 /// Word range containing `pos`.
@@ -590,6 +568,61 @@ mod tests {
         // A leading combining mark forms its own cluster at the edge.
         let text = "\u{301}x";
         assert_eq!(prev_cluster_boundary(text, 2), 0);
+    }
+
+    /// U6: a regional-indicator flag pair and a skin-tone sequence
+    /// are each ONE cluster (the hand-rolled pre-U6 walk treated the
+    /// two regional indicators and the base+modifier separately).
+    #[test]
+    fn flag_pair_and_skin_tone_are_single_clusters() {
+        let flag = "\u{1F1E9}\u{1F1EA}"; // 🇩🇪
+        let text = format!("a{flag}b");
+        let at = text.len() - 1;
+        assert_eq!(
+            prev_cluster_boundary(&text, at),
+            at - flag.len(),
+            "flag pair is one cluster"
+        );
+
+        let tone = "\u{1F44D}\u{1F3FD}"; // 👍🏽
+        let text = format!("a{tone}b");
+        let at = text.len() - 1;
+        assert_eq!(
+            prev_cluster_boundary(&text, at),
+            at - tone.len(),
+            "skin-tone sequence is one cluster"
+        );
+    }
+
+    /// U6: a ZWJ family carrying a skin tone (woman scientist) is
+    /// one cluster across the whole sequence — marks, modifiers, and
+    /// ZWJ joins in one unit.
+    #[test]
+    fn zwj_family_with_skin_tone_is_one_cluster() {
+        let scientist = "\u{1F469}\u{1F3FB}\u{200D}\u{1F52C}"; // 👩🏼‍🔬
+        let text = format!("a{scientist}b");
+        let at = text.len() - 1;
+        assert_eq!(
+            prev_cluster_boundary(&text, at),
+            at - scientist.len(),
+            "ZWJ + skin-tone family is one cluster"
+        );
+    }
+
+    /// U6: on a mixed adversarial doc every cluster boundary is a
+    /// char boundary and strictly before the caret — the invariant
+    /// the frontends' backspace relies on.
+    #[test]
+    fn mixed_doc_cluster_boundaries_are_char_boundaries() {
+        let text = "x\u{301} \u{1F1E9}\u{1F1EA} \u{1F44D}\u{1F3FD} \u{1F469}\u{200D}\u{1F52C} z";
+        for at in 0..=text.len() {
+            let prev = prev_cluster_boundary(&text, at);
+            assert!(
+                text.is_char_boundary(prev),
+                "cluster boundary {prev} must be a char boundary (at {at})"
+            );
+            assert!(prev <= at, "cluster boundary {prev} <= caret {at}");
+        }
     }
 
     // Fuzz (U1 corpus style): on arbitrary multibyte strings, every
