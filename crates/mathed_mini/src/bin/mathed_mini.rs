@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     i += 1;
                 }
                 let out = mathed_mini::export::export_typst_template(&doc, ctx_json.as_deref())
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                 match out_path {
                     Some(p) => {
                         std::fs::write(&p, &out)?;

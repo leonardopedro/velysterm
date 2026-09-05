@@ -592,9 +592,9 @@ mod tests {
         assert_eq!(prev_cluster_boundary(text, 2), 0);
     }
 
-    /// Fuzz (U1 corpus style): on arbitrary multibyte strings, every
-    /// word boundary and cluster boundary is a char boundary and
-    /// never exceeds the text.
+    // Fuzz (U1 corpus style): on arbitrary multibyte strings, every
+    // word boundary and cluster boundary is a char boundary and
+    // never exceeds the text.
     proptest::proptest! {
         #[test]
         fn boundaries_never_split_code_points(

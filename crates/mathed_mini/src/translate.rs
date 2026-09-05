@@ -331,7 +331,8 @@ mod tests {
         assert_eq!(typst_str_lit("l1\nl2"), "\"l1\\nl2\"");
     }
 
-    // ── T2: \template render(ctx) ─────────────────────────────    #[test]
+    // ── T2: \template render(ctx) ─────────────────────────────
+    #[test]
     fn template_render_returns_markup() {
         let mut t = Translator::new();
         let src = "#let render(ctx) = \"#emph[hi]\"";

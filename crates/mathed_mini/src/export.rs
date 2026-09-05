@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn template_failure_is_loud_and_named() {
-        let doc = concat!("#1 not valid typst code #2 \\template(#1,#2, name: bad)");
+        let doc = "#1 not valid typst code #2 \\template(#1,#2, name: bad)";
         let err = export_typst_template(doc, None).unwrap_err();
         assert!(err.contains("bad"), "names the failing template: {err}");
     }
