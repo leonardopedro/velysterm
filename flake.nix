@@ -89,5 +89,21 @@ EOF
           echo "[velysterm-shell] generated libudev.pc -> $PKG_CONFIG_PATH"
         '';
       };
+
+      # The ipykernel e2e env: python with ipykernel + jupyter_client
+      # for `crates/kernel_client/scripts/ipykernel_stdio_bridge.py`
+      # and `run_ipykernel_e2e.sh` — a REAL Python kernel driven over
+      # the framed stdio transport behind mathed's `\kernel` segments.
+      # Much smaller than `default` (no bevy/winit deps); host cargo
+      # stays visible, so `cargo run -p mathed_mini` works inside it.
+      devShells.x86_64-linux.python-kernel = pkgs.mkShell {
+        name = "velysterm-python-kernel";
+        packages = [
+          (pkgs.python3.withPackages (ps: [ ps.ipykernel ps.jupyter-client ]))
+        ];
+        shellHook = ''
+          echo "[velysterm-python-kernel] python3 with ipykernel + jupyter_client"
+        '';
+      };
     };
 }

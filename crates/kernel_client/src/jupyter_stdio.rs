@@ -107,13 +107,27 @@ pub fn decode_partial(bytes: &[u8]) -> Result<(Vec<serde_json::Value>, Vec<u8>),
 /// Normalize kernel messages into [`KernelOutput`]s — the mapping a
 /// real Jupyter kernel's stream/execute_result/error replies need to
 /// feed the `kernel_exec` op's response. Each message is either a
-/// bare output object or a Jupyter envelope whose `content` carries
-/// the output fields; anything else is skipped (never an error).
+/// bare output object (the module/JSON convention) or a Jupyter
+/// envelope whose `content` carries the output fields. Real kernels
+/// identify the kind by the *message type* (`header.msg_type`:
+/// `stream` / `execute_result` / `display_data` / `error`) — their
+/// content has no `output_type` key — while canned frames carry
+/// `output_type` inside the content; both are accepted. Anything else
+/// is skipped (never an error).
 pub fn outputs_from_messages(msgs: &[serde_json::Value]) -> Vec<KernelOutput> {
     let mut out = Vec::new();
     for m in msgs {
         let content = m.get("content").unwrap_or(m);
-        match content.get("output_type").and_then(|t| t.as_str()) {
+        let kind = content
+            .get("output_type")
+            .and_then(|t| t.as_str())
+            .or_else(|| {
+                m.get("header")
+                    .and_then(|h| h.get("msg_type"))
+                    .and_then(|t| t.as_str())
+            })
+            .or_else(|| m.get("msg_type").and_then(|t| t.as_str()));
+        match kind {
             Some("stream") => {
                 let name = content
                     .get("name")
@@ -243,6 +257,41 @@ mod tests {
                 },
             ],
             "wire content normalized to the op's output contract"
+        );
+    }
+
+    #[test]
+    fn real_kernel_message_shapes_normalize_without_output_type() {
+        // A REAL ipykernel publishes iopub content with no
+        // `output_type` key — the kind lives in the message type (a
+        // `header` field, or the top-level `msg_type` the stdio
+        // adapter forwards): stream / execute_result / error must
+        // still normalize into the op contract. (The e2e against real
+        // ipykernel caught the shape mismatch this pins.)
+        let msgs = vec![
+            serde_json::json!({ "header": { "msg_type": "stream" }, "content": { "name": "stdout", "text": "hi\n" } }),
+            serde_json::json!({ "msg_type": "execute_result", "content": { "execution_count": 2, "data": { "text/plain": "42" } } }),
+            serde_json::json!({ "msg_type": "error", "content": { "ename": "ZeroDivisionError", "evalue": "div by zero", "traceback": [] } }),
+        ];
+        let outputs = outputs_from_messages(&msgs);
+        assert_eq!(
+            outputs,
+            vec![
+                KernelOutput::Stream {
+                    name: "stdout".to_string(),
+                    text: "hi\n".to_string(),
+                },
+                KernelOutput::Result {
+                    mime: "text/plain".to_string(),
+                    data: "42".to_string(),
+                },
+                KernelOutput::Error {
+                    ename: "ZeroDivisionError".to_string(),
+                    evalue: "div by zero".to_string(),
+                    traceback: Vec::new(),
+                },
+            ],
+            "real kernel messages normalize by msg_type"
         );
     }
 

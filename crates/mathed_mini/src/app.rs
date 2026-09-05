@@ -1479,9 +1479,9 @@ impl App {
         if self.help_overlay
             && let Ok(img) =
                 crate::render::render_markup(&crate::help_overlay::markup(), size.width as f64)
-            {
-                blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
-            }
+        {
+            blit_over_bg_clipped(&mut buffer, win_w, doc_h, 8, 8, &img);
+        }
 
         // Popup boxes.
         if !self.popup_stack.is_empty() {
