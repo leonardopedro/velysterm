@@ -49,8 +49,12 @@ the doc stays the source of truth).
 - **Kernel segments (`\kernel(#s,#f, lang:, grants:)`)** — the Jupyter
   role on the australVM plugin system: the op's outputs mirror the
   Jupyter wire content and safety comes from grants, not container
-  isolation (deny-by-default on grant and language;
+  isolation (  deny-by-default on grant and language;
   `MATHED_KERNEL_LANGS` + `MATHED_KERNEL_BIN` configure the worker).
+  Two backends share the op: the one-shot australVM module convention
+  (default) and — with `MATHED_KERNEL_STDIO` set — a real kernel
+  driven over the framed stdio transport (kernel_info → execute →
+  shutdown, same grants in front).
 - **Headless** — `--run-all <doc> [--grants g] [--out record.json]`
   runs every block and writes the notebook record;
   `--check-record <doc> <record.json>` marks stale blocks on load;

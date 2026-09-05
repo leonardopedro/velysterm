@@ -1,4 +1,5 @@
 pub mod jupyter_stdio;
+pub mod stdio_driver;
 pub mod worker;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -169,14 +170,24 @@ impl KernelClient {
             .unwrap_or_default()
     }
 
+    /// Truthiness for a boolean env flag: set to anything but empty
+    /// or "0" means on.
+    fn env_flag(name: &str) -> bool {
+        matches!(std::env::var(name).as_deref(), Ok(v) if !v.is_empty() && v != "0")
+    }
+
     pub fn new() -> Self {
         // N4/N11: the worker's allowlists come from the environment,
         // default empty = deny everything (documents with `\exec` or
         // `\kernel` segments stay inert until an operator opts in).
+        // N11 followup: `MATHED_KERNEL_STDIO` (any value but "0")
+        // switches the kernel backend from the one-shot module
+        // convention to the real-kernel stdio driver.
         let grants = Self::env_list("MATHED_EXEC_GRANTS");
         let langs = Self::env_list("MATHED_KERNEL_LANGS");
         let bin = std::env::var("MATHED_KERNEL_BIN").ok();
-        Self::new_with_kernel_config(&grants, &langs, bin)
+        let stdio = Self::env_flag("MATHED_KERNEL_STDIO");
+        Self::build(&grants, &langs, bin, stdio)
     }
 
     /// Construct a client whose worker's exec allowlist is `grants`
@@ -188,23 +199,33 @@ impl KernelClient {
     pub fn new_with_grants(grants: &[String]) -> Self {
         let langs = Self::env_list("MATHED_KERNEL_LANGS");
         let bin = std::env::var("MATHED_KERNEL_BIN").ok();
-        Self::new_with_kernel_config(grants, &langs, bin)
+        let stdio = Self::env_flag("MATHED_KERNEL_STDIO");
+        Self::build(grants, &langs, bin, stdio)
     }
 
     /// Full embedding hook (N11): explicit worker exec-grant
     /// allowlist, kernel-language allowlist, and kernel module binary
-    /// — deterministic without touching process env.
+    /// — deterministic without touching process env. Uses the
+    /// one-shot module backend (no `MATHED_KERNEL_STDIO`); see
+    /// [`KernelWorker::with_stdio_kernel`] for the stdio driver.
     pub fn new_with_kernel_config(
         grants: &[String],
         langs: &[String],
         bin: Option<String>,
     ) -> Self {
+        Self::build(grants, langs, bin, false)
+    }
+
+    /// Shared constructor: grants, kernel config, and the backend
+    /// mode (module convention vs real-kernel stdio driver).
+    fn build(grants: &[String], langs: &[String], bin: Option<String>, stdio: bool) -> Self {
         let (tx, worker_rx) = unbounded::<KernelRequest>();
         let (worker_tx, rx) = unbounded::<BlockResponse>();
 
         let mut worker = KernelWorker::new(worker_tx);
         worker.with_exec_grants(grants);
         worker.with_kernel_config(langs, bin);
+        worker.with_stdio_kernel(stdio);
         let worker_handle = thread::spawn(move || {
             worker.run(worker_rx);
         });

@@ -67,6 +67,43 @@ pub fn decode_frames(bytes: &[u8]) -> Result<Vec<serde_json::Value>, String> {
     Ok(msgs)
 }
 
+/// Decode greedily from a live byte stream: every complete frame in
+/// `bytes` comes back as a message, and whatever trailing bytes form
+/// an incomplete header or payload are returned untouched for the
+/// caller to prepend to the next read — the incremental companion to
+/// [`decode_frames`], used by the stdio session driver that must not
+/// block forever waiting for a frame that is still arriving. A
+/// complete frame whose payload is not JSON is still an `Err` (never
+/// a silent drop).
+pub fn decode_partial(bytes: &[u8]) -> Result<(Vec<serde_json::Value>, Vec<u8>), String> {
+    let mut msgs = Vec::new();
+    let mut rest = bytes;
+    loop {
+        if rest.len() < HEADER_BYTES {
+            // Too few bytes even for a header: keep the whole tail.
+            break;
+        }
+        let len = u32::from_be_bytes(rest[0..4].try_into().unwrap()) as usize;
+        if len == 0 {
+            // A zero-length payload ends the exchange (see
+            // [`decode_frames`]): drop the marker, keep nothing more.
+            rest = &rest[HEADER_BYTES..];
+            break;
+        }
+        if rest.len() < HEADER_BYTES + len {
+            // The announced payload has not fully arrived yet.
+            break;
+        }
+        let payload = &rest[HEADER_BYTES..HEADER_BYTES + len];
+        match serde_json::from_slice::<serde_json::Value>(payload) {
+            Ok(v) => msgs.push(v),
+            Err(e) => return Err(format!("frame payload is not JSON: {e}")),
+        }
+        rest = &rest[HEADER_BYTES + len..];
+    }
+    Ok((msgs, rest.to_vec()))
+}
+
 /// Normalize kernel messages into [`KernelOutput`]s — the mapping a
 /// real Jupyter kernel's stream/execute_result/error replies need to
 /// feed the `kernel_exec` op's response. Each message is either a
@@ -174,6 +211,34 @@ mod tests {
             ],
             "wire content normalized to the op's output contract"
         );
+    }
+
+    #[test]
+    fn decode_partial_keeps_incomplete_tail_for_the_next_read() {
+        // Two frames, fed to decode_partial a few bytes at a time:
+        // complete frames surface immediately and the partial tail is
+        // returned for the caller to prepend — the incremental
+        // contract the stdio session driver relies on.
+        let msgs = vec![
+            serde_json::json!({"msg_type": "stream", "content": {"output_type": "stream", "name": "stdout", "text": "a\n"}}),
+            serde_json::json!({"msg_type": "execute_reply", "content": {"status": "ok"}}),
+        ];
+        let mut wire = Vec::new();
+        for m in &msgs {
+            wire.extend_from_slice(&encode_frame(m));
+        }
+        let mut pending = Vec::new();
+        let mut decoded = Vec::new();
+        for chunk in wire.chunks(7) {
+            pending.extend_from_slice(chunk);
+            let (got, rest) = decode_partial(&pending).expect("partial decode");
+            decoded.extend(got);
+            pending = rest;
+        }
+        assert!(pending.is_empty(), "no dangling tail after the full feed");
+        assert_eq!(decoded.len(), 2, "both frames decoded exactly once");
+        assert_eq!(decoded[0], msgs[0]);
+        assert_eq!(decoded[1], msgs[1]);
     }
 
     #[test]

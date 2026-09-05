@@ -67,11 +67,18 @@ pub struct KernelWorker {
     /// N11: enabled kernel language names (deny-by-default; set via
     /// `MATHED_KERNEL_LANGS` by the client or `with_kernel_config`).
     kernel_langs: Vec<String>,
-    /// N11: the kernel module backend binary (set via
-    /// `MATHED_KERNEL_BIN` or `with_kernel_config`). It receives
+    /// N11: the kernel backend binary (set via `MATHED_KERNEL_BIN`
+    /// or `with_kernel_config`). In module mode it receives
     /// `{module, language, code}` JSON on stdin and answers
-    /// `{outputs: [KernelOutput...]}` JSON on stdout.
+    /// `{outputs: [KernelOutput...]}` JSON on stdout; in stdio mode
+    /// it is launched as a real kernel and driven over the framed
+    /// stdio transport by [`crate::stdio_driver`].
     kernel_bin: Option<String>,
+    /// N11 followup: drive the configured kernel binary as a *real*
+    /// kernel over the stdio transport (framed kernel_info → execute
+    /// → shutdown) instead of the one-shot module convention. Set by
+    /// `MATHED_KERNEL_STDIO` in the client or `with_stdio_kernel`.
+    kernel_stdio: bool,
     /// N4: bounded audit trail of exec attempts (oldest drained).
     exec_audit: VecDeque<ExecAuditEntry>,
 }
@@ -93,6 +100,7 @@ impl KernelWorker {
             exec_grants: Vec::new(),
             kernel_langs: Vec::new(),
             kernel_bin: None,
+            kernel_stdio: false,
             exec_audit: VecDeque::new(),
         }
     }
@@ -104,11 +112,19 @@ impl KernelWorker {
     }
 
     /// N11: configure the kernel backend — the language allowlist
-    /// (deny-by-default) and the module binary. `None` binary = every
+    /// (deny-by-default) and the backend binary. `None` binary = every
     /// `\kernel` segment fails with UK-4913 (nothing configured).
     pub fn with_kernel_config(&mut self, langs: &[String], bin: Option<String>) {
         self.kernel_langs = langs.to_vec();
         self.kernel_bin = bin;
+    }
+
+    /// N11 followup: switch the kernel backend from the one-shot
+    /// module convention (default) to the real-kernel stdio driver
+    /// ([`crate::stdio_driver`]). The same grant + language gates and
+    /// the same `kernel_exec` op cover both backends.
+    pub fn with_stdio_kernel(&mut self, on: bool) {
+        self.kernel_stdio = on;
     }
 
     /// The bounded audit trail of exec attempts, oldest first.
@@ -617,16 +633,16 @@ impl KernelWorker {
     }
 
     /// N11: run one granted `\kernel` segment through the configured
-    /// module backend. Two deny-by-default gates — the australVM
+    /// kernel backend. Two deny-by-default gates — the australVM
     /// module philosophy (UK-4001) generalized to kernels: the
     /// requested grant must be in the exec allowlist, and the
-    /// language must be in the kernel language allowlist. The module
-    /// binary (`MATHED_KERNEL_BIN`) receives `{module, language,
-    /// code}` JSON on stdin and answers `{outputs: [KernelOutput...]}`
-    /// JSON on stdout — the same wire convention kernel_client uses;
-    /// a real Jupyter kernel over the stdio transport is drivable
-    /// through the same op via [`crate::jupyter_stdio`]. Outputs are
-    /// returned verbatim; every failure answers UK-4913.
+    /// language must be in the kernel language allowlist. Two
+    /// backends share the op: the one-shot module convention
+    /// (`MATHED_KERNEL_BIN` receives `{module, language, code}` JSON
+    /// on stdin and answers `{outputs: [KernelOutput...]}` JSON on
+    /// stdout), or — with `MATHED_KERNEL_STDIO` set — a real kernel
+    /// over the stdio transport driven by [`crate::stdio_driver`].
+    /// Outputs are returned verbatim; every failure answers UK-4913.
     #[allow(clippy::too_many_arguments)] // the request's fields, one per param
     fn handle_kernel(
         &mut self,
@@ -717,6 +733,32 @@ impl KernelWorker {
             ));
             return;
         };
+
+        // 3b. Stdio mode: the binary is a real kernel — drive the
+        // framed kernel_info → execute → shutdown exchange through
+        // the same op (grants above stay the safety boundary).
+        if self.kernel_stdio {
+            match crate::stdio_driver::run_stdio_kernel(
+                &bin, &language, &code, timeout_ms, cap_bytes,
+            ) {
+                Ok(outputs) => {
+                    self.audit_exec(grants.first().cloned(), &format!("kernel:{language}"), "ok");
+                    let _ = self.tx.send(BlockResponse::KernelExec(block_id, outputs));
+                }
+                Err(msg) => {
+                    self.audit_exec(
+                        grants.first().cloned(),
+                        &format!("kernel:{language}"),
+                        "failed",
+                    );
+                    let _ = self.tx.send(BlockResponse::Error(
+                        block_id,
+                        Diagnostic::new(Code::KERNEL_FAILED, msg, Severity::Error),
+                    ));
+                }
+            }
+            return;
+        }
 
         // 4. Run under timeout + cap, exec-style: the module reads
         // {module, language, code} JSON on stdin and answers
@@ -980,6 +1022,25 @@ mod tests {
             worker.with_exec_grants(&grants);
             // Spawn the worker on a thread so it processes
             // sequentially without blocking the test.
+            std::thread::spawn(move || {
+                let mut w = worker;
+                w.run(req_rx);
+            });
+            Self { req_tx, resp_rx }
+        }
+
+        /// A harness with a configured kernel backend (language
+        /// allowlist + binary + backend mode), for the N11 kernel
+        /// tests.
+        fn with_kernel(grants: &[&str], langs: &[&str], bin: &str, stdio: bool) -> Self {
+            let (req_tx, req_rx) = unbounded::<KernelRequest>();
+            let (resp_tx, resp_rx) = unbounded::<BlockResponse>();
+            let mut worker = KernelWorker::new(resp_tx.clone());
+            let grants: Vec<String> = grants.iter().map(|s| s.to_string()).collect();
+            worker.with_exec_grants(&grants);
+            let langs: Vec<String> = langs.iter().map(|s| s.to_string()).collect();
+            worker.with_kernel_config(&langs, Some(bin.to_string()));
+            worker.with_stdio_kernel(stdio);
             std::thread::spawn(move || {
                 let mut w = worker;
                 w.run(req_rx);
@@ -1605,5 +1666,150 @@ mod tests {
             String::new(),
         );
         assert_eq!(w2.exec_audit()[0].outcome, "grant-denied");
+    }
+
+    #[test]
+    fn kernel_stdio_drives_a_real_kernel_subprocess() {
+        use std::io::Write as _;
+        // A real subprocess speaking the framed stdio transport, run
+        // through the same `kernel_exec` op a `\kernel` segment uses:
+        // the driver performs the Jupyter exchange (kernel_info
+        // handshake → execute → shutdown) and the worker's gate logic
+        // stays in front unchanged. The script kernel publishes a
+        // stream + execute_result before its execute_reply, exactly
+        // like a real kernel's iopub ordering.
+        let script = r#"#!/usr/bin/env python3
+import json, struct, sys
+
+def send(obj):
+    payload = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack(">IIIII", len(payload), 0, 0, 0, 0))
+    sys.stdout.buffer.write(payload)
+    sys.stdout.buffer.flush()
+
+def recv():
+    hdr = sys.stdin.buffer.read(20)
+    if len(hdr) != 20:
+        return None
+    (n,) = struct.unpack(">I", hdr[:4])
+    if n == 0:
+        return None
+    body = sys.stdin.buffer.read(n)
+    if len(body) != n:
+        return None
+    return json.loads(body.decode("utf-8"))
+
+def env(msg_type, content):
+    return {"msg_type": msg_type, "content": content}
+
+while True:
+    msg = recv()
+    if msg is None:
+        break
+    mt = msg["header"]["msg_type"]
+    if mt == "kernel_info_request":
+        send(env("kernel_info_reply", {"protocol_version": "5.3", "language_info": {"name": "python"}}))
+    elif mt == "execute_request":
+        code = msg["content"]["code"]
+        if "print(" in code:
+            send(env("stream", {"output_type": "stream", "name": "stdout", "text": "kernel stream hi\n"}))
+        send(env("execute_result", {"output_type": "execute_result", "data": {"text/plain": "chars=%d" % len(code)}}))
+        send(env("execute_reply", {"status": "ok", "execution_count": 1}))
+    elif mt == "shutdown_request":
+        send(env("shutdown_reply", {"restart": False}))
+        break
+sys.exit(0)
+"#;
+        let path =
+            std::env::temp_dir().join(format!("mathed_stdio_kernel_{}.py", std::process::id()));
+        let mut f = std::fs::File::create(&path).expect("create kernel script");
+        f.write_all(script.as_bytes()).expect("write kernel script");
+        drop(f); // close before exec: an open-for-write script is ETXTBSY
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+
+        let h = Harness::with_kernel(
+            &["kernel"],
+            &["python"],
+            &path.to_string_lossy(),
+            true, // stdio backend, not the module convention
+        );
+        let resp = h.send(KernelRequest::KernelExec {
+            block_id: 42,
+            module: "unused-in-stdio-mode".to_string(),
+            language: "python".to_string(),
+            code: "print(1 + 1)".to_string(),
+            grants: vec!["kernel".to_string()],
+            timeout_ms: 15_000,
+            cap_bytes: 1 << 20,
+        });
+        match resp {
+            BlockResponse::KernelExec(id, outputs) => {
+                assert_eq!(id, 42);
+                assert_eq!(
+                    outputs,
+                    vec![
+                        KernelOutput::Stream {
+                            name: "stdout".to_string(),
+                            text: "kernel stream hi\n".to_string(),
+                        },
+                        KernelOutput::Result {
+                            mime: "text/plain".to_string(),
+                            data: "chars=12".to_string(),
+                        },
+                    ],
+                    "the framed execute exchange normalizes into the op contract"
+                );
+            }
+            other => panic!("expected KernelExec, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kernel_stdio_still_denies_without_the_grant_or_language() {
+        // The stdio backend changes the transport, never the safety
+        // model: with a real kernel configured, a segment asking for
+        // an un-granted name still answers UK-4911, and a language
+        // outside the allowlist UK-4912 — before any process spawns.
+        let script = "#!/bin/sh\nexit 0\n";
+        let path = std::env::temp_dir().join(format!(
+            "mathed_stdio_kernel_shim_{}.sh",
+            std::process::id()
+        ));
+        std::fs::write(&path, script).expect("write shim");
+
+        let h = Harness::with_kernel(&[], &["python"], &path.to_string_lossy(), true);
+        match h.send(KernelRequest::KernelExec {
+            block_id: 7,
+            module: "m".to_string(),
+            language: "python".to_string(),
+            code: "x = 1".to_string(),
+            grants: vec!["kernel".to_string()],
+            timeout_ms: 1000,
+            cap_bytes: 4096,
+        }) {
+            BlockResponse::Error(id, diag) => {
+                assert_eq!(id, 7);
+                assert_eq!(diag.code, Code::KERNEL_GRANT_DENIED);
+            }
+            other => panic!("expected grant-denied Error, got {other:?}"),
+        }
+
+        let h2 = Harness::with_kernel(&["kernel"], &["rust"], &path.to_string_lossy(), true);
+        match h2.send(KernelRequest::KernelExec {
+            block_id: 8,
+            module: "m".to_string(),
+            language: "python".to_string(),
+            code: "x = 1".to_string(),
+            grants: vec!["kernel".to_string()],
+            timeout_ms: 1000,
+            cap_bytes: 4096,
+        }) {
+            BlockResponse::Error(id, diag) => {
+                assert_eq!(id, 8);
+                assert_eq!(diag.code, Code::KERNEL_LANG_DENIED);
+            }
+            other => panic!("expected lang-denied Error, got {other:?}"),
+        }
     }
 }
