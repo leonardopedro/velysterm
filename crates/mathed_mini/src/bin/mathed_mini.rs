@@ -72,6 +72,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("Exported JSON to {path}");
                 return Ok(());
             }
+            // N8: headless notebook record — run every block and
+            // write (or print) the reproducible record JSON.
+            "--run-all" => {
+                let path = rest.first().ok_or("--run-all requires a file path")?;
+                let mut grants: Vec<&str> = Vec::new();
+                let mut out: Option<&str> = None;
+                let mut i = 1;
+                while i < rest.len() {
+                    match rest[i].as_str() {
+                        "--grants" => {
+                            grants = rest
+                                .get(i + 1)
+                                .ok_or("--grants requires a comma-separated list")?
+                                .split(',')
+                                .collect();
+                            i += 2;
+                        }
+                        "--out" => {
+                            out = Some(rest.get(i + 1).ok_or("--out requires a path")?);
+                            i += 2;
+                        }
+                        other => {
+                            return Err(format!("unexpected --run-all argument `{other}`").into())
+                        }
+                    }
+                }
+                let doc = std::fs::read_to_string(path)?;
+                let record = mathed_mini::export::run_all_record(&doc, &grants)?;
+                if let Some(o) = out {
+                    std::fs::write(o, &record)?;
+                    eprintln!("Recorded run-all for {path} -> {o}");
+                } else {
+                    print!("{record}");
+                }
+                return Ok(());
+            }
+            // N8: open-doc staleness check against a record.
+            "--check-record" => {
+                let doc_path = rest.first().ok_or("--check-record requires a doc path")?;
+                let rec_path = rest.get(1).ok_or("--check-record requires a record path")?;
+                let doc = std::fs::read_to_string(doc_path)?;
+                let rec = std::fs::read_to_string(rec_path)?;
+                let stale = mathed_mini::export::record_stale_blocks(&doc, &rec)?;
+                if stale.is_empty() {
+                    eprintln!("record is current for {doc_path}");
+                } else {
+                    eprintln!("stale blocks for {doc_path}: {stale:?}");
+                }
+                return Ok(());
+            }
             "--export-md" => {
                 let path = rest.first().ok_or("--export-md requires a file path")?;
                 let out = mathed_mini::export::export_markdown(initial);

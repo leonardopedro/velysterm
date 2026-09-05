@@ -427,6 +427,89 @@ pub fn preview_template(doc_text: &str) -> Result<String, String> {
     render_doc(doc_text, None, std::collections::HashMap::new())
 }
 
+/// N8: the headless notebook record — execute every block (refresh
+/// dispatches all kernel statements and execs; the bounded settle
+/// drains every response) and return the reproducible record:
+/// `export_json_with_runs`'s shape (the doc + its run log as JSON).
+/// `grants` enables the worker exec allowlist entries (deny-by-
+/// default otherwise); a hung worker degrades to the partial record
+/// after the bounded wait. Nothing is ever written into the doc
+/// text.
+pub fn run_all_record(doc_text: &str, grants: &[&str]) -> Result<String, String> {
+    let mut bridge = if grants.is_empty() {
+        crate::kernel_bridge::KernelBridge::new()
+    } else {
+        crate::kernel_bridge::KernelBridge::with_exec_grants(grants)
+    };
+    bridge.refresh(doc_text);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !bridge.is_idle() {
+        bridge.poll();
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(export_json_with_runs(doc_text, bridge.run_log()))
+}
+
+/// N8: compare the current doc against a previously written record
+/// and report the block indices whose statement hashes no longer
+/// match (the open-doc staleness policy: outputs derived from a
+/// record are stale when the source changed). The record is input
+/// only — never written into the doc.
+pub fn record_stale_blocks(doc_text: &str, record_json: &str) -> Result<Vec<usize>, String> {
+    use std::hash::{Hash, Hasher};
+    let rec: serde_json::Value =
+        serde_json::from_str(record_json).map_err(|e| format!("record is not valid JSON: {e}"))?;
+    let mut recorded: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+    if let Some(blocks) = rec.get("blocks").and_then(|b| b.as_array()) {
+        for block in blocks {
+            let Some(bi) = block.get("index").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            for stmt in block
+                .get("statements")
+                .and_then(|s| s.as_array())
+                .unwrap_or(&Vec::new())
+            {
+                if let (Some(off), Some(h)) = (
+                    stmt.get("offset").and_then(|v| v.as_u64()),
+                    stmt.get("body_hash").and_then(|v| v.as_u64()),
+                ) {
+                    recorded.insert(off as usize, h);
+                }
+            }
+            let _ = bi;
+        }
+    }
+
+    let scan = scan(doc_text);
+    let segments = resolve_segments(&scan);
+    let render = to_render_text(doc_text, &scan, &segments, &TransformOptions::default());
+    let mut idx = SemanticIndex::default();
+    idx.build_index(doc_text, &segments, &[&render]);
+    let block_ranges = mathed_core::blocks::split_blocks(doc_text);
+    let block_of = |pos: usize| {
+        block_ranges
+            .iter()
+            .rposition(|r| r.start <= pos)
+            .unwrap_or(0)
+    };
+
+    let mut stale = std::collections::BTreeSet::new();
+    for s in &idx.kernel_statements {
+        if let Some(&h) = recorded.get(&s.span.start) {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            s.body_text.hash(&mut hasher);
+            if hasher.finish() != h {
+                stale.insert(block_of(s.span.start));
+            }
+        }
+    }
+    Ok(stale.into_iter().collect())
+}
+
 /// N5: `--export-typst --with-outputs` — render the document with each
 /// block's computed output region spliced beneath its content (the
 /// printable notebook page). Regions are **derived state**: the bridge
@@ -1137,6 +1220,43 @@ mod tests {
         );
         let out = export_typst_template(doc, None).expect("filter export");
         assert!(out.contains("sum: a+b+c"), "helper `join` evaluated: {out}");
+    }
+
+    #[test]
+    fn run_all_record_executes_every_block_and_is_stable() {
+        // N8: the headless record runs every block (two execs, one
+        // per block) and round-trips stably for the same doc+worker
+        // trace.
+        let doc = "= A\n\
+                   #1 echo a #2 \\exec(#1,#2, grants: \"readonly\")\n\n\
+                   = B\n\
+                   #3 echo b #4 \\exec(#3,#4, grants: \"readonly\")";
+        let rec = run_all_record(doc, &["readonly"]).expect("record");
+        let v: serde_json::Value = serde_json::from_str(&rec).expect("record JSON");
+        let blocks = v.get("blocks").and_then(|b| b.as_array()).expect("blocks");
+        assert_eq!(blocks.len(), 2, "one block per cell: {rec}");
+        let exec_runs = rec.matches("\"op\":\"exec\"").count();
+        assert_eq!(exec_runs, 2, "both blocks executed: {rec}");
+        // Stability: the same doc + worker trace records identically.
+        let rec2 = run_all_record(doc, &["readonly"]).expect("record 2");
+        assert_eq!(rec, rec2, "record must be reproducible");
+    }
+
+    #[test]
+    fn record_stale_blocks_detects_edits() {
+        // N8: the open-doc policy — a record's block is stale when
+        // the doc changed under it.
+        let doc = "= A\n\
+                   #1 echo a #2 \\exec(#1,#2, grants: \"readonly\")\n\n\
+                   = B\n\
+                   #3 echo b #4 \\exec(#3,#4, grants: \"readonly\")";
+        let rec = run_all_record(doc, &["readonly"]).expect("record");
+        assert!(record_stale_blocks(doc, &rec).expect("stale").is_empty());
+
+        let edited = doc.replace("echo a", "echo changed");
+        let stale = record_stale_blocks(&edited, &rec).expect("stale after edit");
+        assert!(stale.contains(&0), "edited block stale: {stale:?}");
+        assert!(!stale.contains(&1), "untouched block clean: {stale:?}");
     }
 
     #[test]
