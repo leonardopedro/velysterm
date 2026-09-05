@@ -77,6 +77,66 @@ parseToken s0 =
        then (trim (init s), True)
        else (s, False)
 
+-- ── job 3: rewrite/assoc — right-associative normalization ──────
+-- Input: comma-separated tokens (`a, +, b, +, c`). Finds the first
+-- `x, op, y, op, z` run whose two ops are the *same* token — a
+-- non-linear `#(op, False)` value pattern (Eql-bound equality, the
+-- twinPrimes `#(p + 2)` style) — and rewrites it to
+-- `x, op, (, y, op, z, )`. Parens/ops on the x/y/z positions are
+-- excluded so the rule terminates (the introduced parens block
+-- further matches).
+
+isParenOrOp :: String -> Bool
+isParenOrOp t = t `elem` ["(", ")", "+", "-", "*", "/"]
+
+findAssoc :: [Tagged] -> Maybe (Int, String, String, String)
+findAssoc ts =
+  case matchAll dfs ts (List (Something, Eql))
+         [[mc| _ ++ ($i, ($x, #False)) : (_, ($op, #False)) : (_, ($y, #False)) : (_, #(op, False)) : (_, ($z, #False)) : _ -> (i, x, op, y, z) |]] of
+    (i, x, op, y, z) : _ | not (isParenOrOp x || isParenOrOp y || isParenOrOp z) -> Just (i, x, op, y, z)
+    _ -> Nothing
+
+assocAt :: Int -> String -> String -> String -> [Tagged] -> [Tagged]
+assocAt i x op y z ts =
+  let (a, five) = splitAt i ts
+  in a ++ zip [i ..] [(x, False), (op, False), ("(", False), (y, False), (op, False), (z, False), (")", False)] ++ drop 5 five
+
+assocTokens :: [Tagged] -> [Tagged]
+assocTokens ts =
+  case findAssoc ts of
+    Nothing            -> ts
+    Just (i, x, op, y, z) -> assocTokens (assocAt i x op y z ts)
+
+assocBody :: String -> String
+assocBody body = unwords [name | (_, (name, _)) <- assocTokens (parseTokens body)]
+
+-- ── job 4: rewrite/distrib — distributivity expansion ───────────
+-- Input: `a, *, (, b, +, c, )`. Matches `x, m, (, y, p, z, )` with
+-- m = "*" and p = "+" (checked after the match, as fock_match
+-- does) and expands to `x, m, y, p, x, m, z` — a compound pattern
+-- over the parenthesized sum.
+
+findDistrib :: [Tagged] -> Maybe (Int, String, String, String, String)
+findDistrib ts =
+  case matchAll dfs ts (List (Something, Eql))
+         [[mc| _ ++ ($i, ($x, #False)) : (_, ($m, #False)) : (_, ("(", #False)) : (_, ($y, #False)) : (_, ($p, #False)) : (_, ($z, #False)) : (_, (")", #False)) : _ -> (i, x, m, y, p, z) |]] of
+    (i, x, m, y, p, z) : _ | m == "*" && p == "+" -> Just (i, x, m, y, p, z)
+    _ -> Nothing
+
+distribAt :: Int -> String -> String -> String -> String -> String -> [Tagged] -> [Tagged]
+distribAt i x m y p z ts =
+  let (a, seven) = splitAt i ts
+  in a ++ zip [i ..] [(x, False), (m, False), (y, False), (p, False), (x, False), (m, False), (z, False)] ++ drop 7 seven
+
+distribTokens :: [Tagged] -> [Tagged]
+distribTokens ts =
+  case findDistrib ts of
+    Nothing            -> ts
+    Just (i, x, m, y, p, z) -> distribTokens (distribAt i x m y p z ts)
+
+distribBody :: String -> String
+distribBody body = unwords [name | (_, (name, _)) <- distribTokens (parseTokens body)]
+
 -- ── job 2: Eql-bound fragment selection ─────────────────────────
 -- Input: `name:value;name:value;…`. Selects statements whose value
 -- is exactly `self(<name>)`, binding the statement's own name — the
@@ -97,15 +157,29 @@ selectSelfRefs stmts =
   matchAll dfs stmts (List (Something, (Something, Eql)))
     [[mc| _ ++ ($i, ($n, #("self(" ++ n ++ ")"))) : _ -> (i, n) |]]
 
+-- ── job 5: select/pattern — compound selection ──────────────────
+-- Statements whose value is exactly `compute(<name>)` — a compound
+-- non-linear pattern binding the statement's own name inside a
+-- function application (twinPrimes' `#(p + 2)` style, one level
+-- up from `self(...)`).
+
+selectComputed :: [Statement] -> [(Int, String)]
+selectComputed stmts =
+  matchAll dfs stmts (List (Something, (Something, Eql)))
+    [[mc| _ ++ ($i, ($n, #("compute(" ++ n ++ ")"))) : _ -> (i, n) |]]
+
 -- ── JSON I/O (minimal: {op, body} in, {markup} out) ────────────
 
 main :: IO ()
 main = do
   input <- getContents
   let out = case (extractField "op" input, extractField "body" input) of
-              (Just "rewrite", Just b) -> rewriteBody b
-              (Just "select",  Just b) -> intercalate ";" (map snd (selectSelfRefs (parseStatements b)))
-              _                        -> ""
+              (Just "rewrite", Just b)         -> rewriteBody b
+              (Just "rewrite/assoc",   Just b) -> assocBody b
+              (Just "rewrite/distrib", Just b) -> distribBody b
+              (Just "select",  Just b)         -> intercalate ";" (map snd (selectSelfRefs (parseStatements b)))
+              (Just "select/pattern", Just b)  -> intercalate ";" (map snd (selectComputed (parseStatements b)))
+              _                                -> ""
   putStrLn ("{\"markup\":" ++ jsonEscape out ++ "}")
 
 -- Value of the first JSON string whose key is `key` (searched as

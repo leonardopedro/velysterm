@@ -20,7 +20,15 @@ stdout: `{"markup": "<markup>"}` (JSON)
 | op | body | markup |
 |---|---|---|
 | `rewrite` | comma-separated token list (`a†, a, b`; `†` = adjoint) | tokens after contracting every adjacent same-name `x†, x` pair to `⟨x⟩`, joined by spaces |
+| `rewrite/assoc` | comma-separated tokens (`a, +, b, +, c`) | right-assoc step: the first `x, op, y, op, z` run (same op, `#(op, False)` non-linear pattern) becomes `x op ( y op z )`; parens/ops on the operands block further rewrites |
+| `rewrite/distrib` | comma-separated tokens (`a, *, (, b, +, c, )`) | distributivity: `x * (y + z)` expands to `x * y + x * z` |
 | `select` | `name:value;name:value;…` (Rust pre-slices `DocumentContext.statements`) | names whose value equals `self(<name>)` (Eql-bound), joined by `;` |
+| `select/pattern` | `name:value;name:value;…` | names whose value equals `compute(<name>)` — a compound non-linear pattern (twinPrimes style), joined by `;` |
+
+For `select` / `select/pattern` the Rust side pre-slices the statements
+into the body; the generalized seam `mathed_rules_engine(body, op,
+slice)` forwards the slice for these ops (`apply_mathed_rules` remains
+the no-slice wrapper).
 
 > As-built deviation from the plan's `{ctx, body}` sketch: the full
 > `DocumentContext` is not shipped to the binary in v1. The Rust side

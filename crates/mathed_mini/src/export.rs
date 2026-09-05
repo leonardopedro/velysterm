@@ -322,19 +322,46 @@ pub fn export_tex(doc_text: &str) -> String {
 /// body (identity path), so `--render-typst` works with and without
 /// it.
 pub fn apply_mathed_rules(body: &str, op: &str) -> Option<String> {
+    mathed_rules_engine(body, op, None)
+}
+
+/// T8: the generalized rules seam — [`apply_mathed_rules`] plus a
+/// `slice` argument for the selection ops: for `select` /
+/// `select/pattern` the caller pre-slices `DocumentContext` rows and
+/// passes them here, and the slice (not the raw body) is what the
+/// binary matches over (the `tools/mathed_rules` contract). Other
+/// ops ignore the slice. Returns `None` when the binary is absent,
+/// fails, or times out — the caller keeps the body (identity path).
+pub fn mathed_rules_engine(body: &str, op: &str, slice: Option<&str>) -> Option<String> {
     let bin = std::env::var("MATHED_RULES_BIN").ok()?;
-    apply_mathed_rules_with_bin(&bin, body, op)
+    mathed_rules_engine_with_bin(&bin, body, op, slice)
 }
 
 /// The env-free core of [`apply_mathed_rules`] — testable without
 /// touching process env. Bounded at 5 s so a hung rules binary can
 /// never block an export indefinitely.
 pub fn apply_mathed_rules_with_bin(bin: &str, body: &str, op: &str) -> Option<String> {
+    mathed_rules_engine_with_bin(bin, body, op, None)
+}
+
+/// The env-free core of [`mathed_rules_engine`]. For selection ops
+/// the pre-sliced rows win over the raw body.
+pub fn mathed_rules_engine_with_bin(
+    bin: &str,
+    body: &str,
+    op: &str,
+    slice: Option<&str>,
+) -> Option<String> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    let input = serde_json::json!({ "op": op, "body": body }).to_string();
+    let payload = if op.starts_with("select") {
+        slice.unwrap_or(body)
+    } else {
+        body
+    };
+    let input = serde_json::json!({ "op": op, "body": payload }).to_string();
     let mut child = Command::new(bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -465,12 +492,18 @@ fn render_doc(
         std::collections::HashMap::new();
     let mut engine = crate::translate::Translator::new();
     for (name, def) in &idx.templates {
-        // T5: when the authoring-time egison rules binary is present
-        // (MATHED_RULES_BIN), the body may be notation-rewritten
-        // first; absent or failing, the body runs unchanged
-        // (identity path).
-        let body =
-            apply_mathed_rules(&def.body_text, "rewrite").unwrap_or_else(|| def.body_text.clone());
+        // T5/T8: when the authoring-time egison rules binary is
+        // present (MATHED_RULES_BIN), the body may be
+        // notation-rewritten first (rewrite, then right-assoc);
+        // absent or failing, the body runs unchanged (identity
+        // path).
+        let mut body = def.body_text.clone();
+        if let Some(r) = apply_mathed_rules(&body, "rewrite") {
+            body = r;
+        }
+        if let Some(r) = apply_mathed_rules(&body, "rewrite/assoc") {
+            body = r;
+        }
         match engine.run_template(&body, &ctx_literal) {
             Ok(markup) => {
                 template_outputs.insert(name.clone(), markup.clone());
@@ -508,8 +541,13 @@ fn render_doc(
         }
         base_ctx["templates"] = serde_json::Value::Object(tmpls);
         let base_literal = ctx_to_typst_literal(&base_ctx)?;
-        let body = apply_mathed_rules(&base.body_text, "rewrite")
-            .unwrap_or_else(|| base.body_text.clone());
+        let mut body = base.body_text.clone();
+        if let Some(r) = apply_mathed_rules(&body, "rewrite") {
+            body = r;
+        }
+        if let Some(r) = apply_mathed_rules(&body, "rewrite/assoc") {
+            body = r;
+        }
         let out = match engine.run_base(&body, &base_literal) {
             Ok(markup) => markup,
             Err(e) => return Err(format!("\\base `{}` failed to render: {e}", base.name)),
@@ -808,6 +846,38 @@ mod tests {
         assert_eq!(got.as_deref(), Some("⟨a⟩ b"));
         let _ = std::fs::remove_file(&stub);
         let _ = std::fs::remove_file(&stub2);
+    }
+
+    #[test]
+    fn rules_engine_new_ops_roundtrip() {
+        // T8: the generalized seam passes the new op names through;
+        // a stub answers for rewrite/assoc.
+        let stub = stub_rules_bin(
+            "#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"a + ( b + c )\"}'\n",
+        );
+        let got = mathed_rules_engine_with_bin(
+            stub.to_str().unwrap(),
+            "a, +, b, +, c",
+            "rewrite/assoc",
+            None,
+        );
+        assert_eq!(got.as_deref(), Some("a + ( b + c )"));
+    }
+
+    #[test]
+    fn rules_engine_select_ops_use_the_slice() {
+        // T8: for select ops the pre-sliced rows win over the raw
+        // body — the slice argument is part of the contract.
+        let stub = stub_rules_bin(
+            "#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"x;z\"}'\n",
+        );
+        let got = mathed_rules_engine_with_bin(
+            stub.to_str().unwrap(),
+            "unused raw body",
+            "select/pattern",
+            Some("x:compute(x);y:7;z:compute(z)"),
+        );
+        assert_eq!(got.as_deref(), Some("x;z"));
     }
 
     #[test]

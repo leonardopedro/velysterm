@@ -1,0 +1,5 @@
+{
+  "op": "select/pattern",
+  "body": "x:compute(x);y:7;z:compute(z)",
+  "markup": "x;z"
+}

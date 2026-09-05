@@ -1,0 +1,5 @@
+{
+  "op": "rewrite/distrib",
+  "body": "a, *, (, b, +, c, )",
+  "markup": "a * b + a * c"
+}

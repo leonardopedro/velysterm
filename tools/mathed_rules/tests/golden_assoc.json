@@ -1,0 +1,5 @@
+{
+  "op": "rewrite/assoc",
+  "body": "a, +, b, +, c",
+  "markup": "a + ( b + c )"
+}
