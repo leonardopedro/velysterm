@@ -18,9 +18,11 @@
 > 2. **UTF-8 as an extension of ASCII** — the U6–U8 stages: full
 >    grapheme-cluster editing, one canonical glyph↔ASCII mapping table,
 >    and the Unicode contract on the template/output pipeline.
-> 3. **An alternative to bash and Jupyter notebooks** — the N7–N10
+> 3. **An alternative to bash and Jupyter notebooks** — the N7–N11
 >    stages: stdin piping between `\exec` segments, a headless run-all
->    record, rich outputs (tables/figures), and a `.ipynb` projection.
+>    record, rich outputs (tables/figures), a `.ipynb` projection, and
+>    **Jupyter-kernel-compatible execution on the australVM plugin
+>    system** — grants instead of container isolation (N11).
 >
 > Constraint honored throughout, unchanged from the starter plans:
 > **improve, don't build new.** Every stage extends a named existing
@@ -55,7 +57,7 @@ output; the grant-gated worker path as computing) — this phase adds
 
 | Question | Decision |
 |---|---|
-| Template composition | A `\layout` segment (≤1 per doc, first-wins + deterministic warning). Its `render(ctx, body)` receives the rendered doc body and each plain template's output in ctx (`ctx.body`, `ctx.templates`). Plain templates run first; the layout's output is what `--render-typst` writes. No layout → today's byte-identical output. |
+| Template composition | A `\base` segment (≤1 per doc, first-wins + deterministic warning). Its `render(ctx, body)` receives the rendered doc body and each plain template's output in ctx (`ctx.body`, `ctx.templates`). Plain templates run first; the base's output is what `--render-typst` writes. No base → today's byte-identical output. (Name chosen over `\layout` — that statement name is already owned by the GPU-federation layout claim, `PropKind::Layout`.) |
 | Filters / macros | `builtin_template.typ` beside `builtin_translator.typ`, injected into the eval VM through the same mechanism; `render(ctx)` calls helpers as ordinary Typst functions. No second language. |
 | Pattern engine | Egison TH stays **out-of-band**: `mathed-rules` grows an op table; `apply_mathed_rules` generalizes to `mathed_rules_engine(body, op, slice)`; `--render-typst` applies rule ops before eval when `MATHED_RULES_BIN` is set; identity degrade + pins stay. No runtime Haskell in the editor (unchanged). |
 | Mapping table | One canonical `mathed_core/src/tables.rs`: glyph ↔ ASCII forms in both directions. U2 completion and U4 export read it (behavior pinned byte-identical). `--ctx` overlay (T4 seam) accepts `"mappings"` overrides — per-doc mapping without new syntax. |
@@ -64,6 +66,7 @@ output; the grant-gated worker path as computing) — this phase adds
 | Staleness | Hash staleness (N2) propagates along `from:` edges: a block is stale when any referenced block is stale. |
 | Notebook record | `--run-all <doc> [--grants …] [--out record.json]`: headless execution of every block, writing the N3 run log as an artifact. The doc text never carries outputs (unchanged). |
 | `.ipynb` | One-way projection (`--export-ipynb`): blocks → cells, documented as projection not source. |
+| Kernel execution | The australVM plugin system (`module.toml` archetype + `[grants]` uk_* capabilities + `[limits]`, hosted via `modhost`, Cedar-policy denial) is the execution backend. The op contract is **Jupyter-shaped** (`Stream`/`Result`/`Error` outputs mirror the wire-protocol content) and a real Jupyter kernel over the stdio transport is drivable through the same op — compatibility; the generalization is that safety comes from **grants, not per-kernel container isolation**. |
 
 Cross-cutting, unchanged from the starter plans: no second template
 dialect; outputs never persist in the doc text; no editor-side process
@@ -81,23 +84,24 @@ plan.
 
 ### Phase 4 — template language maturity (T7 → T8 → T9)
 
-#### Stage T7 — composition: `\layout`, sub-template outputs, filters (mathed_core + mathed_mini)
+#### Stage T7 — composition: `\base`, sub-template outputs, filters (mathed_core + mathed_mini)
 
-1. `crates/mathed_core/src/markers.rs`: `PropKind::Layout` (`of("layout")`),
-   `is_layout()`, not `is_kernel()` — sibling of `Template` (T2). Enforce
-   ≤1 layout per doc in `build_index`: first wins, extra ones collected
-   with a deterministic `layout_duplicates: Vec<Span>` the bridge/CLI
-   surfaces as a warning.
-2. `semantics.rs`: `SemanticIndex.layout: Option<LayoutDef>` (same shape
-   as `TemplateDef`). `build_index` walks the same single pass.
-3. `mathed_mini/src/translate.rs`: `run_layout(ctx_literal, layout_src,
-   body_markup)` — same `run_entry_expr("render", …)` VM; the ctx
-   literal gains `body: <rendered doc-body markup string>` and
+1. `crates/mathed_core/src/markers.rs`: `PropKind::Base` (`of("base")`),
+   `is_base()`, not `is_kernel()` — sibling of `Template` (T2). Enforce
+   ≤1 base per doc in `build_index`: first wins, extra ones collected
+   with a deterministic `base_duplicates: Vec<Span>` the bridge/CLI
+   surfaces as a warning. (Not `\layout` — that name belongs to the
+   GPU-federation claim, `PropKind::Layout` in `is_kernel()`.)
+2. `semantics.rs`: `SemanticIndex.base: Option<TranslatorDef>` (same
+   shape as `TemplateDef`). `build_index` walks the same single pass.
+3. `mathed_mini/src/translate.rs`: `run_base(ctx_literal, base_src)` —
+   same `run_entry_expr("render", …)` VM; the ctx literal gains
+   `body: <rendered doc-body markup string>` and
    `templates: (name: <rendered output>, …)` (each plain template's
    output, in document order). The body markup comes from the existing
    transform output (the same string `--export-typst` writes today).
-4. `export.rs`: `export_typst_template` runs plain templates, then the
-   layout (when present) and writes the layout output; no layout →
+4. `export.rs`: `render_doc` runs plain templates, then the base (when
+   present) and the base's output is the exported text; no base →
    current behavior byte-for-byte (pinned). `--render-typst` unchanged
    flags.
 5. `builtin_template.typ` (new, beside `builtin_translator.typ`):
@@ -105,14 +109,14 @@ plan.
    `heading_ref` — injected into the eval VM through the same load
    mechanism `builtin_translator.typ` uses. `render(ctx)` calls them
    as ordinary Typst functions.
-6. Tests (+4 mini, +1 core): layout wraps body + one sub-template;
-   `ctx.templates` order matches document order; no-layout doc renders
+6. Tests (+4 mini, +1 core): base wraps body + one sub-template;
+   `ctx.templates` order matches document order; no-base doc renders
    byte-identically to today's `--export-typst` (pinned); a filter
-   helper used inside `render` evaluates; duplicate layouts collect a
+   helper used inside `render` evaluates; duplicate bases collect a
    warning span.
 
 **Acceptance:** `cargo test -p mathed_core -p mathed_mini`; a two-section
-report (layout + one sub-template) renders through `--render-typst` and
+report (base + one sub-template) renders through `--render-typst` and
 parses with zero `typst::syntax::parse` errors.
 
 #### Stage T8 — the egison rule engine grows up (tools/mathed_rules + the export seam)
@@ -146,7 +150,7 @@ unchanged.
 
 #### Stage T9 — template authoring UX (mathed_mini)
 
-1. Layout bodies collapse to `▸ layout: name` code panels — the shared
+1. Base bodies collapse to `▸ base: name` code panels — the shared
    translator/template panel machinery (T4 as built) with zero new
    subsystems.
 2. `pub fn preview_template(doc_text: &str) -> Result<String, String>` in
@@ -216,7 +220,7 @@ truth for both directions.
 fixture's ascii export contains only ASCII bytes; no splice ever lands
 mid-cluster.
 
-### Phase 6 — document-computing depth (N7 → N8 → N9 → N10)
+### Phase 6 — document-computing depth (N7 → N8 → N9 → N10 → N11)
 
 #### Stage N7 — stdin piping, `data` vocabulary, `from:` staleness
 
@@ -283,7 +287,8 @@ figure in `--with-outputs`.
 1. `--export-ipynb <out.ipynb>`: blocks → cells — headings → markdown
    cells; statements → code cells; `\exec` → code cells whose outputs
    come from the run record (text/plain stdout, error/ename when
-   failed). One-way and documented as a projection, not a source.
+   failed); `\kernel` segments (N11) → code cells with Jupyter-shaped
+   outputs. One-way and documented as a projection, not a source.
 2. Stable JSON for a fixed doc (pinned golden); cell `source` lines
    match block content exactly.
 3. Tests (+2 mini).
@@ -291,25 +296,87 @@ figure in `--with-outputs`.
 **Acceptance:** `cargo test -p mathed_mini --lib`; the N6 fixture
 exports to a stable `.ipynb`; cell count and order match blocks.
 
-### Phase 7 — docs, invariants, final sweep (T10, U9, N11)
+#### Stage N11 — `\kernel` segments: australVM plugin execution, Jupyter-kernel-compatible (grants instead of isolation)
+
+The Jupyter role completed. A Jupyter *kernel* is a language runtime
+speaking the Jupyter wire protocol; kernels are trusted after being
+quarantined in containers. The australVM plugin system is the project's
+grain: `module.toml` archetype + `[grants]` uk_* capabilities +
+`[limits]`, hosted via `modhost`, Cedar-policy denial (UK-4001). This
+stage makes execution **Jupyter-kernel-compatible** (the op's output
+contract mirrors the wire protocol; a real kernel over the stdio
+transport is drivable through the same op) and **generalizes** kernels
+(safety from grants, not isolation).
+
+1. **[SYNC] `kernel_exec` op** (unfer repo, additive-only):
+   `kernel_exec { module: String, language: String, code: String,
+   grants: [String], timeout_ms, cap_bytes }` → `{ outputs:
+   [KernelOutput], timing_ms }` or a UK-#### error, where
+   `KernelOutput` mirrors the Jupyter message content: `Stream{name,
+   text}`, `Result{mime, data}` (text/plain v1 of
+   display_data/execute_result), `Error{ename, evalue, traceback}`.
+   New UK codes `KERNEL_GRANT_DENIED` (4911), `KERNEL_LANG_DENIED`
+   (4912), `KERNEL_FAILED` (4913). PROTOCOL.md: the Jupyter-shaped
+   output contract + the permission model — grants replace per-kernel
+   isolation; execution is a granted, audited capability, deny-by-
+   default (the `module.toml` philosophy, generalized to kernels).
+2. **velysterm side**: `PropKind::Kernel` (`\kernel(#s, #f, lang:
+   "…", grants: "…", name: "…")`, body = code) collected into
+   `SemanticIndex.kernel_statements` (the existing `KernelStatement`
+   shape; `grants` arg reused); dispatch builds the request;
+   `KernelRequest::KernelExec` through `kernel_client`; the bridge
+   renders outputs in the N1 region (streams as text, Result
+   text/plain as StringValue, errors with UK codes + hints); the run
+   log gains kernel entries; `--export-ipynb` maps `\kernel` cells.
+3. **australVM side (the plugin system)** — cross-repo write step
+   (user-mandated for this stage): a sample hosted module
+   `examples/modules/mathed_kernel/` — `module.toml` archetype
+   `haskell_effect`, `[grants] kernel = [uk_version, uk_model_create,
+   uk_evolve, uk_event_probability, uk_model_free]`, `effects =
+   ["Kernel"]`, `[limits] max_ms` — whose `main` reads `{code}` JSON
+   on stdin and writes `{outputs}` JSON on stdout (the same wire
+   convention kernel_client uses), plus a `run_demo.sh` proving the
+   grant-denial path (stripped grants → UK-4001), fock_match-style.
+   Compatibility layer (velysterm): the worker's kernel backend can
+   also drive a **real Jupyter kernel** over the stdio transport (5×
+   u32 length-prefixed JSON messages — `kernel_info_request` →
+   `execute_request` → collect `status`/`stream`/`execute_result`/
+   `error` → `shutdown_request`), so existing kernels (ipykernel et
+   al.) attach through the same op; the grant + language allowlist
+   gates both backends. The stdio parser is unit-tested with canned
+   bytes; the australVM/modhost half is dev-machine acceptance
+   (modhost release build), like T5/fock_match.
+4. Tests (+4 mini, +2 kernel_client): dispatch builds the kernel
+   request from a segment; grant/language denial surfaces the UK
+   code; stream/result/error outputs render in the region; the stdio
+   wire parser round-trips a canned kernel exchange; `--export-ipynb`
+   maps kernel cells.
+
+**Acceptance:** `cargo test -p mathed_mini --lib -p kernel_client`; a
+doc with a `\kernel` segment dispatches and renders outputs end-to-end
+with the mock worker; `mathed_kernel` module runs on a dev machine with
+modhost and denies when grants are stripped.
+
+### Phase 7 — docs, invariants, final sweep (T10, U9, N12)
 
 1. `docs/mathed/DESIGN.md`: three subsection updates — "Template
-   language (maturity)": layout/composition/rule-engine pipeline;
+   language (maturity)": base/composition/rule-engine pipeline;
    "Encoding contract (maturity)": grapheme clusters, the canonical
    table, the output-pipeline Unicode contract; "Document computing
    (depth)": pipes, the headless record, rich outputs, the `.ipynb`
-   projection.
-2. `scripts/verify-invariants`: grep-pin the new surfaces — `\layout`,
+   projection, kernel plugins.
+2. `scripts/verify-invariants`: grep-pin the new surfaces — `\base`,
    `mathed_rules_engine`, `tables.rs`, `--run-all`, `--export-ipynb`,
-   the exec op's `stdin` field — in the script's existing style.
+   `kernel_exec`, the exec op's `stdin` field — in the script's
+   existing style.
 3. Checked-in fixtures: the T7 composition report and the N7 pipe doc
    (companions to the T6/N6 fixtures), parse-pinned.
 4. Final sweep: full workspace `cargo test`, `fmt`, `clippy --all
    --all-targets` (0 warnings), `scripts/verify-invariants`; commit +
-   push both repos.
+   push both repos (velysterm + unfer + the australVM module sample).
 
 **Acceptance:** `scripts/verify-invariants` passes; CI (check, test,
-smoke) green; both trees clean after the push.
+smoke) green; all trees clean after the push.
 
 ### Test-count trajectory (planned deltas, recorded not promised)
 
@@ -325,7 +392,8 @@ smoke) green; both trees clean after the push.
 | N8 | — | +3 | — |
 | N9 | — | +3 | — |
 | N10 | — | +2 | — |
-| **Totals** | 174 → **181** | 172 → **194** | 24 → **26** |
+| N11 | — | +4 | +2 |
+| **Totals** | 174 → **181** | 172 → **198** | 24 → **28** |
 
 Starter precedent: every phase shipped richer than planned (T-series
 +18 over plan, N-series +9 over plan), so the "as built" numbers will
@@ -337,7 +405,7 @@ likely exceed these.
 |---|---|---|---|
 | 4 — template maturity | T7 → T8 → T9 | starter T1–T6 | T7 first (ctx gains `body`/`templates`; everything else in the arc consumes it); T8 before T9 so preview shows rule-rewritten output |
 | 5 — Unicode completion | U6 → U7 → U8 | starter U1–U5 | U6 before U7 (cluster rules feed the table's round-trip corpus); runs ∥ phase 4 (disjoint files: wordnav/tables vs translate/export seams — U7 touches `tables.rs` and U8 touches `export.rs` where T7/T8 also work; sequence the two arcs' export.rs edits or land them in separate commits) |
-| 6 — computing depth | N7 → N8 → N9 → N10 | starter N1–N6 | N7's `[SYNC]` first (the stdin field gates the pipe tests); N8 before N9 (the record feeds exec rows to templates); N10 last (projection over finished cells) |
+| 6 — computing depth | N7 → N8 → N9 → N10 → N11 | starter N1–N6 | N7's `[SYNC]` first (the stdin field gates the pipe tests); N8 before N9 (the record feeds exec rows to templates); N10 before N11 (the ipynb projection consumes kernel cells); N11's `[SYNC]` op + australVM sample last |
 | 7 — docs & invariants | T10, U9, N11 | everything above | single sweep at the end, as in the starter |
 
 Parallelization follows Plan C's parallel rule: phases 4, 5, 6 are three
@@ -392,4 +460,5 @@ T7/T8/U8/N9, tables.rs U7) need sequencing or separate commits.
 | N8 | `mathed_mini/src/bin/mathed_mini.rs`, `export.rs` |
 | N9 | `mathed_mini/src/output_region.rs`, `kernel_bridge.rs`, `export.rs` |
 | N10 | `mathed_mini/src/bin/mathed_mini.rs`, `export.rs` |
+| N11 | `[SYNC]` unfer: `kernel_exec` op + UK-4911/4912/4913 + PROTOCOL.md; velysterm: `mathed_core/src/markers.rs`, `semantics.rs`; `mathed_mini/src/dispatch.rs`, `kernel_bridge.rs`, `output_region.rs`; `kernel_client` (KernelRequest::KernelExec + stdio wire parser); australVM: `examples/modules/mathed_kernel/` |
 | T10/U9/N11 | `docs/mathed/DESIGN.md`, `scripts/verify-invariants`, `crates/mathed_mini/fixtures/`, `README.md` |

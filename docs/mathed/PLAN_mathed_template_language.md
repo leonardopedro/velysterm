@@ -429,7 +429,7 @@ All three share the same surfaces — they are three views of one model:
 | 3 — egison rules | T5 | T4 (fixture), existing nix Haskell env | ✅ EXECUTED — dev-machine `mathed-rules` source + goldens + scripts; Rust seam degrades to identity |
 | 4 — scripted execution | N4 | N1–N3 | ✅ EXECUTED — `[SYNC]` half `d677d1f` (unfer): `exec` op in AGENT_OPS/SESSION_OPS, UK-4908/4909/4910, PROTOCOL.md allowlist; velysterm half `82620e5` (grants, audit, `\exec` segments) |
 | 5 — docs & invariants | T6, U5, N5–N6 | everything above | ✅ EXECUTED — `9391f19` (N5), `e2cdc7d` (docs sweep), `e8e8f27` (final sweep); verify-invariants 18/18 |
-| 6 — beyond the starter | T7–T10, U6–U8, N7–N10 | everything above | **PLANNED — `PLAN_mathed_full_vision.md`**: template maturity (layouts, filters, egison rule engine), Unicode completion (grapheme clusters, canonical tables), computing depth (pipes, headless record, rich outputs, `.ipynb`); N7-1 is the only `[SYNC]` step (additive `stdin` on the exec op) |
+| 6 — beyond the starter | T7–T10, U6–U8, N7–N11 | everything above | **PLANNED — `PLAN_mathed_full_vision.md`**: template maturity (`\base` composition — `\layout` is already the GPU-federation claim — filters, egison rule engine), Unicode completion (grapheme clusters, canonical tables), computing depth (pipes, headless record, rich outputs, `.ipynb`, australVM **kernel plugins** — Jupyter-kernel-compatible execution with grants instead of isolation); `[SYNC]` steps: N7-1 (additive `stdin` on the exec op) and N11-1 (`kernel_exec` op) |
 
 Rules that hold for every stage (Plan C parallel-execution rules):
 
