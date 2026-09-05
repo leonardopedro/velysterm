@@ -815,6 +815,24 @@ mod tests {
     // ── T4: --render-typst (template rendering) ───────────────
 
     #[test]
+    fn checked_in_rendered_fixture_parses() {
+        // T6: the companion example's rendered `.typ` is checked in;
+        // it must stay parseable Typst (T4 acceptance: zero syntax
+        // errors in the existing Typst world).
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/template_report.rendered.typ"
+        ))
+        .expect("rendered fixture");
+        let parsed = typst::syntax::parse(&src);
+        let (errors, _) = parsed.errors_and_warnings();
+        assert!(
+            errors.is_empty(),
+            "rendered fixture must parse cleanly: {errors:?}"
+        );
+    }
+
+    #[test]
     fn template_render_splices_markup_and_hides_code() {
         let doc = concat!(
             "= Report\n\n",

@@ -121,7 +121,7 @@ mod tests {
 
         // Cancel: nothing pending → doc untouched.
         let mut ui2 = CompletionUi::new();
-        let mut doc2 = doc_of("$ \\alpha");
+        let doc2 = doc_of("$ \\alpha");
         let caret2 = doc2.text().len();
         ui2.refresh(doc2.text(), caret2);
         assert!(ui2.pending.is_some());

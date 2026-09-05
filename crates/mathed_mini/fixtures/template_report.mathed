@@ -1,0 +1,12 @@
+= Template report
+
+#1 Quantum gadget #2 \def(#1,#2, name: "title")
+#3 Leo #4 \def(#3,#4, name: "author")
+
+#5 #let render(ctx) = {
+  let title = ctx.at("defs").at(0).at("body")
+  let author = ctx.at("defs").at(1).at("body")
+  "#heading(level: 2)[" + title + "] — by " + author
+} #6 \template(#5,#6, name: "cover")
+
+Body text.

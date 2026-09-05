@@ -289,6 +289,64 @@ injected into the prelude as literals.
   `GlyphIndex` with real font metrics). Planned: `scheduler`,
   `blocks_view`, `overlay`, `popup`, `search_sys`, `files`.
 
+## Language surfaces (the mathed vision, implemented)
+
+The three arcs of the mathed language plan (see
+`PLAN_mathed_template_language.md` and its U/N siblings) are three views
+of one model: the Loro text is the source of truth; `SemanticIndex` →
+`DocumentContext` is the document as data; every computed value splices
+back into the rendered markup at the transform seam; all computation
+routes through the kernel bridge → worker path, UK-coded and
+grant-gated.
+
+### Template language (T-series)
+
+A mathed document is a Jinja/ERB-class template for Typst output. Three
+roles coexist in one text: **content** (the Typst markup itself),
+**data** (`\def`/`\model`/`\prob` segments — a `DocumentContext`
+serde-JSON value derived from the `SemanticIndex`), and **code**
+(`\template` segments whose bodies are Typst functions evaluated by the
+existing typst-eval pipeline, `render(ctx) → markup`). The transform's
+annotation seam is generalized additively: `template_splices` (T3) and
+`block_splices` (N5) sit beside `annotations`, all spliced at pinned
+points. `--render-typst <doc> [--ctx <json>]` exports the rendered
+`.typ`; the context reaches `render(ctx)` as a lowered Typst dict
+literal (typst 0.15 has no `json.decode`). Authoring-time pattern
+matching lives in the out-of-band `mathed-rules` Egison binary
+(`tools/mathed_rules/`), invoked when `MATHED_RULES_BIN` is set,
+else the identity path.
+
+### Encoding contract (U-series)
+
+Mathed text is UTF-8 — a strict superset of ASCII: (1) the grammar
+markers (`#`, `\`, `$`) are ASCII, so a Unicode char can never open or
+close syntax; (2) every range is a byte range that lands on char
+boundaries (the U1 fuzz corpus pins this across scan, segments,
+transform, blocks, search, wordnav, doc); (3) ASCII is a lossless
+*input* subset — every math glyph is reachable by typing ASCII through
+the `completion_at` engine (`mathed_core/src/completion.rs`, IME-style
+preview, commit on delimiter), and every document exports back to
+ASCII-only Typst source via `--export-ascii` (a projection: unmappable
+glyphs are flagged, never silently dropped). Editing is
+cluster-aware: backspace deletes one glyph cluster
+(`prev_cluster_boundary`), never half a composed char.
+
+### Document computing (N-series)
+
+Blocks are cells. Each block's computed kernel results render in an
+**output region** beneath it (`output_region.rs`) — derived state,
+never persisted into the doc text, so the document stays the
+reproducibility source of truth. Staleness is hash-derived: a block is
+stale while its displayed output does not reflect the document's
+current inputs. `Ctrl+Enter` runs the caret's block, `Ctrl+Shift+Enter`
+runs all, `Ctrl+Shift+K` clears outputs; every completed run lands in a
+bounded run log and `--export-json` carries it (the notebook record).
+**Scripted segments** (`\exec`) are the bash role: the body is a command
+line the *worker* runs under a grant — never an editor-side
+`Command::new` — with a timeout and output cap, deny-by-default
+(`MATHED_EXEC_GRANTS` allowlist; UK-4908/4909/4910), and a bounded
+audit trail in the worker.
+
 ## Status
 
 - **M0 done**: workspace + `mathed_core` (22 unit tests green: doc,

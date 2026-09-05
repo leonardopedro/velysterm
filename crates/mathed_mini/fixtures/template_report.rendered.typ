@@ -1,0 +1,2 @@
+// Exported from mathed_mini (rendered template)
+= Template report#linebreak() #linebreak()Quantum gadget #linebreak()Leo #linebreak() #linebreak()▸ template: cover#heading(level: 2)[Quantum gadget] — by Leo#linebreak() #linebreak()Body text.

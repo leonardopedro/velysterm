@@ -67,6 +67,30 @@ check "C: SemanticIndex has kernel_statements collection" \
 check "C: build_index assembles KernelStatement entries" \
     grep -q "fn build_index" "$repo_root/crates/mathed_core/src/semantics.rs"
 
+# --- T-series: template-language surface (T6) ---
+check "T: PropKind::is_template() exists" \
+    grep -q "fn is_template" "$repo_root/crates/mathed_core/src/markers.rs"
+check "T: DocumentContext is the document-as-data context" \
+    grep -q "pub struct DocumentContext" "$repo_root/crates/mathed_core/src/semantics.rs"
+check "T: --render-typst CLI mode" \
+    grep -q -- "--render-typst" "$repo_root/crates/mathed_mini/src/bin/mathed_mini.rs"
+
+# --- U-series: UTF-8/ASCII surface (U5) ---
+check "U: completion_at is the ASCII→Unicode completion seam" \
+    grep -q "pub fn completion_at" "$repo_root/crates/mathed_core/src/completion.rs"
+check "U: --export-ascii interchange projection" \
+    grep -q -- "--export-ascii" "$repo_root/crates/mathed_mini/src/bin/mathed_mini.rs"
+
+# --- N-series: document-computing surface (N6) ---
+check "N: PropKind::Exec for scripted segments" \
+    grep -q '"exec" => Self::Exec' "$repo_root/crates/mathed_core/src/markers.rs"
+check "N: KernelBridge::run_block (notebook run-cell)" \
+    grep -q "pub fn run_block" "$repo_root/crates/mathed_mini/src/kernel_bridge.rs"
+check "N: output_region module (block output regions)" \
+    test -f "$repo_root/crates/mathed_mini/src/output_region.rs"
+check "N: --with-outputs report export" \
+    grep -q -- "--with-outputs" "$repo_root/crates/mathed_mini/src/bin/mathed_mini.rs"
+
 # --- H12: agent notes (four implemented categories) ---
 check "H12: notes implemented dir has the four categories" \
     test -d "$repo_root/.agents/notes/implemented/architecture" \

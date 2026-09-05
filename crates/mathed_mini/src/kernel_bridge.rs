@@ -1557,20 +1557,8 @@ mod tests {
             .filter(|s| block_of(s.span.start) == 0)
             .map(|s| s.span.start)
             .collect();
-        let block1: Vec<usize> = idx
-            .kernel_statements
-            .iter()
-            .filter(|s| block_of(s.span.start) == 1)
-            .map(|s| s.span.start)
-            .collect();
         block0.sort_unstable();
         assert_eq!(block0.len(), 2, "model + prob in block 0");
-        let probs: Vec<usize> = idx
-            .kernel_statements
-            .iter()
-            .filter(|s| s.kind == PropKind::Prob)
-            .map(|s| s.span.start)
-            .collect();
 
         // Settle the initial refresh (models answer `Success` — no
         // displayed result — so `wait_for` alone cannot drain them).
@@ -1603,7 +1591,6 @@ mod tests {
                     #3 vac #4 \\prob(#3,#4)";
         let mut bridge = KernelBridge::new();
         bridge.refresh(doc1);
-        let p = prob_offset(doc1);
         settle(&mut bridge, Duration::from_secs(15));
         assert!(bridge.stale_blocks().is_empty());
 

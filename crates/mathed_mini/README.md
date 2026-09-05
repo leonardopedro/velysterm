@@ -37,3 +37,13 @@ the doc stays the source of truth).
   `readonly` — safe builtins, `compute` — hosted numerical tools).
   Denials and failures surface as UK-49xx errors in the region with a
   repair hint.
+
+## Input + interchange (U-series)
+
+Inside math (`$..$`), ASCII sequences complete to Unicode glyphs
+(`->` → `→`, `\alpha` → `α`, …) through the pure table in
+`mathed_core/src/completion.rs` (IME-style preview; commit on the next
+delimiter, Escape cancels — the doc is untouched until commit).
+`--export-ascii` is the inverse projection: any document exports to
+ASCII-only Typst source, with unmappable glyphs flagged, never silently
+dropped.
