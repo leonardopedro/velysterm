@@ -1,0 +1,9 @@
+= Composed report
+
+#1 #let render(ctx) = "#emph[section 1 summary]" #2 \template(#1,#2, name: s1)
+
+#3 #let render(ctx) = "#box[Report]\n\n" + ctx.at("body") + "\n\n#box[Included: " + ctx.at("templates").at("s1") + "]" #4 \base(#3,#4, name: wrap)
+
+Intro body text.
+
+More prose.

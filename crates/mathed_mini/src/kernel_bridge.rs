@@ -2988,6 +2988,8 @@ mod tests {
     /// A stub kernel module binary: reads `{module, language, code}`
     /// JSON on stdin and answers `{outputs: [...]}` JSON that depends
     /// on the code, so one binary exercises every output shape.
+    /// Created exclusively with a nonce (rules-stub precedent):
+    /// parallel tests can never overwrite each other's stub.
     fn stub_kernel_module() -> std::path::PathBuf {
         use std::hash::{Hash as _, Hasher as _};
         use std::io::Write as _;
@@ -3001,8 +3003,12 @@ esac
 "#;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         script.hash(&mut h);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "mathed_kernel_stub_{}_{:x}.sh",
+            "mathed_kernel_stub_{}_{:x}_{nonce:x}.sh",
             std::process::id(),
             h.finish()
         ));

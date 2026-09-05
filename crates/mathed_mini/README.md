@@ -34,16 +34,43 @@ the doc stays the source of truth).
   and an output cap. Grants are deny-by-default: the worker only honors
   grants named in its allowlist, configured via the `MATHED_EXEC_GRANTS`
   environment variable (comma-separated grant names; v1 vocabularies:
-  `readonly` — safe builtins, `compute` — hosted numerical tools).
-  Denials and failures surface as UK-49xx errors in the region with a
-  repair hint.
+  `readonly` — safe builtins, `compute` — hosted numerical tools,
+  `data` — `jq`/`awk` over pipes). Denials and failures surface as
+  UK-49xx errors in the region with a repair hint.
+- **Pipes (`\exec(from: #ref)`)** — the referenced segment's latest
+  stdout threads into this segment's stdin (bash-pipe role, still
+  grant-gated); staleness propagates along the pipe edge.
+- **Kernel segments (`\kernel(#s,#f, lang:, grants:)`)** — the Jupyter
+  role on the australVM plugin system: the op's outputs mirror the
+  Jupyter wire content and safety comes from grants, not container
+  isolation (deny-by-default on grant and language;
+  `MATHED_KERNEL_LANGS` + `MATHED_KERNEL_BIN` configure the worker).
+- **Headless** — `--run-all <doc> [--grants g] [--out record.json]`
+  runs every block and writes the notebook record;
+  `--check-record <doc> <record.json>` marks stale blocks on load;
+  `--export-ipynb <doc> [--grants g] [--out nb.ipynb]` projects
+  blocks → nbformat-4 cells (one-way).
+- **Rich outputs** — NDJSON rows in exec stdout render as a Typst
+  table in the region, and `ctx.exec` feeds the same rows to
+  templates for figures.
 
 ## Input + interchange (U-series)
 
 Inside math (`$..$`), ASCII sequences complete to Unicode glyphs
-(`->` → `→`, `\alpha` → `α`, …) through the pure table in
-`mathed_core/src/completion.rs` (IME-style preview; commit on the next
-delimiter, Escape cancels — the doc is untouched until commit).
-`--export-ascii` is the inverse projection: any document exports to
-ASCII-only Typst source, with unmappable glyphs flagged, never silently
-dropped.
+(`->` → `→`, `\alpha` → `α`, …) through the canonical table in
+`mathed_core/src/tables.rs` (both directions — the export inverse
+reads the same entries; `--mappings` overlays per document). Editing
+is full grapheme-cluster aware (ZWJ emoji, flags, skin tones via
+`unicode-segmentation`), and the splice/output pipeline never splits a
+cluster. `--export-ascii` is the inverse projection: any document
+exports to ASCII-only Typst source, with unmappable glyphs flagged,
+never silently dropped.
+
+## Template composition (T-series, maturity)
+
+`\template` bodies are Typst functions (`render(ctx) → markup`,
+`builtin_template.typ` helpers injected) evaluated by the typst-eval
+pipeline; a `\base` segment wraps the *whole document* — `ctx.body`
+carries the rendered body, `ctx.templates` each plain template's
+output, and the base's output is the export. Headless preview:
+`preview_template` (Ctrl+P overlay in the editor).

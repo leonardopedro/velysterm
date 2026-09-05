@@ -1175,25 +1175,46 @@ mod tests {
     // ── T5: egison rules binary seam ────────────────────────────
 
     /// A stub rules binary that answers the golden rewrite contract.
+    /// The name is content-hashed + a nanosecond nonce and the file is
+    /// created exclusively, so two tests that stub *identical* scripts
+    /// (the historical flake: parallel tests overwriting each other's
+    /// stub mid-run) can never collide.
     fn stub_rules_bin(script: &str) -> std::path::PathBuf {
+        use std::hash::{Hash as _, Hasher as _};
         use std::io::Write as _;
         let dir = std::env::temp_dir();
-        // Content-hashed name: tests run in parallel, and two stubs
-        // with equal script lengths used to collide (overwrite each
-        // other mid-run).
-        use std::hash::{Hash as _, Hasher as _};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         script.hash(&mut h);
-        let path = dir.join(format!(
-            "mathed_rules_stub_{}_{:x}.sh",
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let base = dir.join(format!(
+            "mathed_rules_stub_{}_{:x}_{nonce:x}.sh",
             std::process::id(),
             h.finish()
         ));
-        let mut f = std::fs::File::create(&path).expect("create stub");
-        f.write_all(script.as_bytes()).expect("write stub");
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        path
+        for attempt in 0..4 {
+            let path = if attempt == 0 {
+                base.clone()
+            } else {
+                dir.join(format!(
+                    "{}_{attempt}.sh",
+                    base.file_name().unwrap().to_string_lossy()
+                ))
+            };
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                f.write_all(script.as_bytes()).expect("write stub");
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+                return path;
+            }
+        }
+        panic!("could not create a unique stub binary");
     }
 
     #[test]
@@ -1314,6 +1335,36 @@ mod tests {
             errors.is_empty(),
             "rendered fixture must parse cleanly: {errors:?}"
         );
+    }
+
+    #[test]
+    fn checked_in_fixtures_stay_valid() {
+        // Phase 7: the full-vision companion fixtures (T7 composition
+        // report + N7 pipe doc) are checked in and stay valid — the
+        // composition report renders (base wraps the body and the
+        // sub-template's output) with zero Typst syntax errors, and
+        // the pipe doc's plain render parses cleanly too.
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        for (file, expects) in [
+            ("composition_report.mathed", true),
+            ("pipe_doc.mathed", false),
+        ] {
+            let src =
+                std::fs::read_to_string(format!("{manifest}/fixtures/{file}")).expect("fixture");
+            let out =
+                export_typst_template(&src, None).unwrap_or_else(|e| panic!("{file} renders: {e}"));
+            let parsed = typst::syntax::parse(&out);
+            let (errors, _) = parsed.errors_and_warnings();
+            assert!(errors.is_empty(), "{file} render parses: {errors:?}");
+            if expects {
+                assert!(out.contains("#box[Report]"), "base head: {out}");
+                assert!(out.contains("Intro body text."), "body wrapped: {out}");
+                assert!(
+                    out.contains("section 1 summary"),
+                    "sub-template in base: {out}"
+                );
+            }
+        }
     }
 
     #[test]

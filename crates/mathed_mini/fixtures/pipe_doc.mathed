@@ -1,0 +1,7 @@
+= Pipe demo
+
+#1 echo run complete #2 \exec(#1,#2, grants: "readonly", name: produce)
+#3 cat #4 \exec(#3,#4, from: #1, grants: "readonly", name: consume)
+
+Run with `--run-all pipe_doc.mathed --grants readonly`: the
+downstream `cat` receives the upstream echo's stdout as stdin.

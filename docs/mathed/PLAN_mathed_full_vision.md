@@ -1,8 +1,8 @@
 # mathed beyond the starter — the full-vision implementation plan (phases 4+)
 
-> **Status:** The starter vision is fully executed and pushed (T1–T6,
-> U1–U5, N1–N6, N4's `[SYNC]` half `d677d1f` on unfer). The full-vision
-> phases below are in execution (all stage commits on velysterm main):
+> **Status: the full-vision phases are fully EXECUTED and pushed** —
+> phases 4–7 of this plan, on top of the executed starter (T1–T6,
+> U1–U5, N1–N6). All stage commits on velysterm main:
 >
 > - **Phase 4 — template maturity: ✅ EXECUTED** — T7 `874f8b6`
 >   (`\base` composition), T8 `c3ea2c6` (egison assoc/distrib/
@@ -10,18 +10,22 @@
 > - **Phase 5 — Unicode surface: ✅ EXECUTED** — U6 `7ecc4d9`
 >   (grapheme clusters), U7 `df58918` (canonical `tables.rs`),
 >   U8 `710496b` (splice cluster contract).
-> - **Phase 6 — computing depth: N7–N8 ✅ EXECUTED, N9 🚧 IN
->   PROGRESS** — N7 `c594a75` (pipes + `data`, cleanups
->   `38fadfc`/`2557ad7`/`8f97b88`, `[SYNC]` half `87a6253` on unfer),
->   N8 `5bbcf0c` (`--run-all` record). N9's rows→table half is written
->   in `output_region.rs` (uncommitted); its `ctx.exec` figure half +
->   the three tests are next, then N10, N11, Phase 7.
+> - **Phase 6 — computing depth: ✅ EXECUTED** — N7 `c594a75`
+>   (pipes + `data`; `[SYNC]` half `87a6253` on unfer), N8 `5bbcf0c`
+>   (`--run-all` record), N9 `a1a8c20` (rows → tables + `ctx.exec`
+>   figures), N10 `4899d29` (`--export-ipynb`), N11 `f45227d`
+>   (`\kernel`; `[SYNC]` half `08d8a33` on unfer, australVM sample
+>   module `632cba9c`).
+> - **Phase 7 — docs/invariants/fixtures/final sweep: ✅ EXECUTED**
+>   (DESIGN.md maturity/depth subsections, verify-invariants now
+>   **33/33**, composition + pipe fixtures checked in and parse-pinned,
+>   final workspace sweep green).
 >
-> Ground truth today (measured, exactly on the planned trajectory):
-> mathed_core **181** / mathed_mini **189** / kernel_client **26**
-> tests; remaining planned deltas +0/+9/+2 → 181 / **198** / **28**.
-> **This document is the master plan for the next development phases**
-> — the ones that push mathed from *starter* to *genuine alternative*:
+> Ground truth: mathed_core **181** / mathed_mini **199** (planned 198
+> + the Phase-7 fixture parse-pin) / kernel_client **28** — at or above
+> every planned delta. This document was the master plan for the
+> development phases that pushed mathed from *starter* to *genuine
+> alternative*:
 >
 > 1. **A template language for Typst** (Jinja/ERB/XSLT class) — the T7–T10
 >    stages below: composition and layouts, filter libraries, and the
@@ -408,12 +412,12 @@ smoke) green; all trees clean after the push.
 | N11 | — | +4 | +2 |
 | **Totals** | 174 → **181** | 172 → **198** | 24 → **28** |
 
-**As-built through N8** (measured in the tree, on plan): the executed
-stages shipped exactly their planned core/kernel_client deltas and all
-but one of their mini deltas — core **181** (174 + T7 1 + U6 3 + U7 2 +
-U8 1), mini **189** (172 + T7 4 + T8 2 + T9 2 + U8 2 + N7 4 + N8 3),
-kernel_client **26** (24 + N7 2). Remaining planned deltas: N9 +3 mini,
-N10 +2 mini, N11 +4 mini +2 kernel_client → 181 / **198** / **28**.
+**As-built (measured in the tree, on plan):** the executed stages
+shipped exactly their planned deltas — core **181** (174 + T7 1 + U6
+3 + U7 2 + U8 1), mini **199** (172 + T7 4 + T8 2 + T9 2 + U8 2 + N7
+4 + N8 3 + N9 3 + N10 2 + N11 4 + 1 Phase-7 fixture parse-pin),
+kernel_client **28** (24 + N7 2 + N11 2). Every stage shipped on or
+above plan; the only overage is the checked-in-fixture parse test.
 
 Starter precedent: every phase shipped richer than planned (T-series
 +18 over plan, N-series +9 over plan), so the "as built" numbers will

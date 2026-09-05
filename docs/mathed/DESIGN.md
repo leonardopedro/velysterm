@@ -316,6 +316,20 @@ matching lives in the out-of-band `mathed-rules` Egison binary
 (`tools/mathed_rules/`), invoked when `MATHED_RULES_BIN` is set,
 else the identity path.
 
+**Template maturity (full-vision T7–T9).** Composition: a `\base`
+segment (≤1 per doc, first wins) wraps the *whole document* — its
+`render(ctx)` receives `ctx.body` (the rendered doc body) and
+`ctx.templates` (each plain template's output, in document order),
+and its output is what `--render-typst` writes. Filter helpers
+(`join`, `sigfig`, `fmt_p`, `table_row`, `heading_ref`) live in
+`builtin_template.typ`, injected into the eval VM beside
+`builtin_translator.typ`. The authoring-time Egison rule engine
+(`tools/mathed_rules`, T5) grew an op table — `rewrite/assoc`,
+`rewrite/distrib`, compound `select/pattern` goldens — applied before
+template eval through the generalized `mathed_rules_engine(body, op,
+slice)` seam when `MATHED_RULES_BIN` is set (identity otherwise).
+`preview_template` gives the editor a headless compose + overlay.
+
 ### Encoding contract (U-series)
 
 Mathed text is UTF-8 — a strict superset of ASCII: (1) the grammar
@@ -330,6 +344,19 @@ ASCII-only Typst source via `--export-ascii` (a projection: unmappable
 glyphs are flagged, never silently dropped). Editing is
 cluster-aware: backspace deletes one glyph cluster
 (`prev_cluster_boundary`), never half a composed char.
+
+**Encoding maturity (full-vision U6–U8).** Cluster awareness is now
+full grapheme-cluster editing: the wordnav internals run on
+`unicode-segmentation`'s `GraphemeCursor`, so ZWJ emoji, flag pairs,
+and skin-tone sequences are one unit across caret, word-nav, and
+delete — the public wordnav API never changed. The mapping table is
+canonicalized into one `mathed_core/src/tables.rs`: the U2 completion
+direction (ASCII → glyph) and the U4 export inverse (glyph → ASCII
+Typst form) read the same entries, `--ctx`/`--mappings` overlay it
+per document, and the round-trip property holds over the injective
+subset. The output pipeline carries a Unicode contract: splices
+(annotations, `template_splices`, regions) always land on cluster
+boundaries — never mid-sequence — with debug assertions pinning it.
 
 ### Document computing (N-series)
 
@@ -346,6 +373,26 @@ line the *worker* runs under a grant — never an editor-side
 `Command::new` — with a timeout and output cap, deny-by-default
 (`MATHED_EXEC_GRANTS` allowlist; UK-4908/4909/4910), and a bounded
 audit trail in the worker.
+
+**Computing depth (full-vision N7–N11).** Execs **pipe**: `\exec(from:
+#ref)` threads the referenced segment's latest stdout into the next
+request's stdin (an additive `stdin` field on the exec op), staleness
+propagates along `from:` edges, and the `data` vocabulary (`jq`/
+`awk`) covers the bash filter role — still no shell, still grant-
+gated. A headless `--run-all` writes the notebook record (runs +
+hashes per block) and `--check-record` marks stale blocks on load.
+Rich outputs: NDJSON rows render as Typst **tables** in the region,
+and `ctx.exec` hands the same rows to templates so a `\base` or
+`\template` wraps them into **figures**. `--export-ipynb` projects
+blocks → nbformat-4 cells (one-way, never a source). Finally
+**`\kernel` segments** are the Jupyter role, executed on the
+australVM plugin system (module `mathed_kernel`): the op's outputs
+mirror the Jupyter wire content (`stream`/`execute_result`/`error`,
+`kernel_client::jupyter_stdio` parses a real kernel's stdio
+transport), and the generalization is that safety comes from
+**grants, not per-kernel container isolation** — deny-by-default on
+both the grant (`MATHED_EXEC_GRANTS`, UK-4911) and the language
+(`MATHED_KERNEL_LANGS`, UK-4912), module failures UK-4913.
 
 ## Status
 
