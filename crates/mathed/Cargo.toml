@@ -13,7 +13,7 @@ kernel_client = { path = "../kernel_client" }
 # false` drops the winit/softbuffer `gui` frontend; we only use the headless
 # KernelBridge (translator → dispatcher → worker).
 mathed_mini = { path = "../mathed_mini", default-features = false }
-velyst = { path = "../velyst", version = "0.1.0" }
+velyst = { workspace = true }
 bevy = { workspace = true }
 bevy_vello = { workspace = true }
 typst = { workspace = true }

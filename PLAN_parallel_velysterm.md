@@ -39,6 +39,16 @@ Three repos form one system:
 
 ## Current state (2026-07-24)
 
+- **velyst is consumed, not forked (2026-09-30).** The vendored `velyst`, `kanva`,
+  `kanva_svg`, `kanva_typst` and `typst_imaging` crates were removed from `crates/`;
+  both `velyst` and `typst_imaging` are now git dependencies on
+  `github.com/voxell-tech/velyst` at the `v0.0.1` tag. This workspace holds only the
+  velysterm projects. The upstream `v0.0.1` public API is unchanged for the surface we
+  use (`prelude`, `VelystPlugin`, `typst`, and `typst_imaging::render_frame`), so no
+  call sites needed edits. The six `velyst_demo` examples that merely duplicated
+  upstream's own demos were dropped; the velysterm-specific `editor.rs`, `terminal.rs`
+  and `rfc1751_demo.rs` were kept. `delta_algebra`/`delta_sirk` are retained as
+  archived experiments, outside the workspace glob, and are not built.
 - **Plan C complete (C1–C16).** All stages done and verified:
   - C1–C10: phase 1 (hygiene, bayesian ops, worker tests, glyph dedup, worker lifecycle,
     GPU gating, per-block rendering, property tests, Bevy parity, headless smoke test).

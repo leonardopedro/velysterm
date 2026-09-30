@@ -51,11 +51,23 @@ invocation, so the editor, all builds, and CI run exactly this compiler.
 Formatting is default rustfmt style (no repo `rustfmt.toml`). Bump
 `rust-toolchain.toml` deliberately.
 
-## Upstream velyst content
+## Upstream velyst
 
-The workspace vendors [velyst](https://github.com/voxell-tech/velyst)
-(`crates/velyst/`) — an interactive Typst content creator using Vello and
-Bevy. See below for upstream documentation, tutorials, and community info.
+This workspace **consumes** [velyst](https://github.com/voxell-tech/velyst) as an
+external crate, pinned to the upstream `v0.0.1` release tag. It is no longer a
+fork: `velyst`, `kanva`, `kanva_svg`, `kanva_typst` and `typst_imaging` all live
+upstream, and this repository contains only the velysterm projects (the `mathed`
+editor family, `kernel_client`, and the archived `delta_*` experiments). The
+`velyst` public API used here is `prelude`, `VelystPlugin` and `typst`;
+`mathed_mini` calls the single upstream entry point `typst_imaging::render_frame`.
+
+Upgrade with:
+
+```sh
+cargo update -p velyst            # or bump the `tag` in Cargo.toml
+```
+
+See below for upstream documentation, tutorials, and community info.
 
 ---
 
