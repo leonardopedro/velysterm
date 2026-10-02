@@ -36,9 +36,10 @@ pub mod world;
 pub use dispatch::{DispatchError, statement_to_event_json, statement_to_model_spec};
 pub use kernel_bridge::{KernelBridge, KernelResult};
 pub use render::{
-    DEFAULT_WIDTH_PT, DocLayout, RenderError, active_reveal_span, clamp_reveal_to_block,
-    doc_to_markup, doc_to_render, doc_to_render_with, layout_block, layout_doc, layout_doc_with,
-    layout_footer, render_doc, render_markup, render_world,
+    DEFAULT_WIDTH_PT, DocLayout, PageLayout, RenderError, active_reveal_span,
+    clamp_reveal_to_block, doc_to_markup, doc_to_render, doc_to_render_with, layout_block,
+    layout_doc, layout_doc_paged, layout_doc_with, layout_footer, render_doc, render_markup,
+    render_paged, render_world,
 };
 pub use translate::{BUILTIN_TRANSLATOR, TranslateError, Translator};
 pub use world::MiniWorld;

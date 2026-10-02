@@ -249,16 +249,24 @@ impl World for MiniWorld {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        // Data-URL images — the kernel MIME payloads rendered as
-        // `#image("data:image/png;base64,…")` — resolve here: the
-        // path string *is* the payload, so no filesystem access is
-        // involved. Everything else stays denied in the minimal
-        // frontend.
-        // The path arrives root-joined (`"/data:image/png;base64,…"`)
-        // — strip the leading slash before matching the scheme.
+        // Two in-document schemes resolve here; both keep the
+        // minimal world free of package/filesystem access.
+        //
+        // The path arrives root-joined (`"/data:image/png;base64,…"` /
+        // `"/app:fig/f0"`) — strip the leading slash before matching a
+        // scheme.
         let path = id.vpath().get_with_slash().trim_start_matches('/');
         if let Some(bytes) = decode_data_url(path) {
             return Ok(bytes);
+        }
+        // App-figure placeholders (`#image("app:fig/f0")`, spliced by
+        // `mathed_core::transform` for every `\app` statement). One
+        // shared transparent 1×1 PNG covers every figure: the figure's
+        // identity travels in the image's `alt` text, not in its
+        // payload, so `mathed_core::figures::figures_in_frame` can
+        // still attribute each laid-out rect to its `\app` statement.
+        if mathed_core::figures::is_figure_path(path) {
+            return Ok(mathed_core::figures::figure_placeholder_png());
         }
         Err(FileError::AccessDenied)
     }

@@ -56,6 +56,8 @@ fn role_for(role: AccessRole) -> Role {
         // document-internal definition.
         AccessRole::Reference | AccessRole::Citation => Role::Link,
         AccessRole::Emphasis => Role::Emphasis,
+        // An app figure is an image-like object in the document flow.
+        AccessRole::Figure => Role::Image,
     }
 }
 

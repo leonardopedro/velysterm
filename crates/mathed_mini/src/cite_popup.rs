@@ -12,10 +12,11 @@
 //! [`crate::render::DocLayout`] is reused, and the box is drawn on
 //! top of the blitted image with `softbuffer`-style CPU pixel writes.
 
-use mathed_core::markers::{ReferenceEntry, ReferenceKind, scan, scan_references};
+use mathed_core::markers::{ReferenceKind, scan, scan_references};
 use mathed_core::semantics::SemanticIndex;
 use mathed_core::transform::{RenderOutput, TransformOptions, to_render_text};
 
+#[cfg(feature = "gui")]
 use crate::render::DocLayout;
 
 /// Maximum box content width in points (the same width as the doc so
@@ -40,6 +41,10 @@ pub struct CiteLabelPos {
     pub label_width: f64,
 }
 
+// The `from_caret` constructor and the label-width helpers only have
+// callers in the `gui` frontend; the headless build (emthin's document
+// engine) never places a cite popup.
+#[cfg(feature = "gui")]
 impl CiteLabelPos {
     pub(crate) fn from_caret(geom: mathed_core::glyphs::CaretGeom, label_w: f64) -> Self {
         Self {
@@ -210,7 +215,11 @@ fn normalize_cite_keys(keys: &[String]) -> Vec<String> {
 /// layout's actual width. Exposed for the popup-box cache, which
 /// stores the anchor once per (doc revision, stack, width) instead
 /// of re-scanning the document to derive it on every frame.
-pub(crate) fn cite_label_anchor_width(entry: &ReferenceEntry, layout: &DocLayout) -> f64 {
+#[cfg(feature = "gui")]
+pub(crate) fn cite_label_anchor_width(
+    entry: &mathed_core::markers::ReferenceEntry,
+    layout: &DocLayout,
+) -> f64 {
     cite_label_width(entry) * layout.width as f64 / BOX_MAX_WIDTH_PT
 }
 
@@ -218,7 +227,8 @@ pub(crate) fn cite_label_anchor_width(entry: &ReferenceEntry, layout: &DocLayout
 /// (used as a rough horizontal anchor for the box). The exact value
 /// depends on Typst's font metrics; for v1 we estimate from the
 /// label's character count.
-pub(crate) fn cite_label_width(entry: &ReferenceEntry) -> f64 {
+#[cfg(feature = "gui")]
+pub(crate) fn cite_label_width(entry: &mathed_core::markers::ReferenceEntry) -> f64 {
     let label = mathed_core::markers::cite_label_text(entry);
     // ~7 pt per char at the default font size.
     label.chars().count() as f64 * 7.0
