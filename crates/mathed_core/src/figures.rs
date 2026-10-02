@@ -77,6 +77,17 @@ pub struct FigureSpec {
     /// App binding key (quotes stripped). Figures that share an id
     /// are mirrors of one app — see emthin's `FigureManager`.
     pub id: Option<String>,
+    /// Launch command for a *dormant* figure, quotes stripped, or `None`.
+    ///
+    /// Written `launch: "foot -T"`. This is the command emthin runs when the
+    /// figure holds no client — the user writes it next to the geometry it
+    /// applies to, so the document stays the authority on what an `\app` means.
+    ///
+    /// The string is deliberately *unparsed* here. Splitting a command line is
+    /// a quoting problem with no right answer at the document layer, so the
+    /// consumer splits it with whatever splitter it already uses for `--spawn`
+    /// (emthin: `cli::split_command`). One splitter, one set of quoting rules.
+    pub launch: Option<String>,
 }
 
 impl FigureSpec {
@@ -92,9 +103,11 @@ impl FigureSpec {
 /// Positional per D2: `w, h[, id]`. A `name:` prefix on `w`/`h` is
 /// tolerated (`w: 640`) but not required. Returns `None` unless the
 /// first two args parse as positive integers — a `\app` without usable
-/// dimensions is not a figure and renders as plain text. Args past
-/// the third are reserved (planned `scale:` / `fit:` literals) and
-/// ignored in v1.
+/// dimensions is not a figure and renders as plain text.
+///
+/// `launch:` is a **named** arg rather than a fourth positional, matching
+/// `lang:` on `\kernel` and `from:` on `\exec`. Anything unnamed past the
+/// third arg stays reserved and ignored.
 pub fn app_figure_spec(extra_args: &[Arg]) -> Option<FigureSpec> {
     /// A bare literal's trimmed text, or `None` for a marker ref.
     fn literal(arg: &Arg) -> Option<&str> {
@@ -103,9 +116,16 @@ pub fn app_figure_spec(extra_args: &[Arg]) -> Option<FigureSpec> {
             Arg::MarkerRef { .. } => None,
         }
     }
+    /// Strip one layer of matching quotes.
+    fn unquote(text: &str) -> &str {
+        text.strip_prefix('"')
+            .and_then(|t| t.strip_suffix('"'))
+            .or_else(|| text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
+            .unwrap_or(text)
+    }
     /// A dimension: a bare literal with an optional `name:` prefix
     /// stripped. Only ever applied to the `w`/`h` slots, never to the
-    /// id (whose quotes may legitimately contain a `:`).
+    /// id or launch (whose text may legitimately contain a `:`).
     fn dimension(arg: &Arg) -> Option<i32> {
         let text = literal(arg)?;
         let text = match text.split_once(':') {
@@ -123,16 +143,22 @@ pub fn app_figure_spec(extra_args: &[Arg]) -> Option<FigureSpec> {
     let id = extra_args
         .get(2)
         .and_then(literal)
-        .map(|text| {
-            text.strip_prefix('"')
-                .and_then(|t| t.strip_suffix('"'))
-                .or_else(|| text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
-                .unwrap_or(text)
-                .to_owned()
-        })
+        .map(unquote)
+        .map(str::to_owned)
         .filter(|id| !id.is_empty());
+    let launch = extra_args
+        .iter()
+        .filter_map(|arg| literal(arg))
+        .filter_map(|text| text.split_once(':'))
+        .find(|(name, _)| name.trim() == "launch")
+        .map(|(_, value)| unquote(value.trim()).to_owned())
+        // `launch: #a` is a mistake, not a command: the scanner does not split a
+        // marker ref out of a named arg, so the value arrives as the literal
+        // text "#a" and would be spawned as a program with that name. A leading
+        // `#` is never a real program here, so refuse it rather than run it.
+        .filter(|cmd| !cmd.is_empty() && !cmd.starts_with('#'));
 
-    Some(FigureSpec { w, h, id })
+    Some(FigureSpec { w, h, id, launch })
 }
 
 /// A fully-resolved figure: its stable key plus its arguments.
@@ -255,5 +281,96 @@ fn walk_figures(frame: &Frame, offset: V2, out: &mut Vec<FigureRect>) {
             FrameItem::Group(group) => walk_figures(&group.frame, pos, out),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markers::{resolve_segments, scan};
+
+    /// The parsed spec of the first `\app` in `doc`, or `None`.
+    fn spec_of(doc: &str) -> Option<FigureSpec> {
+        let scan = scan(doc);
+        let segments = resolve_segments(&scan);
+        segments
+            .iter()
+            .find(|s| s.kind.is_app())
+            .and_then(|s| app_figure_spec(&s.extra_args))
+    }
+
+    /// The three existing forms still parse, and none of them invent a launch
+    /// command. The default has to be `None`, not an empty string, so
+    /// "no command" and "an empty command" cannot be confused downstream.
+    #[test]
+    fn no_launch_arg_means_no_launch_command() {
+        for doc in [
+            "#a cap #b \\app(#a, #b, 640, 400)",
+            "#a cap #b \\app(#a, #b, 640, 400, \"foot\")",
+            "#a cap #b \\app(#a, #b, w: 640, h: 400)",
+        ] {
+            assert_eq!(spec_of(doc).expect("a figure").launch, None, "{doc}");
+        }
+    }
+
+    /// The new form, including alongside the id — the common case, since a
+    /// launch command without a binding id would have nothing to match on.
+    #[test]
+    fn a_launch_named_arg_is_parsed_and_unquoted() {
+        let spec = spec_of(r#"#a cap #b \app(#a, #b, 640, 400, "foot", launch: "foot -T")"#)
+            .expect("a figure");
+        assert_eq!(spec.launch.as_deref(), Some("foot -T"));
+        assert_eq!(spec.id.as_deref(), Some("foot"));
+        assert_eq!((spec.w, spec.h), (640, 400));
+        // Single quotes work too, like the id slot.
+        let spec =
+            spec_of("#a cap #b \\app(#a, #b, 640, 400, launch: 'foot -T')").expect("a figure");
+        assert_eq!(spec.launch.as_deref(), Some("foot -T"));
+    }
+
+    /// A command containing a colon must survive intact. This is why `launch:`
+    /// is named and why the split happens on the *first* colon only: a naive
+    /// `rsplit_once(':')` would cut `foot --app-id x:y` in half.
+    #[test]
+    fn a_colon_inside_the_command_is_kept() {
+        let spec = spec_of(r#"#a cap #b \app(#a, #b, 640, 400, launch: "foot --app-id x:y")"#)
+            .expect("a figure");
+        assert_eq!(spec.launch.as_deref(), Some("foot --app-id x:y"));
+    }
+
+    /// `launch:` is matched by name, so an unrelated named arg is not mistaken
+    /// for it, and an unnamed arg in that position stays reserved.
+    #[test]
+    fn only_a_literal_named_launch_is_taken() {
+        // Wrong name.
+        let spec = spec_of(r#"#a cap #b \app(#a, #b, 640, 400, "cmd: foot")"#).expect("a figure");
+        assert_eq!(spec.launch, None, "the id slot is not a launch command");
+        // Unnamed fourth positional stays reserved, as documented.
+        let spec =
+            spec_of(r#"#a cap #b \app(#a, #b, 640, 400, "foot", "foot -T")"#).expect("a figure");
+        assert_eq!(spec.launch, None, "a bare 4th positional is reserved");
+        assert_eq!(spec.id.as_deref(), Some("foot"));
+    }
+
+    /// An empty command is no command. Treating it as `Some("")` would spawn
+    /// a process with an empty argv on every click.
+    #[test]
+    fn an_empty_launch_command_is_dropped() {
+        for doc in [
+            r#"#a cap #b \app(#a, #b, 640, 400, launch: "")"#,
+            r#"#a cap #b \app(#a, #b, 640, 400, launch: '')"#,
+            "#a cap #b \\app(#a, #b, 640, 400, launch:)",
+        ] {
+            assert_eq!(spec_of(doc).expect("a figure").launch, None, "{doc}");
+        }
+    }
+
+    /// A marker ref where a literal is required must not become a command.
+    #[test]
+    fn a_marker_ref_is_never_a_launch_command() {
+        let scan = scan("#a cap #b \\app(#a, #b, 640, 400, launch: #a)");
+        let segments = resolve_segments(&scan);
+        let seg = segments.iter().find(|s| s.kind.is_app()).expect("segment");
+        assert_eq!(app_figure_spec(&seg.extra_args).expect("spec").launch, None);
     }
 }
