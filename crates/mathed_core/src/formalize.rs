@@ -566,11 +566,6 @@ mod tests {
     #[test]
     fn a_verified_result_is_green_and_shows_its_fields() {
         let h = "b".repeat(64);
-        let spec = FormalSpec {
-            cnl: "Mary sees Bob".into(),
-            readback: Some("See(mary, bob)".into()),
-            unf_hash: Some(h.clone()),
-        };
         let m = verdict_markup(&Verdict::Verified {
             readback: "See(mary, bob)".into(),
             unf_hash: h.clone(),
