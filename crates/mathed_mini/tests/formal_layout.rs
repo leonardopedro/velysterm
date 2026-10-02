@@ -64,32 +64,106 @@ fn the_captions_and_blocks_are_both_in_the_render_text() {
     assert!(!out.text.contains("\\formal("), "{}", out.text);
 }
 
-/// The hash is abbreviated for display but the *declaration* keeps all 64
-/// characters, so a frontend correlating a kernel report against the document
-/// can match on the full value even though the reader only sees twelve.
+/// The two-tier split, stated as a property of the rendered text.
+///
+/// The **declaration** (the content tier, spliced by `transform`) shows the CNL
+/// and whatever the document itself claims about it. It does *not* show the hash:
+/// a hash written into the document is a claim, not a result, and printing it
+/// beside the CNL would make an unchecked assertion look verified. The hash is
+/// rendered by the **verdict** tier instead, where the kernel's own answer
+/// stands next to it — and a frontend that disagrees with the document's hash
+/// then has both on screen to compare.
 #[test]
-fn the_full_hash_survives_the_transform() {
+fn the_declaration_does_not_display_a_hash() {
     let hash = "600fbe115bf9d2788c7aaffbd64ff762762c48bb017d53338496b945ffa0d4e3";
-    let doc = format!("#1 x #2 \\formal(#1, #2, \"x\", \"X(1)\", {hash})");
-    let opts = TransformOptions::default();
-    let out = doc_to_render_with(&doc, &opts);
+    let doc = format!("#1 x #2 \\formal(#1, #2, \"x\", \"X(1)\", \"{hash}\")");
+    let out = doc_to_render_with(&doc, &TransformOptions::default());
     assert!(
-        out.text.contains(&hash[..12]),
-        "the abbreviation is rendered: {}",
+        !out.text.contains(&hash[..12]),
+        "a declared hash must not be displayed as if it were verified: {}",
         out.text
     );
-    // The spec keeps it whole — the truncation is a rendering decision, not a
-    // data loss.
+    // It is kept whole in the spec, though — the truncation is a rendering
+    // decision for the verdict tier, not a data loss.
     let scan = mathed_core::markers::scan(&doc);
     let segments = mathed_core::markers::resolve_segments(&scan);
     let found = mathed_core::formalize::formals_in_segments(&segments);
     assert_eq!(found[0].spec.unf_hash.as_deref(), Some(hash));
 }
 
-/// Every payload here is model output, so every delimiter Typst treats specially
-/// is exercised. None of it may break layout.
+/// The kernel's verdict is what carries the hash, abbreviated.
 #[test]
-fn payload_delimiters_do_not_break_layout() {
+fn the_verdict_displays_the_hash_abbreviated() {
+    use mathed_core::formalize::Verdict;
+    let hash = "600fbe115bf9d2788c7aaffbd64ff762762c48bb017d53338496b945ffa0d4e3";
+    let markup = mathed_core::formalize::verdict_markup(&Verdict::Verified {
+        readback: "X(1)".into(),
+        unf_hash: hash.into(),
+    });
+    assert!(markup.contains(&hash[..12]), "{markup}");
+    assert!(
+        !markup.contains(hash),
+        "64 hex chars would dominate the block"
+    );
+
+    // A verdict arrives through `annotations`, which is spliced *after* the
+    // escape pass — feeding the markup as document text instead would have the
+    // transform escape its own `#text(`.
+    let doc = r#"#1 x #2 \formal(#1, #2, "x")"#;
+    let scan = mathed_core::markers::scan(doc);
+    let segments = mathed_core::markers::resolve_segments(&scan);
+    let formal = &mathed_core::formalize::formals_in_segments(&segments)[0];
+    let mut opts = TransformOptions::default();
+    opts.annotations.insert(formal.span.start, markup.clone());
+    layout_doc_paged(doc, &opts).expect("verdict markup must compile through annotations");
+    let out = doc_to_render_with(doc, &opts);
+    assert!(out.text.contains(&markup), "verdict spliced: {}", out.text);
+}
+
+/// All three verdict classes compile and are visually distinct — a failure that
+/// looks like a success, or a success that looks like a failure, is the whole
+/// risk in a three-colour scheme.
+#[test]
+fn every_verdict_class_compiles_and_differs() {
+    use mathed_core::formalize::Verdict;
+    let cases = [
+        Verdict::Verified {
+            readback: "See(mary, bob)".into(),
+            unf_hash: "a".repeat(64),
+        },
+        Verdict::NotConfluent {
+            readback: "See(mary, bob)".into(),
+        },
+        Verdict::Failed("words not in the lexicon: Euler".into()),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for verdict in &cases {
+        let markup = mathed_core::formalize::verdict_markup(verdict);
+        assert!(
+            seen.insert(markup.clone()),
+            "verdicts must render distinctly"
+        );
+        let doc = r#"#1 x #2 \formal(#1, #2, "x")"#;
+        let scan = mathed_core::markers::scan(doc);
+        let segments = mathed_core::markers::resolve_segments(&scan);
+        let formal = &mathed_core::formalize::formals_in_segments(&segments)[0];
+        let mut opts = TransformOptions::default();
+        opts.annotations.insert(formal.span.start, markup);
+        layout_doc_paged(doc, &opts)
+            .unwrap_or_else(|e| panic!("{verdict:?} markup failed to compile: {e:?}"));
+    }
+    // `is_verified` is the only true for the first case.
+    assert!(cases[0].is_verified());
+    assert!(!cases[1].is_verified());
+    assert!(!cases[2].is_verified());
+}
+
+/// The CNL is carried by the user (or a model) writing it into the document, and
+/// the kernel's readback is whatever came back — so both arrive as ordinary
+/// document text, and the transform must escape them. Every delimiter Typst
+/// treats specially is exercised.
+#[test]
+fn payload_delimiters_survive_the_transform() {
     let hostile = [
         ("hash", "a # b"),
         ("star", "a * b"),

@@ -216,60 +216,147 @@ fn escape(text: &str) -> String {
 /// literals and nothing else.
 ///
 /// Rendered when no kernel is attached, so a `\formal` step is visible in the
-/// document even before anything has verified it. The `verified: false` styling
-/// is the point: an unverified declaration must not look like a result.
+/// document even before anything has verified it. The grey styling is the
+/// point: an unverified declaration must not look like a result.
+///
+/// This is the **content** tier. A kernel-backed frontend adds
+/// [`verdict_markup`] through `TransformOptions::annotations` at the same
+/// insertion point, and `transform`'s documented priority puts content before
+/// results — so the reader sees the claim, then the checking.
 pub fn declared_markup(spec: &FormalSpec) -> String {
-    verified_markup(spec, false)
-}
-
-/// The block spliced after a caption span, carrying a kernel verdict.
-///
-/// `verified` styles the border and the tick: green for a sentence that reduced
-/// to a unique normal form, amber for one that compiled but did not, red for one
-/// that did not compile. The third case is what
-/// `logos::formalize::VerifyError` reports, and it is worth distinguishing from
-/// the second — "I have not checked this" and "I checked and it is not unique"
-/// are different facts about a proof.
-///
-/// Raw trusted markup; every payload goes through [`escape`].
-pub fn verified_markup(spec: &FormalSpec, verified: bool) -> String {
-    let (stroke, mark) = if verified {
-        ("rgb(26,127,55)", "✓")
-    } else if spec.has_result() {
-        ("rgb(191,135,0)", "!")
-    } else {
-        ("rgb(139,143,152)", "·")
-    };
-
-    let mut body = String::new();
-    body.push_str(&format!(
-        "#text(size: 8pt, fill: rgb(107,112,118))[{} ]",
-        escape(mark)
-    ));
-    body.push_str(&format!(
-        "#text(size: 8pt, fill: rgb(59,63,69))[cnl: {}]",
-        escape(&spec.cnl)
-    ));
-
+    let mut body = field(Some(MARK_DECLARED));
+    body.push_str(&text_field(&format!("cnl: {}", spec.cnl)));
     if let Some(r) = &spec.readback {
         body.push(' ');
-        body.push_str(&format!(
-            "#text(size: 8pt, fill: rgb(107,112,118))[→ ]\
-             #text(size: 8pt, fill: rgb(59,63,69))[{}]",
-            escape(r)
-        ));
+        body.push_str(&field(Some("declared →")));
+        body.push_str(&text_field(r));
     }
-    if let Some(h) = &spec.unf_hash {
-        body.push(' ');
-        body.push_str(&format!(
-            "#text(size: 7pt, fill: rgb(107,112,118))[{}]",
-            escape(&h[..h.len().min(12)])
-        ));
+    block(GREY, &body)
+}
+
+/// The block a kernel attaches for one `\formal` step.
+///
+/// A kernel answers one of three things, and all three are worth
+/// distinguishing: the sentence reduced to a unique normal form; it compiled but
+/// two reductions disagreed; or it did not compile at all. "I have not checked
+/// this" and "I checked and it is not unique" are different facts about a
+/// proof, and collapsing them would let an unverifiable step read as a checked
+/// one — so [`Verdict::Failed`] and a non-confluent reduction get different
+/// marks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Reduced to a unique normal form; this is the node's identity.
+    Verified { readback: String, unf_hash: String },
+    /// Compiled and reduced, but two reductions disagreed — so it has no
+    /// content address and cannot be a node (rewrite plan §17.4).
+    NotConfluent { readback: String },
+    /// Did not compile at all. Carries the kernel's reason, which is what makes
+    /// this actionable rather than merely red.
+    Failed(String),
+}
+
+impl Verdict {
+    /// Whether the step has a content address.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Verdict::Verified { .. })
     }
 
+    /// The mark shown before the sentence.
+    pub fn mark(&self) -> &'static str {
+        match self {
+            Verdict::Verified { .. } => "✓",
+            Verdict::NotConfluent { .. } => "!",
+            Verdict::Failed(_) => "✗",
+        }
+    }
+
+    /// The border colour.
+    pub fn colour(&self) -> &'static str {
+        match self {
+            Verdict::Verified { .. } => "rgb(26,127,55)",
+            Verdict::NotConfluent { .. } => "rgb(191,135,0)",
+            Verdict::Failed(_) => "rgb(164,38,44)",
+        }
+    }
+}
+
+/// The block a kernel attaches, for [`TransformOptions::annotations`].
+///
+/// Separate from [`declared_markup`] rather than a `verified` flag on it, so the
+/// two tiers cannot be confused: this one is never derived from the document, and
+/// [`declared_markup`] never shows a kernel's answer. A frontend that wants a
+/// single self-contained block splices both, in that order.
+///
+/// Raw trusted markup; every payload goes through [`escape`], which is a
+/// correctness requirement — the CNL and the readback are kernel output, and an
+/// unescaped `#` in either would be parsed as a Typst expression.
+pub fn verdict_markup(verdict: &Verdict) -> String {
+    let mut body = field(Some(verdict.mark()));
+    match verdict {
+        Verdict::Verified { readback, unf_hash } => {
+            body.push_str(&text_field(readback));
+            if unf_hash.len() >= 12 {
+                body.push_str(&format!(
+                    "#text(size: 7pt, fill: rgb(107,112,118))[{}]",
+                    escape(&unf_hash[..12])
+                ));
+            }
+        }
+        Verdict::NotConfluent { readback } => {
+            body.push_str(&format!(
+                "#text(size: 8pt, fill: rgb(59,63,69))[{} — no unique normal \
+                 form, so this step has no identity]",
+                escape(readback)
+            ));
+        }
+        Verdict::Failed(reason) => {
+            body.push_str(&format!(
+                "#text(size: 8pt, fill: rgb(59,63,69))[{}]",
+                escape(reason)
+            ));
+        }
+    }
+    block(verdict.colour(), &body)
+}
+
+/// The full block for a step that has both a declaration and a verdict.
+///
+/// For frontends that splice one blob (a report export) rather than the two
+/// tiers. Same content, same order, so the two paths cannot disagree.
+pub fn block_markup(spec: &FormalSpec, verdict: Option<&Verdict>) -> String {
+    match verdict {
+        Some(v) => format!("{}{}", declared_markup(spec), verdict_markup(v)),
+        None => declared_markup(spec),
+    }
+}
+
+/// Border colour for an unverified declaration.
+const GREY: &str = "rgb(139,143,152)";
+
+/// The opener both field styles share, closed by the builder that uses it.
+const LABEL: &str = "#text(size: 8pt, fill: rgb(107,112,118))[";
+
+/// The mark on an unverified declaration: neither a tick nor a cross, because
+/// the step has not been checked at all.
+const MARK_DECLARED: &str = "\u{b7}";
+
+/// A grey label carrying `content`, or just the opener when there is none.
+fn field(content: Option<&str>) -> String {
+    match content {
+        Some(c) => format!("{LABEL}{c}]"),
+        None => LABEL.to_string(),
+    }
+}
+
+/// A dark text run, complete and closed.
+fn text_field(content: &str) -> String {
+    format!("#text(size: 8pt, fill: rgb(59,63,69))[{}]", escape(content))
+}
+
+fn block(colour: &str, body: &str) -> String {
     format!(
         "#block(breakable: false, inset: (left: 10pt, top: 1pt, bottom: 1pt), \
-         stroke: (left: 1.5pt + {stroke}))[{body}]"
+         stroke: (left: 1.5pt + {colour}))[{body}]"
     )
 }
 
@@ -420,7 +507,13 @@ mod tests {
             readback: Some("A#b".into()),
             unf_hash: None,
         };
-        let m = verified_markup(&spec, true);
+        let m = block_markup(
+            &spec,
+            Some(&Verdict::Verified {
+                readback: "R".into(),
+                unf_hash: "h".repeat(64),
+            }),
+        );
         // The escaped form still *contains* the literal text, so the property
         // worth asserting is that the payload's own `#`s came out escaped. The
         // surrounding markup uses `#block` / `#text` legitimately, so the check is
@@ -461,14 +554,13 @@ mod tests {
     /// checked", and the styling distinguishes them.
     #[test]
     fn a_declared_but_unverified_result_is_amber() {
-        let spec = FormalSpec {
-            cnl: "Mary sees Bob".into(),
-            readback: Some("See(mary, bob)".into()),
-            unf_hash: None,
-        };
-        let m = verified_markup(&spec, false);
+        let m = verdict_markup(&Verdict::NotConfluent {
+            readback: "See(mary, bob)".into(),
+        });
         assert!(m.contains("!"), "{m}");
         assert!(m.contains("191,135,0"), "amber: {m}");
+        // And it says *why* it is amber, rather than only that it failed.
+        assert!(m.contains("no unique normal form"), "{m}");
     }
 
     #[test]
@@ -479,8 +571,11 @@ mod tests {
             readback: Some("See(mary, bob)".into()),
             unf_hash: Some(h.clone()),
         };
-        let m = verified_markup(&spec, true);
-        assert!(m.contains("✓"), "{m}");
+        let m = verdict_markup(&Verdict::Verified {
+            readback: "See(mary, bob)".into(),
+            unf_hash: h.clone(),
+        });
+        assert!(m.contains("\u{2713}"), "{m}");
         assert!(m.contains("26,127,55"), "{m}");
         assert!(m.contains("See(mary, bob)"), "{m}");
         // The hash is abbreviated: 64 hex characters would dominate the block.
