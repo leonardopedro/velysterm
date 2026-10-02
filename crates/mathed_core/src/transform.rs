@@ -419,6 +419,42 @@ pub fn to_render_text_range(
         })
         .collect();
 
+    // Formalizations (`\formal`): each segment splices the **declared** CNL block
+    // at the **end of its caption span** — after the English step, before
+    // whatever the kernel says about it.
+    //
+    // Two deliberate differences from an `\app` figure. It goes *after* the
+    // caption rather than before, because a proof step reads as the sentence and
+    // then as what was proved about it. And it is built from the document's own
+    // literals with no kernel involved, so a `\formal` step is visible with or
+    // without a kernel attached — a kernel-backed caller adds its verdict through
+    // `annotations` at the same insertion point, and `transform`'s documented
+    // priority already puts template output (content) before kernel annotations
+    // (results). No new splice map, and no coordination between the two.
+    //
+    // Suppressed while revealed, like every other splice: the user is editing the
+    // raw `\formal(#1, #2, "…")` token and the computed block would sit in the
+    // middle of it.
+    let formal_points: Vec<(usize, String)> = segments
+        .iter()
+        .filter(|seg| seg.kind.is_formal())
+        .filter_map(|seg| {
+            let formal = crate::formalize::resolve_formal(seg)?;
+            if formal.span.start < range.start || formal.span.end > range.end {
+                return None;
+            }
+            if expanded(&formal.span) {
+                return None;
+            }
+            debug_assert!(is_grapheme_boundary(doc_text, formal.span.end));
+            bounds.push(formal.span.end);
+            Some((
+                formal.span.end,
+                crate::formalize::declared_markup(&formal.spec),
+            ))
+        })
+        .collect();
+
     // Template splices (T-series): markup produced by `\template`
     // expansion, spliced in just after a segment's body — same
     // rule as the inline annotations below (keyed by body start,
@@ -632,6 +668,16 @@ pub fn to_render_text_range(
         }
         // Template output first, then kernel annotations, at a
         // shared insertion point (content before results).
+        //
+        // `\formal` output joins the template tier: it is *content* — the CNL the
+        // document declares — so a kernel verdict supplied through `annotations`
+        // lands after it, and the reader sees the claim before the checking.
+        for (pos, markup) in formal_points.iter().map(|(p, m)| (p, m.as_str())) {
+            if *pos == start {
+                pin_splice_point(start, &mut out, &mut map);
+                out.push_str(markup);
+            }
+        }
         for (pos, markup) in &template_points {
             if *pos == start {
                 pin_splice_point(start, &mut out, &mut map);
@@ -803,6 +849,15 @@ pub fn to_render_text_range(
     // range has no window starting there; splice it now (before the
     // template splices, matching the in-window order).
     for (pos, markup) in &app_figure_points {
+        if *pos == range.end {
+            pin_splice_point(range.end, &mut out, &mut map);
+            out.push_str(markup);
+        }
+    }
+    // A `\formal` block whose insertion point is the very end of the
+    // range has no window starting there either; splice it now, in
+    // the same content-before-results position as the in-window case.
+    for (pos, markup) in formal_points.iter().map(|(p, m)| (p, m.as_str())) {
         if *pos == range.end {
             pin_splice_point(range.end, &mut out, &mut map);
             out.push_str(markup);
@@ -2767,5 +2822,126 @@ mod tests {
         let fig = out.text.find("app:fig/f0").expect("figure");
         let tpl = out.text.find("#small[t]").expect("template");
         assert!(fig < tpl, "figure splices first: {}", out.text);
+    }
+
+    // ── `\formal` (Part 2 P7) ─────────────────────────────────────────────
+
+    #[test]
+    fn formal_splices_the_declared_cnl_and_hides_the_statement() {
+        let text = "#1 Mary sees Bob #2 \\formal(#1, #2, \"Mary sees Bob\")";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains("[cnl: Mary sees Bob]"), "{}", out.text);
+        assert!(
+            !out.text.contains("\\formal("),
+            "statement hidden: {}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn formal_keeps_the_caption_as_ordinary_prose() {
+        let text = "#1 Mary sees Bob #2 \\formal(#1, #2, \"Mary sees Bob\")";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains("Mary sees Bob"), "{}", out.text);
+    }
+
+    #[test]
+    fn formal_block_comes_after_the_caption() {
+        // A proof step reads as the sentence, then as what was proved about it —
+        // the opposite of an `\app` figure, whose placeholder precedes its
+        // caption.
+        let text = "#1 Mary sees Bob #2 \\formal(#1, #2, \"Mary sees Bob\")";
+        let out = render(text, &TransformOptions::default());
+        let prose = out.text.find("Mary sees Bob").expect("caption");
+        let block = out.text.find("[cnl:").expect("formal block");
+        assert!(
+            prose < block,
+            "caption must precede the block: {}",
+            out.text
+        );
+    }
+
+    /// The two tiers: the declared CNL comes from the document, the kernel's
+    /// verdict lands after it through `annotations`, and neither knows about the
+    /// other.
+    #[test]
+    fn formal_content_precedes_a_kernel_annotation_at_the_same_point() {
+        let text = "#1 Mary sees Bob #2 \\formal(#1, #2, \"Mary sees Bob\")";
+        // The annotation is keyed by the caption's **start**, and inserted at its
+        // end — derived from the document rather than hard-coded, so the test
+        // cannot drift from the marker offsets.
+        let scan = crate::markers::scan(text);
+        let segments = crate::markers::resolve_segments(&scan);
+        let formal = &crate::formalize::formals_in_segments(&segments)[0];
+
+        let mut opts = TransformOptions::default();
+        opts.annotations.insert(
+            formal.span.start,
+            "#text(fill: green)[verified]".to_string(),
+        );
+        let out = render(text, &opts);
+        let block = out.text.find("[cnl:").expect("formal block");
+        let verdict = out.text.find("verified").expect("kernel verdict");
+        assert!(block < verdict, "content before result: {}", out.text);
+    }
+
+    #[test]
+    fn formal_escapes_a_hash_in_the_cnl() {
+        // The CNL is model output and the splice is trusted markup, so an
+        // unescaped `#` would be parsed as a Typst expression.
+        let text = "#1 x #2 \\formal(#1, #2, \"#import \\\"evil\\\": x\")";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains("\\#import"), "{}", out.text);
+    }
+
+    #[test]
+    fn formal_skipped_when_dangling() {
+        let text = "Mary sees Bob #2 \\formal(#1, #2, \"x\")";
+        let out = render(text, &TransformOptions::default());
+        assert!(!out.text.contains("[cnl:"), "{}", out.text);
+    }
+
+    #[test]
+    fn formal_skipped_without_a_cnl_argument() {
+        let text = "#1 Mary sees Bob #2 \\formal(#1, #2)";
+        let out = render(text, &TransformOptions::default());
+        assert!(!out.text.contains("[cnl:"), "{}", out.text);
+    }
+
+    /// An unverified declaration must not look like a verified one — which is
+    /// why the tick lives in the markup rather than being implied by the block's
+    /// presence.
+    #[test]
+    fn formal_unverified_is_not_styled_verified() {
+        let text = "#1 x #2 \\formal(#1, #2, \"x\")";
+        let out = render(text, &TransformOptions::default());
+        assert!(
+            !out.text.contains("26,127,55"),
+            "must not be green: {}",
+            out.text
+        );
+        assert!(out.text.contains("139,143,152"), "grey: {}", out.text);
+    }
+
+    /// A `\formal` whose caption ends exactly at the end of the range has no
+    /// window starting at the insertion point, so its block is spliced by the
+    /// trailing-anchor path — the same edge case `\app` and `\template` have.
+    #[test]
+    fn formal_at_the_very_end_of_the_range_still_splices() {
+        let text = "#1 x #2 \\formal(#1, #2, \"x\")\n";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains("[cnl: x]"), "{}", out.text);
+    }
+
+    #[test]
+    fn formals_get_distinct_keys_in_document_order() {
+        let text = "#1 one #2 \\formal(#1, #2, \"one\")\n#3 two #4 \\formal(#3, #4, \"two\")";
+        let scan = crate::markers::scan(text);
+        let segments = crate::markers::resolve_segments(&scan);
+        let found = crate::formalize::formals_in_segments(&segments);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].key, "g0");
+        assert_eq!(found[1].key, "g1");
+        assert!(found[0].span.start < found[1].span.start);
     }
 }

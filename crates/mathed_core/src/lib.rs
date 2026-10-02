@@ -22,6 +22,7 @@ pub mod blocks;
 pub mod completion;
 pub mod doc;
 pub mod figures;
+pub mod formalize;
 pub mod format;
 pub mod glyphs;
 pub mod markers;

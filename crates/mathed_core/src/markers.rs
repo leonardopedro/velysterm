@@ -178,6 +178,18 @@ pub enum PropKind {
     /// and no kernel payload, it only marks out document space.
     /// See [`crate::figures`] and [`PropKind::is_app`].
     App,
+    /// Formalizations (`\formal`): the span is the natural-language
+    /// proof step (a caption, left as ordinary prose) and the
+    /// trailing literals are the L0 CNL sentence plus, optionally,
+    /// the kernel's readback and UNF hash. `transform` splices a
+    /// block after the span showing the declared CNL, so a step is
+    /// visible in the document with or without a kernel attached.
+    /// Deliberately non-visual and non-kernel — it *declares* a
+    /// formalization; verifying one is the kernel's job, and the
+    /// declared hash is only shown alongside the kernel's own verdict
+    /// so a stale one reads as a disagreement rather than as a fact.
+    /// See [`crate::formalize`] and [`PropKind::is_formal`].
+    Formal,
 }
 
 impl PropKind {
@@ -217,6 +229,9 @@ impl PropKind {
             "kernel" => Self::Kernel,
             // `\app` — an app figure (see [`PropKind::App`]).
             "app" | "figure" => Self::App,
+            // `\formal` — an NL proof step paired with its CNL
+            // translation (see [`PropKind::Formal`]).
+            "formal" | "cnl" => Self::Formal,
             _ => Self::Other,
         }
     }
@@ -310,6 +325,16 @@ impl PropKind {
     /// payload) — see [`crate::figures`].
     pub fn is_app(self) -> bool {
         matches!(self, Self::App)
+    }
+
+    /// Formalizations (`\formal`): the span is a caption and the
+    /// trailing literals are a CNL sentence plus optional kernel
+    /// results. Non-visual (the block is rendered text, not inline
+    /// styling) and non-kernel — a `\formal` *declares* a
+    /// formalization, it does not perform one. See
+    /// [`crate::formalize`].
+    pub fn is_formal(self) -> bool {
+        matches!(self, Self::Formal)
     }
 }
 

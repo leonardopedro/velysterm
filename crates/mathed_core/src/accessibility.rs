@@ -179,6 +179,26 @@ pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
                 .unwrap_or_else(|| "unsized".to_string());
             (AccessRole::Figure, format!("figure, {size}: {content}"))
         }
+        // A `\formal` announces the CNL it translates the step into, because
+        // that string is the *point* of the statement — a screen-reader user
+        // hearing only the English caption would otherwise get no access to it.
+        // Whether a result is carried is appended rather than assumed, so
+        // "declared" and "declared and checked" do not sound identical.
+        PropKind::Formal => {
+            let spec = crate::formalize::formal_spec(&seg.extra_args);
+            let Some(spec) = spec else {
+                return (AccessRole::Math, format!("formalization of: {content}"));
+            };
+            let status = if spec.has_result() {
+                ""
+            } else {
+                ", not yet verified"
+            };
+            (
+                AccessRole::Math,
+                format!("proof step: {content}; formalization: {}{status}", spec.cnl),
+            )
+        }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }
