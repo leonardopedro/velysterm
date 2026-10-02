@@ -167,6 +167,17 @@ pub enum PropKind {
     /// deny-by-default. The generalization over Jupyter: safety
     /// comes from grants, not per-kernel container isolation.
     Kernel,
+    /// An app figure — `\app(#s, #f, w, h[, "id"])`. The span between
+    /// the markers is the figure's **caption** (ordinary document
+    /// prose); the trailing literals are the figure's size in logical
+    /// px and an optional app binding key. `transform` splices an
+    /// image placeholder at the span's start so the figure occupies a
+    /// slot in the rendered page like a figure in a PDF, and
+    /// `figures_in_frame` recovers its rect from the laid-out frame.
+    /// Deliberately non-visual and non-kernel: it carries no styling
+    /// and no kernel payload, it only marks out document space.
+    /// See [`crate::figures`] and [`PropKind::is_app`].
+    App,
 }
 
 impl PropKind {
@@ -204,6 +215,8 @@ impl PropKind {
             // N11: `\kernel` — a granted, language-gated code run
             // (see [`PropKind::Kernel`]).
             "kernel" => Self::Kernel,
+            // `\app` — an app figure (see [`PropKind::App`]).
+            "app" | "figure" => Self::App,
             _ => Self::Other,
         }
     }
@@ -289,6 +302,14 @@ impl PropKind {
     /// different statement entirely).
     pub fn is_base(self) -> bool {
         matches!(self, Self::Base)
+    }
+
+    /// App figures (`\app`): the span is a caption and the trailing
+    /// literals are a size + binding key. Non-visual (a figure is a
+    /// block, not inline styling) and non-kernel (it carries no model
+    /// payload) — see [`crate::figures`].
+    pub fn is_app(self) -> bool {
+        matches!(self, Self::App)
     }
 }
 
@@ -739,8 +760,14 @@ fn parse_arg(text: &str, raw: Range<usize>) -> Option<Arg> {
     }
     let start = raw.start + (text[raw.clone()].len() - text[raw].trim_start().len());
     let range = start..start + trimmed.len();
+    // The id shape must match `try_parse_marker` exactly: an auto-named
+    // marker is an RFC-1751 *word* (`#ad`, see `auto_marker_id`), not a
+    // number, so requiring a leading digit here made every
+    // editor-generated marker resolve to `Arg::Literal` — its statement
+    // silently lost its span. Inside a statement's argument list `#x` is
+    // unambiguously a marker ref anyway.
     if let Some(rest) = trimmed.strip_prefix('#')
-        && rest.starts_with(|c: char| c.is_ascii_digit())
+        && !rest.is_empty()
         && rest.chars().all(|c| c.is_ascii_alphanumeric())
     {
         return Some(Arg::MarkerRef {
@@ -809,6 +836,30 @@ mod tests {
         let s = scan(r"\#1 is literal, \\ too, \alpha stays");
         assert!(s.markers.is_empty());
         assert!(s.stmts.is_empty());
+    }
+
+    #[test]
+    fn auto_named_marker_refs_resolve_like_numeric_ones() {
+        // `auto_marker_id` yields RFC 1751 *words* ("ad", "o"), not
+        // numbers, so a statement built from `auto_marker_token` output
+        // must resolve its span exactly like `#1 … #2` does. `parse_arg`
+        // used to require a leading digit, which silently left every
+        // editor-generated marker as a `Literal`.
+        let text = "#ad cap #o \\app(#ad, #o, 640, 400)";
+        let s = scan(text);
+        assert_eq!(s.stmts[0].args[0].marker_id(), Some("ad"));
+        assert_eq!(s.stmts[0].args[1].marker_id(), Some("o"));
+
+        let segs = resolve_segments(&s);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].span, Some(3..8));
+        assert_eq!(&text[segs[0].span.clone().unwrap()], " cap ");
+    }
+
+    #[test]
+    fn a_bare_hash_is_not_a_marker_ref() {
+        let s = scan("\\app(#1, #2, #, 4)");
+        assert_eq!(s.stmts[0].args[2].marker_id(), None);
     }
 
     #[test]
