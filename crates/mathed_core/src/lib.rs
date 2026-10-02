@@ -21,6 +21,7 @@ pub mod accessibility;
 pub mod blocks;
 pub mod completion;
 pub mod doc;
+pub mod figures;
 pub mod format;
 pub mod glyphs;
 pub mod markers;
@@ -34,6 +35,11 @@ pub mod wordnav;
 
 pub use accessibility::{AccessNode, AccessRole, build_access_nodes, describe_segment};
 pub use doc::{ByteDelta, DocError, MathDoc, ReplaceOp};
+pub use figures::{
+    FIGURE_ALT_PREFIX, FIGURE_URL_PREFIX, FigureRect, FigureSpec, ResolvedFigure, app_figure_spec,
+    figure_alt, figure_alt_key, figure_key, figure_markup, figure_placeholder_png, figure_url,
+    figures_in_frame, is_figure_path, resolve_figure,
+};
 pub use glyphs::{CaretGeom, GlyphEntry, GlyphIndex, LineBand, RectF, V2, build_glyph_index};
 pub use markers::{
     Arg, Marker, MarkerScan, PropKind, PropertyStmt, ReferenceEntry, ReferenceKind,

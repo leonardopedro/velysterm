@@ -50,6 +50,8 @@ pub enum AccessRole {
     Bibliography,
     /// A `\cite` in-text citation marker (P11.21, `mathed_biblio`).
     Citation,
+    /// An `\app` figure slot; its caption is the segment's content.
+    Figure,
 }
 
 impl AccessRole {
@@ -76,6 +78,7 @@ impl AccessRole {
             AccessRole::Translator => "translator",
             AccessRole::Bibliography => "bibliography",
             AccessRole::Citation => "citation",
+            AccessRole::Figure => "figure",
         }
     }
 }
@@ -169,6 +172,13 @@ pub fn describe_segment(seg: &Segment, content: &str) -> (AccessRole, String) {
         PropKind::Base => (AccessRole::Math, format!("base: {content}")),
         PropKind::Exec => (AccessRole::Math, format!("exec: {content}")),
         PropKind::Kernel => (AccessRole::Math, format!("kernel: {content}")),
+        PropKind::App => {
+            let spec = crate::figures::app_figure_spec(&seg.extra_args);
+            let size = spec
+                .map(|s| format!("{} by {}", s.w, s.h))
+                .unwrap_or_else(|| "unsized".to_string());
+            (AccessRole::Figure, format!("figure, {size}: {content}"))
+        }
         PropKind::Other => (AccessRole::Math, content.to_string()),
     }
 }

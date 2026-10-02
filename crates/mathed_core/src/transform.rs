@@ -389,6 +389,36 @@ pub fn to_render_text_range(
         }
     }
 
+    // App figures: every `\app` segment splices a block-level image
+    // placeholder at the **start of its caption span** — the figure
+    // slot a frontend paints the app surface over. Unlike the splices
+    // below, this one is *not* suppressed while the statement is
+    // revealed: the placeholder is the anchor the figure is bound to,
+    // so it has to stay put while the user edits the raw
+    // `\app(#1, #2, 640, 400)` token around it. Dangling statements
+    // (`span == None`) and figures whose dimensions don't parse are
+    // skipped, as are spans that straddle `range` — the latter keeps
+    // the per-block renders (`layout_block`) self-consistent.
+    //
+    // Spliced *before* everything else at a shared insertion point so
+    // the figure sits ahead of the caption it belongs to.
+    let app_figure_points: Vec<(usize, String)> = segments
+        .iter()
+        .filter(|seg| seg.kind.is_app())
+        .filter_map(|seg| {
+            let figure = crate::figures::resolve_figure(seg)?;
+            if figure.span.start < range.start || figure.span.end > range.end {
+                return None;
+            }
+            debug_assert!(is_grapheme_boundary(doc_text, figure.span.start));
+            bounds.push(figure.span.start);
+            Some((
+                figure.span.start,
+                crate::figures::figure_markup(&figure.spec, &figure.key),
+            ))
+        })
+        .collect();
+
     // Template splices (T-series): markup produced by `\template`
     // expansion, spliced in just after a segment's body — same
     // rule as the inline annotations below (keyed by body start,
@@ -591,6 +621,15 @@ pub fn to_render_text_range(
         // landing the caret on the title could never actually trigger
         // the expand (observed: Down arrow skipping straight over a
         // collapsed translator instead of entering it).
+        // App figure placeholders first: the figure block precedes
+        // its own caption (which is the ordinary content emitted in
+        // this same window). Pinned the same way as the splices below.
+        for (pos, markup) in &app_figure_points {
+            if *pos == start {
+                pin_splice_point(start, &mut out, &mut map);
+                out.push_str(markup);
+            }
+        }
         // Template output first, then kernel annotations, at a
         // shared insertion point (content before results).
         for (pos, markup) in &template_points {
@@ -758,6 +797,15 @@ pub fn to_render_text_range(
             for _ in 0..v.closer_count() {
                 out.push(']');
             }
+        }
+    }
+    // An app figure whose caption span starts at the very end of the
+    // range has no window starting there; splice it now (before the
+    // template splices, matching the in-window order).
+    for (pos, markup) in &app_figure_points {
+        if *pos == range.end {
+            pin_splice_point(range.end, &mut out, &mut map);
+            out.push_str(markup);
         }
     }
     // A template splice whose insertion point is the very end of
@@ -2594,5 +2642,130 @@ mod tests {
             "combining base intact: {}",
             out.text
         );
+    }
+
+    // ── app figures ───────────────────────────────────────────────────
+
+    #[test]
+    fn app_figure_splices_placeholder_and_hides_the_statement() {
+        let text = "#1 Terminal demo #2 \\app(#1, #2, 640, 400)";
+        let out = render(text, &TransformOptions::default());
+        assert!(
+            out.text
+                .contains("#block(breakable: false, inset: 0pt)[#image(\"app:fig/f0\""),
+            "figure placeholder spliced: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("width: 640pt") && out.text.contains("height: 400pt"),
+            "figure carries its size: {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("\\app("),
+            "statement hidden: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("alt: \"app:fig:f0\""),
+            "alt text carries the key into the frame: {}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn app_figure_keeps_the_caption_as_ordinary_prose() {
+        let text = "#1 Terminal demo #2 \\app(#1, #2, 640, 400)";
+        let out = render(text, &TransformOptions::default());
+        assert!(out.text.contains("Terminal demo"), "{}", out.text);
+        // The figure block comes first; the caption follows it as the
+        // next paragraph.
+        let fig = out.text.find("#block(").expect("figure");
+        let cap = out.text.find("Terminal demo").expect("caption");
+        assert!(fig < cap, "figure precedes caption: {}", out.text);
+        // Caption glyphs still map back into the caption span.
+        let at = out.text.find("Terminal demo").expect("caption");
+        let doc_at = out.map.render_to_doc(at);
+        assert!((2..=16).contains(&doc_at), "caption maps into its span");
+    }
+
+    #[test]
+    fn app_figure_placeholder_survives_statement_reveal() {
+        let text = "#1 Terminal demo #2 \\app(#1, #2, 640, 400)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let stmt_range = s.stmts[0].range.clone();
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                reveal: vec![stmt_range],
+                ..Default::default()
+            },
+        );
+        assert!(
+            out.text.contains("app:fig/f0"),
+            "placeholder is the figure's anchor and must stay: {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("\\app("),
+            "revealed statement shows its raw token: {}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn app_figure_skipped_without_usable_dimensions() {
+        let text = "#1 Terminal demo #2 \\app(#1, #2, wide, 400)";
+        let out = render(text, &TransformOptions::default());
+        assert!(!out.text.contains("app:fig/"), "{}", out.text);
+    }
+
+    #[test]
+    fn app_figure_skipped_when_dangling() {
+        let text = "Terminal demo #2 \\app(#1, #2, 640, 400)";
+        let out = render(text, &TransformOptions::default());
+        assert!(!out.text.contains("app:fig/"), "{}", out.text);
+    }
+
+    #[test]
+    fn app_figures_get_distinct_keys_in_document_order() {
+        let text = "#1 one #2 \\app(#1, #2, 100, 50)\n#3 two #4 \\app(#3, #4, 200, 60, \"x\")";
+        let out = render(text, &TransformOptions::default());
+        let f0 = out.text.find("app:fig/f0").expect("first figure");
+        let f1 = out.text.find("app:fig/f1").expect("second figure");
+        assert!(f0 < f1, "figures keep document order: {}", out.text);
+    }
+
+    #[test]
+    fn app_figure_precedes_a_template_splice_at_the_same_point() {
+        // A `\template` whose body starts where a figure caption does:
+        // the figure is the block, the template output its content.
+        let text = "#1 caption #2 \\app(#1, #2, 640, 400)\n#3 cap #4 \\template(#3,#4)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let template = segs
+            .iter()
+            .find(|seg| seg.kind.is_template())
+            .expect("template");
+        let mut templates = HashMap::new();
+        templates.insert(
+            template.span.clone().expect("span").start,
+            "#small[t]".to_string(),
+        );
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                template_splices: templates,
+                ..Default::default()
+            },
+        );
+        let fig = out.text.find("app:fig/f0").expect("figure");
+        let tpl = out.text.find("#small[t]").expect("template");
+        assert!(fig < tpl, "figure splices first: {}", out.text);
     }
 }
