@@ -243,7 +243,7 @@ pub fn verified_markup(spec: &FormalSpec, verified: bool) -> String {
 
     let mut body = String::new();
     body.push_str(&format!(
-        "#text(size: 8pt, fill: rgb(107,112,118))[{} ",
+        "#text(size: 8pt, fill: rgb(107,112,118))[{} ]",
         escape(mark)
     ));
     body.push_str(&format!(
