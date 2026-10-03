@@ -97,6 +97,22 @@ impl FigureSpec {
     }
 }
 
+/// Whether a literal is a `name: value` argument rather than a bare value.
+///
+/// A named arg is a lowercase-or-caps identifier, a colon, then a value. Requiring
+/// the value to be present and non-empty is what keeps legitimate ids that
+/// contain a colon — `Smith, J.`, `x:y`, `ns:eq` — on the positional side,
+/// while `launch: "foot -T"` and `grants: "uk_logos_compile"` are named.
+fn is_named_arg(text: &str) -> bool {
+    let Some((name, value)) = text.split_once(':') else {
+        return false;
+    };
+    let name = name.trim();
+    !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !value.trim().is_empty()
+}
+
 /// Parse a figure spec out of a `\app` statement's `extra_args`
 /// (everything after the two marker refs).
 ///
@@ -140,9 +156,19 @@ pub fn app_figure_spec(extra_args: &[Arg]) -> Option<FigureSpec> {
     if w <= 0 || h <= 0 {
         return None;
     }
+    // The id slot is *positional*. A named argument in that position
+    // (`launch:`, `style:`, `grants:`, anything added later) must pass through
+    // untouched rather than becoming the binding id — otherwise a figure that
+    // asked for no binding key acquires one that no app id will match.
     let id = extra_args
         .get(2)
         .and_then(literal)
+        // A named arg is `name:` optionally followed by a value. `Smith, J.`
+        // and `x:y` are legitimate ids, so only a leading `name:` prefix marks
+        // a named argument — and only when what follows the colon looks like a
+        // value rather than more of an id. `foot` and `foot:bar` are ids;
+        // `launch: "foot -T"` is not.
+        .filter(|text| !is_named_arg(text))
         .map(unquote)
         .map(str::to_owned)
         .filter(|id| !id.is_empty());
@@ -352,6 +378,43 @@ mod tests {
         assert_eq!(spec.id.as_deref(), Some("foot"));
     }
 
+    /// A named argument must not be mistaken for the positional id.
+    ///
+    /// The `launch:` scan filters by name; the id slot did not, so
+    /// `\app(#a, #b, 640, 400, launch: "foot -T")` produced
+    /// `id: Some("launch: \"foot -T\"")` — a figure that should have had no
+    /// binding key acquired one. Two consequences, both silent: the figure stops
+    /// being distinguishable from an unmirrored one, and the compositor is handed
+    /// a binding key no app id will ever match.
+    #[test]
+    fn a_named_arg_is_not_taken_as_the_id() {
+        let spec =
+            spec_of(r#"#a cap #b \app(#a, #b, 640, 400, launch: "foot -T")"#).expect("a figure");
+        assert_eq!(spec.launch.as_deref(), Some("foot -T"));
+        assert_eq!(
+            spec.id, None,
+            "the id slot is positional; a named arg must pass through untouched"
+        );
+    }
+
+    /// And the same for any other name, present or future — the fix must not be
+    /// a special case for the one argument that happens to exist today.
+    #[test]
+    fn only_an_unnamed_third_arg_is_the_id() {
+        for named in [
+            r#"style: "x""#,
+            r#"grants: "uk_logos_compile""#,
+            r#"fit: "stretch""#,
+        ] {
+            let doc = format!(r#"#a cap #b \app(#a, #b, 640, 400, {named})"#);
+            let spec = spec_of(&doc).expect("a figure");
+            assert_eq!(spec.id, None, "{named} was taken as an id");
+        }
+        // And the positional id still works.
+        let doc = r#"#a cap #b \app(#a, #b, 640, 400, "foot")"#;
+        assert_eq!(spec_of(doc).expect("a figure").id.as_deref(), Some("foot"));
+    }
+
     /// An empty command is no command. Treating it as `Some("")` would spawn
     /// a process with an empty argv on every click.
     #[test]
@@ -372,5 +435,22 @@ mod tests {
         let segments = resolve_segments(&scan);
         let seg = segments.iter().find(|s| s.kind.is_app()).expect("segment");
         assert_eq!(app_figure_spec(&seg.extra_args).expect("spec").launch, None);
+    }
+    /// Ids that legitimately contain a colon or a comma stay positional.
+    ///
+    /// `is_named_arg` is what keeps the fix from eating real ids: a binding id is
+    /// matched as a glob against a client's app id, and those routinely contain
+    /// `:` and `,`.
+    #[test]
+    fn an_id_containing_a_colon_is_still_an_id() {
+        for id in [r#""ns:eq""#, r#""x:y""#, r#""Smith, J.""#, r#""foot""#] {
+            let doc = format!("#a cap #b \\app(#a, #b, 640, 400, {id})");
+            let spec = spec_of(&doc).expect("a figure");
+            assert_eq!(
+                spec.id.as_deref(),
+                Some(id.trim_matches('"')),
+                "{id} should be the binding id"
+            );
+        }
     }
 }

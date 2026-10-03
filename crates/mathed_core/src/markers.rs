@@ -746,8 +746,29 @@ fn try_parse_stmt(text: &str, at: usize) -> Option<PropertyStmt> {
     let mut k = args_start;
     let mut arg_bounds = Vec::new();
     let mut arg_from = args_start;
+    // Quote state. Without it, a paren or comma inside a string literal was
+    // treated as syntax: `\cite(#1,#2, "Smith, J.")` split into the keys `"Smith`
+    // and `J."`, and `\cite(#1,#2, "a)b")` ended the statement at the in-string
+    // `)` with the remainder leaking into the prose as document text. Both are
+    // silent mis-parses — the statement still parses, just wrongly.
+    let mut quote: Option<u8> = None;
     while k < bytes.len() {
-        match bytes[k] {
+        let b = bytes[k];
+        if let Some(q) = quote {
+            // Inside a literal: only the closing quote is syntax, and a
+            // backslash escapes the next byte so `"a\"b"` stays open.
+            if b == b'\\' && k + 1 < bytes.len() {
+                k += 1 + utf8_len(bytes[k + 1]);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            k += utf8_len(b);
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => quote = Some(b),
             b'(' => depth += 1,
             b')' => {
                 depth -= 1;
@@ -762,7 +783,7 @@ fn try_parse_stmt(text: &str, at: usize) -> Option<PropertyStmt> {
             }
             _ => {}
         }
-        k += utf8_len(bytes[k]);
+        k += utf8_len(b);
     }
     if depth != 0 {
         return None; // Unbalanced: not a statement.
@@ -1302,6 +1323,88 @@ mod tests {
             // The only tokens are the ones we placed.
             prop_assert_eq!(s.markers.len(), 2);
             prop_assert_eq!(s.stmts.len(), 1);
+        }
+    }
+
+    #[cfg(test)]
+    mod quote_aware_stmt_tests {
+        use super::*;
+
+        fn stmt_of(doc: &str) -> PropertyStmt {
+            let scan = scan(doc);
+            let st = scan
+                .stmts
+                .iter()
+                .find(|s| s.name == "cite")
+                .unwrap_or_else(|| panic!("no cite statement in {doc:?}"));
+            st.clone()
+        }
+
+        /// A comma inside a string literal is data, not an argument separator.
+        ///
+        /// `\cite(#1, #2, "Smith, J.")` used to split into the keys `"Smith` and
+        /// `J."`, which resolve to nothing — a silent mis-parse of a perfectly
+        /// ordinary bibliographic key.
+        #[test]
+        fn a_comma_inside_a_literal_does_not_split_arguments() {
+            let st = stmt_of(r#"#a t #b u \cite(#a, #b, "Smith, J.")"#);
+            assert_eq!(st.args.len(), 3, "three arguments, not four");
+            match &st.args[2] {
+                Arg::Literal { text, .. } => {
+                    assert_eq!(text.trim(), r#""Smith, J.""#)
+                }
+                other => panic!("expected a literal, got {other:?}"),
+            }
+        }
+
+        /// A paren inside a literal does not close the statement, and the tail does
+        /// not leak into the prose as document text.
+        #[test]
+        fn a_paren_inside_a_literal_does_not_end_the_statement() {
+            let doc = r#"#a t #b u \cite(#a, #b, "a)b") trailing prose"#;
+            let st = stmt_of(doc);
+            assert_eq!(st.args.len(), 3);
+            match &st.args[2] {
+                Arg::Literal { text, .. } => assert_eq!(text.trim(), r#""a)b""#),
+                other => panic!("expected a literal, got {other:?}"),
+            }
+            assert!(
+                doc[st.range.end..].contains("trailing prose"),
+                "the tail must stay document text, not be swallowed"
+            );
+        }
+
+        /// An escaped quote does not end the literal, so `"a\"b"` stays one argument.
+        #[test]
+        fn an_escaped_quote_does_not_close_the_literal() {
+            let st = stmt_of(r#"#a t #b u \cite(#a, #b, "a\"b, c")"#);
+            assert_eq!(st.args.len(), 3);
+        }
+
+        /// A single-quoted literal behaves the same way — `\app` accepts both.
+        #[test]
+        fn single_quotes_are_quote_state_too() {
+            let st = scan(r"#a t #b u \app(#a, #b, 640, 400, 'x)y')").stmts[0].clone();
+            assert_eq!(st.args.len(), 5);
+        }
+
+        /// Nesting still works inside a literal: the paren depth is tracked as well
+        /// as the quote state.
+        #[test]
+        fn parens_inside_a_literal_still_nest() {
+            let st = scan(r#"#a t #b u \cite(#a, #b, "f(x)")"#).stmts[0].clone();
+            assert_eq!(st.args.len(), 3);
+        }
+
+        /// And genuinely unbalanced parens outside a literal are still rejected, so
+        /// the quote handling did not weaken the statement boundary.
+        #[test]
+        fn an_unbalanced_paren_outside_a_literal_is_still_not_a_statement() {
+            let scan = scan(r"#a t \app(#a, 640, 400");
+            assert!(
+                scan.stmts.is_empty(),
+                "an unterminated statement must not parse"
+            );
         }
     }
 }
