@@ -9,8 +9,12 @@
 //!
 //! Identity & association:
 //! - Each statement is keyed by its body's **doc byte offset**
-//!   (`span.start`) — unique per statement, independent of block
-//!   splitting.
+//!   (`span.start`) — independent of block splitting. NOT unique per
+//!   statement: two statements sharing a start marker share the offset, so a
+//!   consumer must not assume one result per statement. `transform` takes the
+//!   first segment in document order for a given key and splices the value once,
+//!   which is why a `\\bold` and a `\\prob` over the same span do not both
+//!   render it.
 //! - A `\model` becomes a kernel session keyed by its offset.
 //! - Each `\prob` / `\event` is evaluated against its **nearest
 //!   preceding `\model`** (by document order); the result is keyed by

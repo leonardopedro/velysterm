@@ -466,6 +466,11 @@ pub fn to_render_text_range(
     let template_points: Vec<(usize, &str)> = if opts.template_splices.is_empty() {
         Vec::new()
     } else {
+        // Same key-collision shape as `annotation_points` above: a shared start
+        // marker makes `span.start` common to several segments, and the splice
+        // offset is `span.end`, so one template output would land at several
+        // unrelated places. First segment in document order claims the key.
+        let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
         segments
             .iter()
             .filter_map(|seg| {
@@ -477,6 +482,9 @@ pub fn to_render_text_range(
                     return None;
                 }
                 let markup = opts.template_splices.get(&span.start)?;
+                if !claimed.insert(span.start) {
+                    return None;
+                }
                 debug_assert!(is_grapheme_boundary(doc_text, span.end));
                 bounds.push(span.end);
                 Some((span.end, markup.as_str()))
@@ -516,6 +524,16 @@ pub fn to_render_text_range(
     let annotation_points: Vec<(usize, &str)> = if opts.annotations.is_empty() {
         Vec::new()
     } else {
+        // `annotations` is keyed by a segment's body *start*, and that is not
+        // unique per statement: `old(#1, #2) \prob(#1, #2)` gives both segments
+        // the same `span.start`, because the span starts at the end of the start
+        // *marker* rather than at anything the statement itself owns. Iterating
+        // every segment therefore spliced one annotation at *both* ends —
+        // `"#strong[vacuum ] = 0.4231 = 0.4231"`, the value twice — and with
+        // mismatched ends, once inside an unrelated bold run.
+        //
+        // First segment in document order claims the key; the rest find it taken.
+        let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
         segments
             .iter()
             .filter_map(|seg| {
@@ -527,6 +545,9 @@ pub fn to_render_text_range(
                     return None;
                 }
                 let markup = opts.annotations.get(&span.start)?;
+                if !claimed.insert(span.start) {
+                    return None;
+                }
                 debug_assert!(is_grapheme_boundary(doc_text, span.end));
                 bounds.push(span.end);
                 Some((span.end, markup.as_str()))
@@ -2211,6 +2232,119 @@ mod tests {
         let vac = out.text.find("vacuum").expect("body rendered");
         let ann = out.text.find("= 0.4231").expect("annotation spliced");
         assert!(ann > vac, "annotation after body in {:?}", out.text);
+    }
+
+    /// One annotation keyed by body start must be spliced **once**, even when
+    /// several statements share that start marker.
+    ///
+    /// `span.start` is the end of the start *marker*, not of anything the
+    /// statement owns, so `\bold(#1,#2) \prob(#1,#2)` gives both segments the
+    /// same key while the splice offset is each one's own `span.end`. Iterating
+    /// every segment therefore rendered the value at both ends:
+    /// `"#strong[vacuum ] = 0.4231 = 0.4231"`.
+    #[test]
+    fn one_annotation_is_spliced_once_when_segments_share_a_start_marker() {
+        let text = "#1 vacuum #2 \\bold(#1,#2) \\prob(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let shared = segs
+            .iter()
+            .filter_map(|seg| seg.span.as_ref().map(|sp| sp.start))
+            .next()
+            .expect("a span");
+        assert_eq!(
+            segs.iter()
+                .filter(|seg| seg.span.as_ref().map(|sp| sp.start) == Some(shared))
+                .count(),
+            2,
+            "the fixture must actually produce two segments on one key"
+        );
+
+        let mut annotations = HashMap::new();
+        annotations.insert(shared, " = 0.4231".to_string());
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            out.text.matches("= 0.4231").count(),
+            1,
+            "the annotation must appear exactly once, got {:?}",
+            out.text
+        );
+    }
+
+    /// With *different* ends it was worse than a duplicate: one annotation was
+    /// injected at two unrelated positions, one of them inside a bold run.
+    #[test]
+    fn an_annotation_is_not_injected_into_an_unrelated_segment() {
+        let text = "#1 a #2 b #3 \\bold(#1,#3) \\prob(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        // Key on the *second* segment's start, whose end differs from the first.
+        let prob = segs
+            .iter()
+            .find(|seg| seg.kind == PropKind::Prob)
+            .and_then(|seg| seg.span.as_ref())
+            .expect("prob span");
+        let mut annotations = HashMap::new();
+        annotations.insert(prob.start, " = 0.4231".to_string());
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                annotations,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            out.text.matches("= 0.4231").count(),
+            1,
+            "exactly one insertion point, got {:?}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("a ] = 0.4231"),
+            "the value must not land inside the bold run: {:?}",
+            out.text
+        );
+    }
+
+    /// `template_splices` has the same shape and the same fix, so it gets the
+    /// same coverage.
+    #[test]
+    fn one_template_splice_is_spliced_once_when_segments_share_a_start_marker() {
+        let text = "#1 vacuum #2 \\bold(#1,#2) \\template(#1,#2)";
+        let s = scan(text);
+        let segs = resolve_segments(&s);
+        let shared = segs
+            .iter()
+            .filter_map(|seg| seg.span.as_ref().map(|sp| sp.start))
+            .next()
+            .expect("a span");
+        let mut template_splices = HashMap::new();
+        template_splices.insert(shared, "#text[OUT]".to_string());
+        let out = to_render_text(
+            text,
+            &s,
+            &segs,
+            &TransformOptions {
+                template_splices,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            out.text.matches("OUT").count(),
+            1,
+            "the template output must appear exactly once, got {:?}",
+            out.text
+        );
     }
 
     #[test]
