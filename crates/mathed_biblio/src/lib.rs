@@ -23,7 +23,7 @@ use mathed_core::markers::PropKind;
 use mathed_core::semantics::BiblioStatement;
 use std::collections::HashMap;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum BiblioError {
     #[error("bibliography parse error: {0}")]
     Parse(String),
@@ -195,7 +195,14 @@ pub fn resolve_citations(
 
         let result = match bibliographies.get(&bib_key) {
             Some(Ok(bib)) => bib.cite(&stmt.keys),
-            Some(Err(e)) => Err(BiblioError::Parse(e.to_string())),
+            // Propagate the error *as itself*. Flattening every variant into
+            // `Parse` reported a misspelled `style:` as "bibliography parse
+            // error: unknown citation style: …" — so a user could not tell a
+            // malformed YAML entry from a typo, and `DependentStyle's specific
+            // guidance (use an independent style) was lost. Every other arm of
+            // this match is variant-faithful, so this was an inconsistency
+            // rather than a choice.
+            Some(Err(e)) => Err((*e).clone()),
             None => Err(BiblioError::UnknownBibliography(bib_key)),
         };
         out.insert(stmt.span.start, result);
@@ -416,5 +423,89 @@ crazy-rich:
             results.get(&500).unwrap(),
             Err(BiblioError::UnknownKey(_))
         ));
+    }
+    /// A bad `style:` must not be reported as a parse error.
+    ///
+    /// Every failure mode was flattened into `BiblioError::Parse`, so
+    /// `style: "definitely-not-a-style"` surfaced as "bibliography parse error:
+    /// unknown citation style: …" — indistinguishable from malformed YAML — and
+    /// `DependentStyle`'s specific guidance was lost. Each variant now reaches
+    /// the caller intact.
+    #[test]
+    fn a_bad_style_keeps_its_own_error_variant() {
+        let statements = vec![
+            stmt(
+                PropKind::Bibliography,
+                Some("refs"),
+                &[],
+                Some("bibtex"),
+                Some("definitely-not-a-style"),
+                None,
+                CRAZY_RICH_YAML,
+                0,
+            ),
+            stmt(
+                PropKind::Cite,
+                None,
+                &["crazy-rich"],
+                None,
+                None,
+                Some("refs"),
+                "",
+                500,
+            ),
+        ];
+        let results = resolve_citations(&statements);
+        let err = results
+            .get(&500)
+            .expect("a result")
+            .as_ref()
+            .expect_err("a bad style must not resolve");
+        assert!(
+            matches!(err, BiblioError::UnknownStyle(_)),
+            "expected UnknownStyle, got {err:?}"
+        );
+        assert!(
+            !err.to_string().starts_with("bibliography parse error"),
+            "a style typo must not be reported as a parse error: {err}"
+        );
+    }
+
+    /// A malformed bibliography is still a parse error — the fix must not have
+    /// blurred the two.
+    #[test]
+    fn malformed_bibtex_is_still_a_parse_error() {
+        let statements = vec![
+            stmt(
+                PropKind::Bibliography,
+                Some("refs"),
+                &[],
+                Some("bibtex"),
+                None,
+                None,
+                "@article{unclosed",
+                0,
+            ),
+            stmt(
+                PropKind::Cite,
+                None,
+                &["k"],
+                None,
+                None,
+                Some("refs"),
+                "",
+                500,
+            ),
+        ];
+        let results = resolve_citations(&statements);
+        let err = results
+            .get(&500)
+            .expect("a result")
+            .as_ref()
+            .expect_err("malformed bibtex must not resolve");
+        assert!(
+            matches!(err, BiblioError::Parse(_)),
+            "expected Parse, got {err:?}"
+        );
     }
 }
