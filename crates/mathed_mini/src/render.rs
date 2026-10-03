@@ -254,6 +254,21 @@ pub fn layout_doc_paged(
         .collect()
 }
 
+/// Rasterize a one-line snippet and hand back raw RGBA8.
+///
+/// For callers that need pixels and should not have to take on the `imaging`
+/// dependency just to read the buffer — emthin's dormant-figure label, which
+/// uploads the result straight to a texture. Returns `None` if the snippet does
+/// not compile, which is the caller's cue to draw nothing rather than to guess.
+pub fn rasterize_snippet_raw(doc_text: &str, width_pt: f64) -> Option<(u32, u32, Vec<u8>)> {
+    let layout = layout_doc(doc_text, width_pt).ok()?;
+    Some((
+        layout.image.width,
+        layout.image.height,
+        layout.image.data.clone(),
+    ))
+}
+
 /// Lay out a mathed document into a cached [`DocLayout`]: the
 /// rasterized page plus the glyph index for caret positioning. This
 /// is the entry point a frontend rebuilds on edit/resize and then
