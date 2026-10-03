@@ -170,6 +170,15 @@ fn payload_delimiters_survive_the_transform() {
         ("underscore", "a _ b"),
         ("dollar", "a $ b"),
         ("bracket", "a [ b ] c"),
+        // Unbalanced, which is the case that actually broke the document. The
+        // balanced form above always escaped to a well-formed `\\[ ... \]`
+        // by accident; an unmatched one terminates the spliced block early or
+        // swallows its closing delimiter, and Typst then reports a document-wide
+        // syntax error so layout fails wholesale.
+        ("bracket_open_only", "a [ b"),
+        ("bracket_close_only", "a ] b"),
+        ("bracket_at_end", "trailing ]"),
+        ("bracket_only", "]"),
         ("paren", "a ( b ) c"),
         ("backslash", "a \\\\ b"),
         ("quote", "a \" b"),

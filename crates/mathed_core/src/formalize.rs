@@ -205,6 +205,16 @@ fn escape(text: &str) -> String {
             '*' => out.push_str("\\*"),
             '_' => out.push_str("\\_"),
             '`' => out.push_str("\\`"),
+            // Content delimiters. The payload is interpolated *inside*
+            // `#text(...)[...]`, so an unbalanced bracket does not merely look
+            // wrong: it terminates the block early or swallows the closing
+            // delimiter, and Typst reports a document-wide syntax error. Layout
+            // then fails wholesale and the editor renders a blank page. A CNL
+            // sentence, a declared readback, or a kernel rejection reason is all
+            // model- or tool-generated text that can contain either bracket.
+            // `transform.rs` escapes them for translator errors; this must match.
+            '[' => out.push_str("\\["),
+            ']' => out.push_str("\\]"),
             c if c.is_control() => out.push(' '),
             c => out.push(c),
         }
