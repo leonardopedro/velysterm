@@ -235,7 +235,13 @@ impl PresenceStore {
     /// semantics on the same millisecond clock the heartbeat
     /// publishes.
     fn expired(&self, last_seen_ms: i64) -> bool {
-        now_ms() - last_seen_ms > self.timeout_ms
+        // `saturating_sub`: `last_seen_ms` comes from a peer over the wire and
+        // only the *cursor* is validated on decode. A peer sending
+        // `i64::MIN` made `now_ms() - last_seen_ms` overflow — a debug panic, and
+        // in release a wrap to a large negative, which reads as "not expired"
+        // and so pins a hostile peer as permanently live. Saturating gives
+        // i64::MAX, which is unambiguously long expired.
+        now_ms().saturating_sub(last_seen_ms) > self.timeout_ms
     }
 
     /// Subscribe to this peer's own presence updates.
@@ -450,5 +456,33 @@ mod tests {
         carol.apply(&alice.encode()).unwrap();
         assert_eq!(carol.peers().len(), 1);
         assert_eq!(carol.peers()[0].peer, "peer-a");
+    }
+
+    /// A peer-supplied timestamp must not be able to overflow the expiry
+    /// subtraction.
+    ///
+    /// `decode_presence` validates the *cursor* but copies `seen` verbatim from
+    /// the wire. `i64::MIN` therefore reached `now_ms() - last_seen_ms`: a debug
+    /// panic, and in release a wrap to a large negative, which compares as "not
+    /// expired" — so a hostile peer could pin itself as permanently live. The
+    /// saturating form reports it as long expired instead.
+    #[test]
+    fn an_extreme_peer_timestamp_cannot_overflow_the_expiry_check() {
+        let store = PresenceStore::new("peer-a", "Alice", 60_000);
+        // A far-past timestamp saturates to i64::MAX, which is unambiguously
+        // expired. Before the fix these overflowed: a debug panic, and in release
+        // a wrap to a large negative that compared as "not expired".
+        for hostile in [i64::MIN, i64::MIN + 1, -1, 0] {
+            assert!(
+                store.expired(hostile),
+                "{hostile} is in the past and must read as expired"
+            );
+        }
+        // A far-*future* timestamp saturates the other way and must not read as
+        // expired, or a peer could pin itself live just as easily.
+        assert!(
+            !store.expired(i64::MAX),
+            "a future timestamp must not read as expired"
+        );
     }
 }

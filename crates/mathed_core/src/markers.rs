@@ -446,7 +446,12 @@ pub fn next_marker_id(scan: &MarkerScan) -> u64 {
         .iter()
         .filter_map(|m| m.id.parse::<u64>().ok())
         .max()
-        .map_or(1, |m| m + 1)
+        // `saturating_add`, not `+ 1`: a document containing `#18446744073709551615`
+        // overflowed here. Debug builds abort; release builds wrap to 0, which
+        // would then mint an id that already exists — a silent collision, which
+        // is worse than the panic. Saturating gives `u64::MAX`, which collides
+        // with nothing unless the document already holds it.
+        .map_or(1, |m| m.saturating_add(1))
 }
 
 /// The `count` smallest numbers ≥ 1 whose RFC 1751 word (see
@@ -1406,5 +1411,27 @@ mod tests {
                 "an unterminated statement must not parse"
             );
         }
+    }
+
+    /// `next_marker_id` must not overflow on a maximal marker.
+    ///
+    /// A document containing `#18446744073709551615` aborted in debug builds
+    /// and, in release, wrapped to 0 — minting an id of 0 for a document whose
+    /// next free id is far above it. Saturation gives `u64::MAX`, which collides
+    /// with nothing unless the document already holds that exact id.
+    #[test]
+    fn next_marker_id_saturates_instead_of_overflowing() {
+        let maximal = scan("#18446744073709551615 x");
+        assert_eq!(next_marker_id(&maximal), u64::MAX);
+
+        let ordinary = scan("#1 x #2 y");
+        assert_eq!(next_marker_id(&ordinary), 3, "the usual case is unchanged");
+
+        let empty = scan("no markers here");
+        assert_eq!(
+            next_marker_id(&empty),
+            1,
+            "and an empty document starts at 1"
+        );
     }
 }
