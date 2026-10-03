@@ -312,19 +312,23 @@ impl GlyphIndex {
         }
         let idx = self.entries.partition_point(|e| e.doc_byte < doc_byte);
         let exact = idx < self.entries.len() && self.entries[idx].doc_byte == doc_byte;
-        let (entry, band_idx) = if exact {
-            // Exact match: caret at left edge.
-            (&self.entries[idx], self.entries[idx].band)
+        // Which edge of `entry` the caret sits on. A caret with no glyph before
+        // it is at that glyph's *left* edge, not its right: `doc_byte` is before
+        // every entry, so `entry.x + advance` pointed past the text. Documents
+        // routinely open with a hidden marker — typing `#` inserts one — so those
+        // offsets are the normal state, and the old branch put the caret after
+        // the first visible character. Moving right then jumped it left.
+        let (entry, band_idx, at_left_edge) = if exact {
+            (&self.entries[idx], self.entries[idx].band, true)
         } else if idx > 0 {
-            // After previous entry's right edge.
+            // Between two glyphs: the right edge of the previous one.
             let e = &self.entries[idx - 1];
-            (e, e.band)
+            (e, e.band, false)
         } else {
-            let e = &self.entries[0];
-            (e, e.band)
+            (&self.entries[0], self.entries[0].band, true)
         };
         let band = &self.bands[band_idx as usize];
-        let x = if exact {
+        let x = if at_left_edge {
             entry.x
         } else {
             entry.x + entry.advance
