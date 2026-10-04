@@ -26,6 +26,23 @@ typst_imaging = { git = "https://github.com/voxell-tech/velyst", tag = "v0.0.1" 
 # `bevy_gilrs` → libudev-sys (a system udev dev dependency not present in this
 # project's build environments). The specific pieces cover everything mathed /
 # the vendored velyst use: windowing, 2D render + camera, UI, remote, state.
+#
+# That avoidance is only partly effective, and it is worth being precise about
+# why. `bevy_vello` depends on `bevy` *with its default features*, so Cargo's
+# feature unification switches `bevy_gilrs` back on for any crate that reaches
+# bevy through it — the `default-features = false` above cannot win against a
+# dependency that asks for the defaults. The resulting chain is:
+#
+#     mathed → bevy_vello → bevy (defaults) → bevy_gilrs → gilrs → libudev-sys
+#
+# so building `mathed` still needs libudev and pkg-config, even though nothing
+# here asks for a gamepad:
+#
+#     nix-shell -p systemd pkgconf --run "cargo test -p mathed"
+#
+# `mathed_core`, `mathed_mini` and `delta_algebra` are Bevy-free and build with
+# no system dependencies, which is why `emthin` (a path dependent on the first
+# two) is unaffected.
 bevy = { version = "0.19", default-features = false, features = [
   "std",
   "default_app",
