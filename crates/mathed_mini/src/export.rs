@@ -668,17 +668,36 @@ pub fn mathed_rules_engine_with_bin(
     });
     let deadline = Instant::now() + Duration::from_secs(5);
     let status = loop {
-        if let Some(s) = child.try_wait().ok()? {
-            break s;
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {}
+            // The child's state is unknown, so there is nothing to wait for.
+            // Break rather than bail with `?`, which used to skip the joins
+            // below and leak both threads.
+            Err(_) => {
+                let _ = child.kill();
+                break None;
+            }
         }
         if Instant::now() > deadline {
             let _ = child.kill();
-            return None;
+            let _ = child.wait();
+            break None;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    // Join on *every* path, including the timeout. The reader is blocked in
+    // `read_to_end` on the child's stdout; returning without joining detaches it,
+    // and a test suite that hits the deadline repeatedly accumulates two leaked
+    // threads per timeout -- which is a plausible way for one slow call to make
+    // later unrelated spawns fail.
     let _ = writer.join();
-    let out_buf = reader.join().ok()?;
+    let out_buf = reader.join().unwrap_or_default();
+    // Safe as `?` precisely *because* the joins above already ran.
+    let status = status?;
+    if !status.success() {
+        return None;
+    }
     if !status.success() {
         return None;
     }
