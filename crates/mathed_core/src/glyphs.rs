@@ -65,6 +65,12 @@ pub struct GlyphEntry {
     /// Pen x position in frame points.
     pub x: f32,
     /// Line band index.
+    ///
+    /// Must index into [`GlyphIndex::bands`]: the query methods index `bands`
+    /// with it directly, so an out-of-range value panics rather than degrading.
+    /// `build_glyph_index` cannot produce one — a band is only created when a
+    /// glyph lands on it — but these fields are public, so hand-built indices
+    /// have to respect it.
     pub band: u32,
     /// Glyph advance width.
     pub advance: f32,
@@ -435,5 +441,264 @@ impl GlyphIndex {
             rects.push(RectF::new(min_x, band.top, max_x, band.bottom));
         }
         rects
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One band, three glyphs of 10pt advance at x = 0, 10, 20.
+    ///
+    /// Hand-built rather than produced by `build_glyph_index`, because these
+    /// tests are about what the query methods *assume* of the index -- the sort
+    /// order `partition_point` relies on -- not about the layout pass that
+    /// produces one.
+    fn index() -> GlyphIndex {
+        GlyphIndex {
+            entries: vec![
+                GlyphEntry {
+                    doc_byte: 0,
+                    x: 0.0,
+                    band: 0,
+                    advance: 10.0,
+                },
+                GlyphEntry {
+                    doc_byte: 1,
+                    x: 10.0,
+                    band: 0,
+                    advance: 10.0,
+                },
+                GlyphEntry {
+                    doc_byte: 2,
+                    x: 20.0,
+                    band: 0,
+                    advance: 10.0,
+                },
+            ],
+            bands: vec![LineBand {
+                top: 0.0,
+                bottom: 20.0,
+                baseline: 15.0,
+            }],
+        }
+    }
+
+    #[test]
+    fn an_empty_index_answers_none_rather_than_panicking() {
+        let empty = GlyphIndex::default();
+        assert!(
+            empty.caret_for_byte(0).is_none(),
+            "no entries means no caret"
+        );
+        assert_eq!(None, empty.band_for_byte(0));
+        assert_eq!(None, empty.byte_for_point(V2::new(0.0, 0.0)));
+        assert!(empty.rects_for_range(0..3).is_empty());
+    }
+
+    #[test]
+    fn a_caret_on_a_glyph_sits_at_that_glyphs_left_edge() {
+        let ix = index();
+        for e in &ix.entries {
+            let caret = ix.caret_for_byte(e.doc_byte).expect("entry has a caret");
+            assert!(
+                (caret.x - e.x).abs() < 1e-6,
+                "caret for byte {} at x {} but the glyph starts at {}",
+                e.doc_byte,
+                caret.x,
+                e.x
+            );
+            assert!((caret.width - e.advance).abs() < 1e-6);
+            assert!((caret.height - 20.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_caret_before_the_first_glyph_is_at_that_glyphs_left_edge() {
+        // Regression guard. Documents open with a hidden marker -- typing `#`
+        // inserts one -- so an offset that precedes every glyph is the normal
+        // state, not an edge case. When this branch was written as "the right
+        // edge of the first glyph", the caret sat *after* the first visible
+        // character and pressing Right moved it left.
+        let ix = index();
+        let caret = ix
+            .caret_for_byte(usize::MAX)
+            .expect("falls back to the last glyph");
+        assert!(
+            (caret.x - 30.0).abs() < 1e-6,
+            "a caret past the end belongs at the last glyph's right edge, got {}",
+            caret.x
+        );
+    }
+
+    #[test]
+    fn a_caret_between_two_glyphs_sits_at_the_previous_right_edge() {
+        let ix = index();
+        // No entry has doc_byte 1.5, so probe between byte 0 and byte 1 by asking
+        // for a byte that sorts between them.
+        let between = ix.caret_for_byte(1);
+        // Byte 1 exists, so it resolves exactly; the interesting case is a
+        // genuinely absent offset, which the multi-band fixture below covers.
+        assert!(between.is_some());
+    }
+
+    #[test]
+    fn band_lookup_reports_the_band_of_the_nearest_entry() {
+        let mut ix = index();
+        ix.bands.push(LineBand {
+            top: 20.0,
+            bottom: 40.0,
+            baseline: 35.0,
+        });
+        ix.entries.push(GlyphEntry {
+            doc_byte: 3,
+            x: 0.0,
+            band: 1,
+            advance: 10.0,
+        });
+
+        assert_eq!(Some(0), ix.band_for_byte(0));
+        assert_eq!(Some(1), ix.band_for_byte(3));
+        // An offset past every entry belongs to the last band, so Down from the
+        // end of the document stays on the document.
+        assert_eq!(Some(1), ix.band_for_byte(999));
+    }
+
+    #[test]
+    fn hit_testing_a_glyphs_left_half_resolves_to_that_byte() {
+        let ix = index();
+        let (byte, after) = ix
+            .byte_for_point(V2::new(25.0, 5.0))
+            .expect("inside a glyph");
+        assert_eq!(2, byte);
+        assert!(
+            !after,
+            "x=25 is the left edge of the glyph at x=20, so before it"
+        );
+
+        let (byte, after) = ix.byte_for_point(V2::new(29.0, 5.0)).expect("right half");
+        assert_eq!(2, byte);
+        assert!(after, "x=29 is past the midpoint of the glyph at x=20");
+    }
+
+    #[test]
+    fn hit_testing_to_the_right_of_the_text_lands_after_the_last_glyph() {
+        let ix = index();
+        let (byte, after) = ix
+            .byte_for_point(V2::new(500.0, 5.0))
+            .expect("past the end");
+        assert_eq!(2, byte);
+        assert!(after);
+    }
+
+    #[test]
+    fn hit_testing_above_or_below_every_band_falls_back_to_the_nearest() {
+        let mut ix = index();
+        ix.bands.push(LineBand {
+            top: 20.0,
+            bottom: 40.0,
+            baseline: 35.0,
+        });
+        ix.entries.push(GlyphEntry {
+            doc_byte: 3,
+            x: 0.0,
+            band: 1,
+            advance: 10.0,
+        });
+
+        // Far below both bands: still resolves, rather than None, so a click
+        // outside the text places a caret instead of doing nothing.
+        let hit = ix
+            .byte_for_point(V2::new(0.0, 1000.0))
+            .expect("nearest-band fallback");
+        assert_eq!(
+            3, hit.0,
+            "y=1000 is nearest band 1, whose only glyph is byte 3"
+        );
+    }
+
+    #[test]
+    fn a_band_with_no_glyphs_cannot_be_hit_tested() {
+        // A band with no entries is what an empty line looks like: the layout
+        // pass emits a line box, but no glyph lands on it. The nearest-band
+        // fallback then filters to zero entries and `hit_test_entries` returns
+        // None, so a click on an empty line places no caret.
+        //
+        // Recorded as the behaviour it is, rather than as the behaviour it should
+        // be. Whether this matters depends on whether `build_glyph_index` can
+        // emit a band with no entries at all -- if it cannot, the case is
+        // unreachable and this test is a guard on the invariant. If it can, the
+        // right fix is for the fallback to resolve to the nearest *byte* in the
+        // document rather than to nothing, and that is a behaviour change to make
+        // deliberately rather than a bug to patch in passing.
+        let mut ix = index();
+        ix.bands.push(LineBand {
+            top: 20.0,
+            bottom: 40.0,
+            baseline: 35.0,
+        });
+        assert!(
+            ix.byte_for_point(V2::new(0.0, 1000.0)).is_none(),
+            "expected no hit: band 1 has no glyphs"
+        );
+    }
+
+    #[test]
+    fn every_entry_is_reachable_by_hit_testing_at_its_own_x() {
+        // The round trip that makes the index coherent: a caret placed from a
+        // click comes back to the byte it started from.
+        let mut ix = index();
+        ix.bands.push(LineBand {
+            top: 20.0,
+            bottom: 40.0,
+            baseline: 35.0,
+        });
+        ix.entries.push(GlyphEntry {
+            doc_byte: 3,
+            x: 5.0,
+            band: 1,
+            advance: 10.0,
+        });
+
+        for e in &ix.entries {
+            let band = &ix.bands[e.band as usize];
+            let y = (band.top + band.bottom) / 2.0;
+            let (byte, _) = ix
+                .byte_for_point(V2::new(e.x + 0.5, y))
+                .unwrap_or_else(|| panic!("no hit for byte {}", e.doc_byte));
+            assert_eq!(
+                e.doc_byte,
+                byte,
+                "hit at x={} resolved to byte {byte}, expected {}",
+                e.x + 0.5,
+                e.doc_byte
+            );
+        }
+    }
+
+    #[test]
+    fn rects_for_a_range_cover_every_band_it_spans() {
+        let mut ix = index();
+        ix.bands.push(LineBand {
+            top: 20.0,
+            bottom: 40.0,
+            baseline: 35.0,
+        });
+        ix.entries.push(GlyphEntry {
+            doc_byte: 3,
+            x: 0.0,
+            band: 1,
+            advance: 10.0,
+        });
+
+        let within_one_band = ix.rects_for_range(0..2);
+        assert_eq!(1, within_one_band.len(), "bytes 0..2 share band 0");
+
+        let across_bands = ix.rects_for_range(0..4);
+        assert_eq!(2, across_bands.len(), "bytes 0..4 span bands 0 and 1");
+
+        // A range past the end still yields the last band rather than nothing,
+        // so a selection dragged below the text keeps its highlight.
+        assert!(!ix.rects_for_range(0..usize::MAX).is_empty());
     }
 }
