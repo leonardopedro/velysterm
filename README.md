@@ -73,6 +73,31 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
+<!-- status: verified | tests: 592 cargo | last_verified: 2026-10-04 -->
+
+## Verification
+
+```sh
+export PKG_CONFIG_PATH=/tmp/emthin-work/pc:$PKG_CONFIG_PATH   # or your own
+cargo test -p mathed_core -p mathed_mini -p kernel_client \
+         -p delta_algebra -p delta_sirk -p mathed_biblio    # 592 passed
+```
+
+`mathed_core` and `mathed_mini` are the crates `emthin` path-depends on, so a
+change to the document model is verified in both workspaces.
+
+Two caveats, because a green number here can mislead:
+
+- `mathed` (the Bevy bridge) needs system `libudev` and `pkg-config`, which the
+  build environment does not provide by default:
+  `nix-shell -p systemd pkgconf --run "cargo test -p mathed"`. It is excluded
+  from the count above for that reason, not because it fails — see the feature
+  note in `Cargo.toml` for why `bevy_gilrs` arrives anyway despite
+  `default-features = false`.
+- `kernel_client`'s stdio test skips itself when `python3` is absent rather than
+  failing on a missing interpreter.
+
+
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](https://github.com/voxell-tech/velyst#license)
 [![Crates.io](https://img.shields.io/crates/v/velyst.svg)](https://crates.io/crates/velyst)
 [![Downloads](https://img.shields.io/crates/d/velyst.svg)](https://crates.io/crates/velyst)
