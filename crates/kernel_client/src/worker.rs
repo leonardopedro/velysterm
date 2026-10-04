@@ -1001,6 +1001,18 @@ mod tests {
     use crossbeam_channel::unbounded;
     use unfer_protocol::ModelSpec;
 
+    /// Is `prog` resolvable on `PATH`?
+    ///
+    /// Used to skip tests whose fixture needs an external interpreter. Without
+    /// this the exec fails with status 127 and the op reports
+    /// `KernelFailed: kernel exited (code 127)`, which reads like a kernel
+    /// regression rather than a missing interpreter — the worst kind of red.
+    fn on_path(prog: &str) -> bool {
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).any(|dir| dir.join(prog).is_file()))
+            .unwrap_or(false)
+    }
+
     /// A test harness that sequences requests through a single
     /// worker.
     struct Harness {
@@ -1671,6 +1683,16 @@ mod tests {
     #[test]
     fn kernel_stdio_drives_a_real_kernel_subprocess() {
         use std::io::Write as _;
+        // The fixture below is a real subprocess carrying a
+        // `#!/usr/bin/env python3` shebang, so it can only exec when python3 is
+        // on PATH.
+        if !on_path("python3") {
+            eprintln!(
+                "skipping kernel_stdio_drives_a_real_kernel_subprocess: \
+                 python3 is not on PATH, so the stdio fixture kernel cannot exec"
+            );
+            return;
+        }
         // A real subprocess speaking the framed stdio transport, run
         // through the same `kernel_exec` op a `\kernel` segment uses:
         // the driver performs the Jupyter exchange (kernel_info
