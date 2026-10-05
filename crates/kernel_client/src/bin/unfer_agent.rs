@@ -147,10 +147,41 @@ fn parse_coinrefs(
 
 const EVENT_QUEUE_CAPACITY: usize = 64;
 
+/// C1: an event paired with the cursor it was assigned when it was queued.
+///
+/// The cursor is what makes `events_poll` different from `poll_events`.
+/// `poll_events` drains: whatever it returns is gone, so a consumer that crashes
+/// between reading and acting has lost those events permanently, and two
+/// consumers cannot both see the same event. `events_poll` never removes
+/// anything — it answers "everything after cursor N", so a consumer resumes from
+/// its own checkpoint and a second consumer sees an identical stream. The
+/// delivery guarantee is exactly-once *per consumer*, which is the strongest
+/// statement that survives a client restart.
+///
+/// Mirrors `unfer_ffi::event_log::CursoredEvent` deliberately: the FFI side
+/// (`uk_events_poll`) and this NDJSON side should speak the same dialect, so an
+/// agent written against one is not surprised by the other.
+#[derive(Debug, Clone, PartialEq)]
+struct CursoredEvent {
+    cursor: u64,
+    event: serde_json::Value,
+}
+
+/// Default `max` for `events_poll`, mirroring the FFI side's ceiling.
+const EVENTS_POLL_DEFAULT_MAX: usize = 256;
+/// Absolute ceiling, so a caller cannot ask for an unbounded materialization.
+const EVENTS_POLL_MAX_MAX: usize = 4096;
+
 struct AgentState {
     sessions: HashMap<u64, Session>,
-    events: HashMap<u64, VecDeque<serde_json::Value>>,
+    events: HashMap<u64, VecDeque<CursoredEvent>>,
     events_dropped: HashMap<u64, u64>,
+    /// Process-global monotonic cursor counter (C1).
+    ///
+    /// Global rather than per-model so a cursor is comparable across models and a
+    /// consumer holding several checkpoints can tell them apart at a glance; each
+    /// model's `oldest_available` is what makes its own gap detectable.
+    event_cursor: u64,
     next_id: u64,
     consensus: ConsensusNode,
     keypairs: HashMap<String, Keypair>,
@@ -158,6 +189,17 @@ struct AgentState {
     /// `UNFER_PRESETS_DIR`, or none). `preset_list`/`preset_set`
     /// resolve against this.
     roster: unfer_protocol::preset::Roster,
+    /// G1: the shared context board. Process-global, not per-model: the whole
+    /// point is that entries from different models — and different workers —
+    /// are visible to each other. Bounded and append-only; see
+    /// `unfer_protocol::board`.
+    board: unfer_protocol::board::Board,
+    /// G3/G7: live claims and per-worker message queues, layered over the board
+    /// so both share one cursor sequence. See `unfer_protocol::coop`.
+    coop: unfer_protocol::coop::Coop,
+    /// G7: the hand-off log, so `role_over` can answer "is this worker
+    /// reviewing claim N" without re-reading the board.
+    handoffs: Vec<unfer_protocol::coop::Handoff>,
 }
 
 impl AgentState {
@@ -174,26 +216,37 @@ impl AgentState {
             sessions: HashMap::new(),
             events: HashMap::new(),
             events_dropped: HashMap::new(),
+            event_cursor: 1,
             next_id: 1,
             consensus: ConsensusNode::new(Box::new(LocalConsensus::new())),
             keypairs: HashMap::new(),
             roster,
+            board: unfer_protocol::board::Board::new(),
+            coop: unfer_protocol::coop::Coop::new(),
+            handoffs: Vec::new(),
         }
     }
 
     fn push_event(&mut self, model_id: u64, event: serde_json::Value) {
+        let cursor = self.event_cursor;
+        self.event_cursor += 1;
         let q = self.events.entry(model_id).or_default();
         if q.len() >= EVENT_QUEUE_CAPACITY {
             q.pop_front();
             *self.events_dropped.entry(model_id).or_default() += 1;
         }
-        q.push_back(event);
+        q.push_back(CursoredEvent { cursor, event });
     }
 
+    /// Destructive read, for the subscription path (`poll_events`).
+    ///
+    /// Unchanged in behaviour: the queue still empties, so a caller that wants
+    /// resumable delivery must use `events_poll`. Kept because the drop-on-
+    /// overflow subscription model is the right one for a live UI.
     fn drain_events(&mut self, model_id: u64) -> Vec<serde_json::Value> {
         self.events
             .get_mut(&model_id)
-            .map(|q| q.drain(..).collect())
+            .map(|q| q.drain(..).map(|ce| ce.event).collect())
             .unwrap_or_default()
     }
 
@@ -468,6 +521,465 @@ impl AgentState {
                     resp["events_dropped"] = serde_json::json!(dropped);
                 }
                 AgentResponse::ok(&req.id, resp)
+            }
+            // C1: cursor-based delivery, complementary to `poll_events`.
+            //
+            // Non-destructive: nothing is removed, so the same event is delivered
+            // to every consumer that asks for it from a cursor before it, and a
+            // consumer that restarts resumes from its own checkpoint. `gap` is the
+            // honest part -- if the consumer fell behind the ring, it is told
+            // rather than silently handed a stream with a hole in it.
+            "events_poll" => {
+                let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
+                    Some(id) => id,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-integer 'model_id' field"),
+                        );
+                    }
+                };
+                if !self.sessions.contains_key(&model_id) {
+                    return AgentResponse::err(&req.id, bad_handle_diag(model_id));
+                }
+                let since_cursor = match req.params.get("since_cursor") {
+                    None | Some(serde_json::Value::Null) => 0u64,
+                    Some(v) => match v.as_u64() {
+                        Some(c) => c,
+                        None => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'since_cursor' must be a non-negative integer"),
+                            );
+                        }
+                    },
+                };
+                let max = match req.params.get("max") {
+                    None | Some(serde_json::Value::Null) => EVENTS_POLL_DEFAULT_MAX,
+                    Some(v) => match v.as_u64() {
+                        Some(m) => (m as usize).min(EVENTS_POLL_MAX_MAX),
+                        None => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'max' must be a non-negative integer"),
+                            );
+                        }
+                    },
+                };
+
+                let latest_cursor = self.event_cursor.saturating_sub(1);
+                let dropped = *self.events_dropped.get(&model_id).unwrap_or(&0);
+                let queue = self.events.get(&model_id);
+
+                // An empty queue has nothing to lose, so there is no gap however
+                // old the cursor is.
+                let oldest_available = queue
+                    .and_then(|q| q.front())
+                    .map(|ce| ce.cursor)
+                    .unwrap_or(latest_cursor + 1);
+
+                let gap = match queue.and_then(|q| q.front()) {
+                    // The consumer asked for `since_cursor + 1` and the oldest thing
+                    // we still hold is later than that: something in between is gone.
+                    Some(front) => since_cursor.saturating_add(1) < front.cursor,
+                    None => false,
+                };
+
+                let pending: Vec<&CursoredEvent> = queue
+                    .map(|q| q.iter().filter(|ce| ce.cursor > since_cursor).collect())
+                    .unwrap_or_default();
+                let truncated = pending.len() > max;
+                let events: Vec<serde_json::Value> = pending
+                    .iter()
+                    .take(max)
+                    .map(|ce| {
+                        serde_json::json!({ "cursor": ce.cursor, "event": ce.event })
+                    })
+                    .collect();
+
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "model_id": model_id,
+                        "since_cursor": since_cursor,
+                        "events": events,
+                        "latest_cursor": latest_cursor,
+                        "oldest_available": oldest_available,
+                        "gap": gap,
+                        "truncated": truncated,
+                        "dropped_total": dropped,
+                    }),
+                )
+            }
+            // G1: append one typed entry to the shared context board.
+            //
+            // `worker` is recorded, not authenticated — see the note on
+            // `board::Board::write`. This is the honest position: the board
+            // carries no authority, a `CLAIM` is settled by negotiation rather
+            // than by believing the `worker` field, and enforcement of who may
+            // write what is the grant layer's job (S21/S28), not this op's.
+            "board_write" => {
+                let kind_raw = match req.params.get("kind").and_then(|v| v.as_str()) {
+                    Some(k) => k,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing 'kind' field (OBSERVED/FACT/FAIL/CLAIM/PATCH_SUMMARY)"),
+                        );
+                    }
+                };
+                let kind = match unfer_protocol::board::BoardKind::parse(kind_raw) {
+                    Some(k) => k,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code::BAD_JSON,
+                                format!("Unknown board kind '{}'", kind_raw),
+                                Severity::Error,
+                            )
+                            .with_hint(RepairHint::new(
+                                HintKind::ReplaceValue,
+                                "kind",
+                                format!(
+                                    "One of: {}",
+                                    unfer_protocol::board::BoardKind::ALL
+                                        .iter()
+                                        .map(|k| k.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            )),
+                        );
+                    }
+                };
+                let worker = match req.params.get("worker").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'worker' field"),
+                        );
+                    }
+                };
+                let text = match req.params.get("text").and_then(|v| v.as_str()) {
+                    Some(t) => t,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-string 'text' field"),
+                        );
+                    }
+                };
+                if text.trim().is_empty() {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("'text' must not be empty"),
+                    );
+                }
+                let detail = req.params.get("detail").and_then(|v| v.as_str());
+                let entry = self.board.write(kind, &worker, text, detail);
+
+                // The effect kind travels with the acknowledgement so a gateway
+                // or a peer can apply the S21 lane without re-deriving the rule.
+                // This agent process does not itself enforce the lane — it has no
+                // grant set — and saying so is better than implying it does.
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "entry": entry,
+                        "effect_kind": match kind.effect_kind() {
+                            unfer_protocol::EffectKind::Observe => "observe",
+                            unfer_protocol::EffectKind::Mutate => "mutate",
+                        },
+                        "latest_cursor": self.board.latest_cursor(),
+                        "dropped": self.board.dropped(),
+                    }),
+                )
+            }
+            // G1: the newest entries, oldest first.
+            "board_read" => {
+                let limit = match req.params.get("limit") {
+                    None | Some(serde_json::Value::Null) => 50usize,
+                    Some(v) => match v.as_u64() {
+                        Some(n) => (n as usize).min(unfer_protocol::board::CAPACITY),
+                        None => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'limit' must be a non-negative integer"),
+                            );
+                        }
+                    },
+                };
+                let entries: Vec<serde_json::Value> = self
+                    .board
+                    .tail(limit)
+                    .into_iter()
+                    .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+                    .collect();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "entries": entries,
+                        "count": entries.len(),
+                        "retained": self.board.len(),
+                        "dropped": self.board.dropped(),
+                        "latest_cursor": self.board.latest_cursor(),
+                        "oldest_available": self.board.oldest_available(),
+                    }),
+                )
+            }
+            // G1: `,` is OR, `&` is AND, case-insensitive; AND binds tighter.
+            "board_grep" => {
+                let expr = req.params.get("expr").and_then(|v| v.as_str()).unwrap_or("");
+                let parsed = unfer_protocol::board::GrepExpr::parse(expr);
+                if parsed.is_empty_selection() && !expr.trim().is_empty() {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("'expr' contained only separators; use terms"),
+                    );
+                }
+                let entries: Vec<serde_json::Value> = self
+                    .board
+                    .grep(&parsed)
+                    .into_iter()
+                    .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+                    .collect();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "expr": expr,
+                        "entries": entries,
+                        "count": entries.len(),
+                        "dropped": self.board.dropped(),
+                    }),
+                )
+            }
+            // G3: claim a scope, and be told if someone already holds it.
+            //
+            // An overlap is *reported*, not refused: the board is a log, not a
+            // lock, and refusing would either duplicate the work silently or
+            // deadlock two workers on a resource neither owns. The reply carries
+            // the current holders so the workers can negotiate with `agent_dm` or
+            // escalate to a human.
+            "agent_claim" => {
+                let worker = match req.params.get("worker").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'worker' field"),
+                        );
+                    }
+                };
+                let scope = match req.params.get("scope").and_then(|v| v.as_str()) {
+                    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'scope' field"),
+                        );
+                    }
+                };
+                let attempt = self.coop.claim(&mut self.board, &worker, &scope);
+                // `conflicts_with` is non-empty *only* when the outcome is
+                // "overlaps". On a grant it is empty, so a caller can test one
+                // field without also having to read `outcome` — putting the
+                // granted claim in it would make "did I collide?" answer yes on
+                // success.
+                let (outcome, granted, conflicts) = match &attempt.outcome {
+                    unfer_protocol::coop::ClaimOutcome::Granted { claim } => {
+                        ("granted", Some(claim.clone()), Vec::new())
+                    }
+                    unfer_protocol::coop::ClaimOutcome::Overlaps { existing } => {
+                        ("overlaps", None, existing.clone())
+                    }
+                };
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "outcome": outcome,
+                        "scope": unfer_protocol::coop::ClaimScope::new(&scope).scope,
+                        "entry": attempt.entry,
+                        "claim": granted,
+                        // The callers to notify, so a worker does not have to
+                        // know the internals to escalate.
+                        "conflicts_with": conflicts,
+                        "live_claims": self.coop.claims(),
+                        "latest_cursor": self.board.latest_cursor(),
+                    }),
+                )
+            }
+            // G3: a direct message. Delivered into the recipient's queue and
+            // recorded on the board, so a reader auditing the board can see that
+            // a negotiation happened even if no one acts on it.
+            "agent_dm" => {
+                let from = match req.params.get("from").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'from' field"),
+                        );
+                    }
+                };
+                let to = match req.params.get("to").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'to' field"),
+                        );
+                    }
+                };
+                let text = match req.params.get("text").and_then(|v| v.as_str()) {
+                    Some(t) if !t.trim().is_empty() => t.to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'text' field"),
+                        );
+                    }
+                };
+                let priority = match req.params.get("priority") {
+                    None | Some(serde_json::Value::Null) => 0i64,
+                    Some(v) => match v.as_i64() {
+                        Some(p) => p,
+                        None => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'priority' must be an integer"),
+                            );
+                        }
+                    },
+                };
+                let msg = self.coop.dm(&mut self.board, &from, &to, &text, priority);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "delivered": msg,
+                        "inbox_len": self.coop.inbox(&to).len(),
+                        "dropped": self.coop.dm_dropped(&to),
+                    }),
+                )
+            }
+            // G3/G7: read a worker's messages. `consume: true` is the
+            // acknowledgement form; the default leaves them in place, because a
+            // worker polls mid-turn and must not lose a message to a crash.
+            "agent_dm_read" => {
+                let to = match req.params.get("worker").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'worker' field"),
+                        );
+                    }
+                };
+                let consume = req
+                    .params
+                    .get("consume")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let messages: Vec<serde_json::Value> = if consume {
+                    self.coop
+                        .take_inbox(&to)
+                        .iter()
+                        .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                        .collect()
+                } else {
+                    self.coop
+                        .inbox(&to)
+                        .iter()
+                        .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                        .collect()
+                };
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "messages": messages,
+                        "count": messages.len(),
+                        "dropped": self.coop.dm_dropped(&to),
+                    }),
+                )
+            }
+            // G7: record a role hand-off. Grants nothing: `role` is a label that
+            // makes "who reviewed this" observable in the board history. Authority
+            // still comes from the grant set (S21/S28), and there is no field here
+            // that could widen it.
+            "agent_handoff" => {
+                use unfer_protocol::coop::Handoff;
+                let by = match req.params.get("by").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'by' field"),
+                        );
+                    }
+                };
+                let claim_cursor = match req.params.get("claim_cursor").and_then(|v| v.as_u64()) {
+                    Some(c) => c,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-integer 'claim_cursor' field"),
+                        );
+                    }
+                };
+                let role = match req
+                    .params
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_role)
+                {
+                    Some(r) => r,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            Diagnostic::new(
+                                Code::BAD_JSON,
+                                "missing or unknown 'role'".to_string(),
+                                Severity::Error,
+                            )
+                            .with_hint(RepairHint::new(
+                                HintKind::ReplaceValue,
+                                "role",
+                                "One of: implementer, reviewer, integrator",
+                            )),
+                        );
+                    }
+                };
+                let accept = req
+                    .params
+                    .get("accept")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let handoff = if accept {
+                    Handoff::RoleAccept {
+                        claim_cursor,
+                        role,
+                        by: by.clone(),
+                    }
+                } else {
+                    Handoff::RoleRequest {
+                        claim_cursor,
+                        role,
+                        by: by.clone(),
+                    }
+                };
+                let entry = unfer_protocol::coop::record_handoff(&mut self.board, &handoff);
+                self.handoffs.push(handoff);
+                let held = unfer_protocol::coop::role_over(&self.handoffs, claim_cursor, &by);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "entry": entry,
+                        // `null` until the accept arrives: a request is not a role.
+                        "role_held": held.map(|r| format!("{r:?}")),
+                        "claim_cursor": claim_cursor,
+                    }),
+                )
             }
             "save_session" => {
                 let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
@@ -1280,8 +1792,60 @@ impl AgentState {
                     }
                 }
             }
+            // Registered in the shared op registry and specified in docs/PROTOCOL.md
+            // (UK-4908..4913), but not implemented here. Returning the generic
+            // "Unknown op" diagnostic would be a lie twice over: the op *is*
+            // known -- it is in the registry the `version` op advertises -- and the
+            // UK-#### code a caller catches on would be UK-1001 (bad request)
+            // instead of the UK-49xx the protocol document promises. So say
+            // plainly that it is registered and unbuilt, and name the gate that
+            // has to be passed before it exists.
+            //
+            // Implementing these means launching subprocesses under a grant
+            // allowlist. That is a security-sensitive feature with its own review,
+            // not a missing `match` arm, so it is tracked as a work order rather
+            // than done as an afterthought here.
+            "exec" | "kernel_exec" => AgentResponse::err(
+                &req.id,
+                unimplemented_op_diag(&req.op),
+            ),
             _ => AgentResponse::err(&req.id, unknown_op_diag(&req.op)),
         }
+    }
+}
+
+/// A registered-but-unimplemented op, distinguished from a typo.
+///
+/// The distinction matters to a caller: `unknown_op_diag` means "you spelled it
+/// wrong, here is the list of things you could have meant", and `ReplaceValue`
+/// listing `exec` in that list invites the caller to retry something that cannot
+/// work. This one says the op exists in the registry, is specified in
+/// `docs/PROTOCOL.md`, and has no implementation — and does not offer a retry
+/// hint, because retrying is exactly the wrong move.
+fn unimplemented_op_diag(op: &str) -> Diagnostic {
+    Diagnostic::new(
+        Code::BAD_JSON,
+        format!(
+            "Op '{}' is registered and specified in docs/PROTOCOL.md but not \
+             implemented by this agent binary",
+            op
+        ),
+        Severity::Error,
+    )
+}
+
+/// Parse a `Role` from the wire, case-insensitively.
+///
+/// Hand-rolled rather than `serde_json::from_value` so the error path stays with
+/// the other op diagnostics; three variants do not justify a serde round-trip per
+/// request.
+fn parse_role(s: &str) -> Option<unfer_protocol::coop::Role> {
+    use unfer_protocol::coop::Role;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "implementer" => Some(Role::Implementer),
+        "reviewer" => Some(Role::Reviewer),
+        "integrator" => Some(Role::Integrator),
+        _ => None,
     }
 }
 
@@ -2252,5 +2816,1084 @@ mod tests {
             "refusal names the blank-session rule: {:?}",
             resp.error
         );
+    }
+
+    // ── C1: cursor-based delivery ─────────────────────────────────────────
+    //
+    // The acceptance criterion for `events_poll`, and the reason it exists
+    // alongside `poll_events`: two consumers polling the same model must each see
+    // every event exactly once, and a cursor must survive a restart.
+
+    /// Create a model and return its id, with an empty event queue.
+    fn model_for(state: &mut AgentState) -> u64 {
+        let resp = state.handle(&AgentRequest::new(
+            "c1-create",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain",
+                                "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null,
+                           "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()["model_id"].as_u64().unwrap()
+    }
+
+    fn poll(state: &mut AgentState, model_id: u64, since: u64) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "c1-poll",
+            "events_poll",
+            serde_json::json!({"model_id": model_id, "since_cursor": since}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    /// Push `n` synthetic events straight onto the queue. Going through
+    /// `push_event` rather than real model ops keeps the test about delivery, not
+    /// about which op happens to emit an event.
+    fn push_n(state: &mut AgentState, model_id: u64, n: u64) {
+        for i in 0..n {
+            state.push_event(model_id, serde_json::json!({"seq": i}));
+        }
+    }
+
+    fn cursors(result: &serde_json::Value) -> Vec<u64> {
+        result["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .map(|e| e["cursor"].as_u64().expect("cursor"))
+            .collect()
+    }
+
+    #[test]
+    fn events_poll_returns_events_newer_than_the_cursor() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 3);
+
+        let r = poll(&mut state, model_id, 0);
+        assert_eq!(cursors(&r), vec![1, 2, 3]);
+        assert_eq!(r["since_cursor"], 0);
+        assert_eq!(r["latest_cursor"], 3);
+        assert_eq!(r["gap"], false);
+        assert_eq!(r["truncated"], false);
+    }
+
+    #[test]
+    fn events_poll_is_non_destructive_and_resumable() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 3);
+
+        let first = poll(&mut state, model_id, 0);
+        assert_eq!(cursors(&first), vec![1, 2, 3]);
+
+        // Polling the same cursor again must return the same events: this is the
+        // whole difference from `poll_events`, which drains.
+        let again = poll(&mut state, model_id, 0);
+        assert_eq!(cursors(&again), vec![1, 2, 3]);
+
+        // And resuming from the last cursor yields only what is new.
+        push_n(&mut state, model_id, 2);
+        let next = poll(&mut state, model_id, 3);
+        assert_eq!(cursors(&next), vec![4, 5]);
+    }
+
+    #[test]
+    fn a_cursor_survives_a_restart_of_the_consumer() {
+        // The client's half of exactly-once: state a consumer keeps, not kernel
+        // state. Rebuilding `AgentState` models a fresh process reading the same
+        // durable log; the checkpoint is what carries across.
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 2);
+        let checkpoint = cursors(&poll(&mut state, model_id, 0)).last().copied().unwrap();
+        assert_eq!(checkpoint, 2);
+
+        // Consumer restarts and re-reads from its checkpoint. Nothing between the
+        // checkpoint and the new events is replayed.
+        push_n(&mut state, model_id, 2);
+        let resumed = poll(&mut state, model_id, checkpoint);
+        assert_eq!(cursors(&resumed), vec![3, 4]);
+    }
+
+    #[test]
+    fn two_consumers_each_see_every_event_exactly_once() {
+        // The C1 acceptance criterion, verbatim.
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 6);
+
+        let a = cursors(&poll(&mut state, model_id, 0));
+        let b = cursors(&poll(&mut state, model_id, 0));
+        assert_eq!(a, b, "both consumers must see the identical stream");
+        assert_eq!(a, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            a.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            a.len(),
+            "no event may be delivered twice to one consumer"
+        );
+    }
+
+    #[test]
+    fn interleaved_consumers_stay_independent() {
+        // Two consumers advancing at different rates over one growing stream. This
+        // is the case a shared drain cannot support and is why `events_poll` is
+        // separate from `poll_events` rather than a flag on it.
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 2);
+
+        let mut a = cursors(&poll(&mut state, model_id, 0));
+        push_n(&mut state, model_id, 2);
+        let mut b = cursors(&poll(&mut state, model_id, 0));
+        a.extend(cursors(&poll(&mut state, model_id, *a.last().unwrap())));
+        b.extend(cursors(&poll(&mut state, model_id, *b.last().unwrap())));
+
+        assert_eq!(a, vec![1, 2, 3, 4]);
+        assert_eq!(b, a, "a slower consumer must still see every event");
+    }
+
+    #[test]
+    fn a_consumer_that_fell_behind_is_told_it_has_a_gap() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        // Overflow the ring so the earliest events are dropped.
+        push_n(&mut state, model_id, (EVENT_QUEUE_CAPACITY + 10) as u64);
+
+        let behind = cursors(&poll(&mut state, model_id, 0));
+        let r = poll(&mut state, model_id, 0);
+        assert_eq!(r["gap"], true, "a stale cursor must be reported, not hidden");
+        assert_eq!(
+            r["dropped_total"].as_u64().unwrap(),
+            10,
+            "the 10 events pushed past the ring capacity are the ones lost"
+        );
+        assert_eq!(behind.len(), EVENT_QUEUE_CAPACITY);
+        assert_eq!(r["oldest_available"].as_u64().unwrap(), 11);
+        assert!(
+            cursors(&r).iter().all(|c| *c >= 11),
+            "nothing older than oldest_available may be delivered"
+        );
+    }
+
+    #[test]
+    fn a_caught_up_consumer_is_never_told_it_has_a_gap() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 3);
+        let last = cursors(&poll(&mut state, model_id, 0)).last().copied().unwrap();
+
+        let r = poll(&mut state, model_id, last);
+        assert_eq!(r["gap"], false);
+        assert_eq!(r["events"].as_array().unwrap().len(), 0);
+        assert_eq!(r["truncated"], false);
+    }
+
+    #[test]
+    fn an_empty_queue_reports_no_gap_however_old_the_cursor() {
+        // Losing the queue (model closed, or nothing ever emitted) is not the same
+        // as falling behind it, and must not be reported as data loss.
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        let r = poll(&mut state, model_id, 9999);
+        assert_eq!(r["gap"], false);
+        assert_eq!(r["events"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn max_bounds_the_batch_and_truncated_says_so() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 5);
+
+        let resp = state.handle(&AgentRequest::new(
+            "c1-max",
+            "events_poll",
+            serde_json::json!({"model_id": model_id, "since_cursor": 0, "max": 2}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(cursors(&r), vec![1, 2]);
+        assert_eq!(r["truncated"], true, "a clipped batch must admit it");
+
+        // The remainder is still reachable from the cursor just delivered.
+        let rest = poll(&mut state, model_id, 2);
+        assert_eq!(cursors(&rest), vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn max_is_capped_rather_than_honoured_unbounded() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 2);
+        let resp = state.handle(&AgentRequest::new(
+            "c1-huge",
+            "events_poll",
+            serde_json::json!({"model_id": model_id, "since_cursor": 0,
+                              "max": u64::MAX}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        assert_eq!(cursors(&resp.result.unwrap()), vec![1, 2]);
+    }
+
+    #[test]
+    fn poll_events_still_drains_so_the_two_ops_are_not_interchangeable() {
+        // Guards the distinction the whole design rests on: if `poll_events`
+        // quietly became non-destructive, an editor would redraw the same event
+        // forever.
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 3);
+
+        let resp = state.handle(&AgentRequest::new(
+            "c1-drain",
+            "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert!(resp.ok);
+        assert_eq!(resp.result.unwrap()["events"].as_array().unwrap().len(), 3);
+
+        let after = state.handle(&AgentRequest::new(
+            "c1-drain2",
+            "poll_events",
+            serde_json::json!({"model_id": model_id}),
+        ));
+        assert_eq!(after.result.unwrap()["events"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn events_poll_rejects_a_missing_or_unknown_model() {
+        let mut state = AgentState::new();
+        let no_field = state.handle(&AgentRequest::new(
+            "c1-bad1",
+            "events_poll",
+            serde_json::json!({"since_cursor": 0}),
+        ));
+        assert!(!no_field.ok);
+        assert_eq!(no_field.error.unwrap().code, Code::BAD_JSON);
+
+        let bad_model = state.handle(&AgentRequest::new(
+            "c1-bad2",
+            "events_poll",
+            serde_json::json!({"model_id": 4242, "since_cursor": 0}),
+        ));
+        assert!(!bad_model.ok);
+        assert_eq!(bad_model.error.unwrap().code, Code::BAD_HANDLE);
+    }
+
+    #[test]
+    fn events_poll_rejects_a_negative_or_non_integer_cursor() {
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        for bad in [serde_json::json!(-1), serde_json::json!("3"), serde_json::json!(1.5)] {
+            let resp = state.handle(&AgentRequest::new(
+                "c1-badcur",
+                "events_poll",
+                serde_json::json!({"model_id": model_id, "since_cursor": bad}),
+            ));
+            assert!(!resp.ok, "{bad} should be refused");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn events_carry_their_cursor_alongside_the_payload() {
+        // A cursor the consumer cannot correlate with an event is useless for
+        // checkpointing.
+        let mut state = AgentState::new();
+        let model_id = model_for(&mut state);
+        push_n(&mut state, model_id, 1);
+        let r = poll(&mut state, model_id, 0);
+        let first = &r["events"][0];
+        assert_eq!(first["cursor"], 1);
+        assert_eq!(first["event"]["seq"], 0);
+    }
+
+    #[test]
+    fn cursors_are_monotonic_across_models() {
+        // The counter is process-global, so two models' streams do not reuse
+        // cursor values and a consumer holding several checkpoints can tell them
+        // apart.
+        let mut state = AgentState::new();
+        let a = model_for(&mut state);
+        let b = model_for(&mut state);
+        push_n(&mut state, a, 2);
+        push_n(&mut state, b, 2);
+
+        let ca = cursors(&poll(&mut state, a, 0));
+        let cb = cursors(&poll(&mut state, b, 0));
+        assert_eq!(ca, vec![1, 2]);
+        assert_eq!(cb, vec![3, 4]);
+    }
+
+    #[test]
+    fn registered_but_unimplemented_ops_say_so_instead_of_claiming_to_be_unknown() {
+        // `exec` and `kernel_exec` are in the registry the agent advertises, so
+        // answering UK-1001 "Unknown op" is wrong twice: the op is known, and the
+        // code catches callers on the wrong branch.
+        let mut state = AgentState::new();
+        for op in ["exec", "kernel_exec"] {
+            let resp = state.handle(&AgentRequest::new("c1-unimpl", op, serde_json::json!({})));
+            assert!(!resp.ok, "{op} must not report success");
+            let diag = resp.error.unwrap();
+            assert!(
+                diag.message.contains("not implemented"),
+                "{op}: {:?}",
+                diag.message
+            );
+            assert!(
+                !diag.message.contains("Unknown op"),
+                "{op} must not be reported as a typo: {:?}",
+                diag.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuinely_unknown_op_is_still_a_typo_with_a_replacement_hint() {
+        // The other half of the distinction: fixing the false "unknown" must not
+        // break the real one.
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "c1-typo",
+            "event_poll",
+            serde_json::json!({}),
+        ));
+        assert!(!resp.ok);
+        let diag = resp.error.unwrap();
+        assert!(diag.message.contains("Unknown op"), "{:?}", diag.message);
+    }
+
+    #[test]
+    fn every_advertised_op_is_either_handled_or_explicitly_unimplemented() {
+        // The regression that let this drift in the first place: the registry
+        // advertised 41 ops while the dispatch table had 38 arms, and the three
+        // strays answered UK-1001. This walks `VALID_OPS` and asserts each one
+        // reaches a real arm.
+        let mut state = AgentState::new();
+        let unimplemented = ["exec", "kernel_exec"];
+        for op in VALID_OPS {
+            let resp = state.handle(&AgentRequest::new(
+                "c1-census",
+                *op,
+                serde_json::json!({"model_id": 999_999}),
+            ));
+            if unimplemented.contains(op) {
+                assert!(!resp.ok);
+                assert!(
+                    resp.error
+                        .as_ref()
+                        .unwrap()
+                        .message
+                        .contains("not implemented"),
+                    "{op} must be explicitly unimplemented"
+                );
+                continue;
+            }
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|d| d.message.clone())
+                .unwrap_or_default();
+            assert!(
+                !msg.contains("Unknown op"),
+                "advertised op '{op}' has no dispatch arm -- it falls through to \
+                 unknown_op_diag. Add an arm, or answer explicitly."
+            );
+        }
+    }
+
+    // ── G1: the shared context board ───────────────────────────────────────
+    //
+    // The board's acceptance criterion is not "entries round-trip" but "a `FAIL`
+    // written by one worker is findable by another, so a peer does not re-derive
+    // a dead end". These drive the three ops over the real dispatcher.
+
+    fn bw(state: &mut AgentState, kind: &str, worker: &str, text: &str) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "g1-w",
+            "board_write",
+            serde_json::json!({"kind": kind, "worker": worker, "text": text}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    fn entries(v: &serde_json::Value) -> Vec<serde_json::Value> {
+        v["entries"].as_array().expect("entries").clone()
+    }
+
+    #[test]
+    fn a_written_entry_comes_back_with_its_kind_worker_and_cursor() {
+        let mut state = AgentState::new();
+        let r = bw(&mut state, "FACT", "w1", "nanoda re-verifies the export");
+        assert_eq!(r["entry"]["kind"], "FACT");
+        assert_eq!(r["entry"]["worker"], "w1");
+        assert_eq!(r["entry"]["text"], "nanoda re-verifies the export");
+        assert_eq!(r["entry"]["cursor"], 1);
+    }
+
+    #[test]
+    fn board_read_returns_entries_oldest_first_and_newest_last() {
+        let mut state = AgentState::new();
+        for i in 0..5 {
+            bw(&mut state, "OBSERVED", "w1", &format!("entry {i}"));
+        }
+        let resp = state.handle(&AgentRequest::new(
+            "g1-r",
+            "board_read",
+            serde_json::json!({}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        let es = entries(&r);
+        assert_eq!(es.len(), 5);
+        let texts: Vec<&str> = es.iter().map(|e| e["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, vec!["entry 0", "entry 1", "entry 2", "entry 3", "entry 4"]);
+    }
+
+    #[test]
+    fn board_read_limit_returns_the_newest_n() {
+        let mut state = AgentState::new();
+        for i in 0..10 {
+            bw(&mut state, "OBSERVED", "w1", &format!("entry {i}"));
+        }
+        let resp = state.handle(&AgentRequest::new(
+            "g1-r2",
+            "board_read",
+            serde_json::json!({"limit": 3}),
+        ));
+        let es = entries(&resp.result.unwrap());
+        let texts: Vec<&str> = es.iter().map(|e| e["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, vec!["entry 7", "entry 8", "entry 9"]);
+    }
+
+    #[test]
+    fn a_fail_entry_lets_a_peer_avoid_re_deriving_a_dead_end() {
+        // The G1 acceptance criterion. Two workers, one shared board: w1 records
+        // a failure, w2 greps for it and finds it instead of repeating the work.
+        let mut state = AgentState::new();
+        bw(
+            &mut state,
+            "FAIL",
+            "w1",
+            "the square-comparison route for N_NS is refuted (not_nsEnergy_surjective)",
+        );
+        bw(&mut state, "FACT", "w1", "the Leray energy N_E = 1 + ||u||^2 is the valid comparison");
+
+        let resp = state.handle(&AgentRequest::new(
+            "g1-peer",
+            "board_grep",
+            serde_json::json!({"expr": "refuted"}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["count"], 1);
+        let hit = &entries(&r)[0];
+        assert_eq!(hit["kind"], "FAIL");
+        assert_eq!(hit["worker"], "w1");
+
+        // And the peer can find all failures on the board in one query.
+        let all_fails = state.handle(&AgentRequest::new(
+            "g1-peer2",
+            "board_grep",
+            serde_json::json!({"expr": "FAIL"}),
+        ));
+        assert_eq!(all_fails.result.unwrap()["count"], 1);
+    }
+
+    #[test]
+    fn grep_honours_or_and_and() {
+        let mut state = AgentState::new();
+        bw(&mut state, "FAIL", "w1", "alpha problem");
+        bw(&mut state, "FACT", "w2", "beta result");
+        bw(&mut state, "FACT", "w2", "gamma beta result");
+
+        let mut q = |expr: &str| -> usize {
+            state
+                .handle(&AgentRequest::new(
+                    "g1-q",
+                    "board_grep",
+                    serde_json::json!({"expr": expr}),
+                ))
+                .result
+                .unwrap()["count"]
+                .as_u64()
+                .unwrap() as usize
+        };
+        assert_eq!(q("alpha"), 1);
+        assert_eq!(q("alpha,beta"), 3);
+        assert_eq!(q("beta&result"), 2);
+        assert_eq!(q("beta&gamma"), 1);
+        assert_eq!(q("beta&nothing"), 0);
+        // AND binds tighter than OR.
+        assert_eq!(q("beta&gamma,alpha"), 2);
+    }
+
+    #[test]
+    fn grep_is_case_insensitive_over_the_wire() {
+        let mut state = AgentState::new();
+        bw(&mut state, "FAIL", "w1", "Refuted Route");
+        let r = state.handle(&AgentRequest::new(
+            "g1-case",
+            "board_grep",
+            serde_json::json!({"expr": "refuted"}),
+        ));
+        assert_eq!(r.result.unwrap()["count"], 1);
+    }
+
+    #[test]
+    fn the_board_is_shared_across_models() {
+        // Process-global, not per-model. Entries from different models are
+        // visible to each other, which is what makes it a shared context rather
+        // than a second per-model event queue.
+        let mut state = AgentState::new();
+        let a = model_for(&mut state);
+        let b = model_for(&mut state);
+        bw(&mut state, "OBSERVED", "w1", "about model a");
+        bw(&mut state, "OBSERVED", "w2", "about model b");
+        let _ = (a, b);
+        let r = state
+            .handle(&AgentRequest::new(
+                "g1-shared",
+                "board_read",
+                serde_json::json!({}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(r["count"], 2);
+    }
+
+    #[test]
+    fn the_write_acknowledgement_reports_the_s21_effect_kind() {
+        let mut state = AgentState::new();
+        assert_eq!(bw(&mut state, "OBSERVED", "w", "t")["effect_kind"], "observe");
+        assert_eq!(bw(&mut state, "FACT", "w", "t")["effect_kind"], "observe");
+        assert_eq!(bw(&mut state, "FAIL", "w", "t")["effect_kind"], "observe");
+        assert_eq!(bw(&mut state, "CLAIM", "w", "t")["effect_kind"], "mutate");
+        assert_eq!(
+            bw(&mut state, "PATCH_SUMMARY", "w", "t")["effect_kind"],
+            "mutate"
+        );
+    }
+
+    #[test]
+    fn board_cursors_are_a_single_monotonic_sequence() {
+        // Shares the counter with `events_poll`, so one checkpoint can cover
+        // both streams.
+        let mut state = AgentState::new();
+        for i in 0..4 {
+            let r = bw(&mut state, "OBSERVED", "w", &format!("e{i}"));
+            assert_eq!(r["entry"]["cursor"], i + 1);
+        }
+        assert_eq!(bw(&mut state, "OBSERVED", "w", "e4")["latest_cursor"], 5);
+    }
+
+    #[test]
+    fn a_secret_pasted_into_an_entry_is_redacted_before_it_lands() {
+        let mut state = AgentState::new();
+        let r = bw(
+            &mut state,
+            "FAIL",
+            "w1",
+            "zenodo push rejected; sent api_key=sk-live-abc123",
+        );
+        let text = r["entry"]["text"].as_str().unwrap().to_string();
+        assert!(!text.contains("abc123"), "secret survived redaction: {text}");
+        assert!(text.contains("zenodo push rejected"), "context lost: {text}");
+
+        // And it is not findable by the secret either.
+        let g = state.handle(&AgentRequest::new(
+            "g1-sec",
+            "board_grep",
+            serde_json::json!({"expr": "abc123"}),
+        ));
+        assert_eq!(g.result.unwrap()["count"], 0);
+    }
+
+    #[test]
+    fn ordinary_entries_are_never_redacted() {
+        let mut state = AgentState::new();
+        let msg = "commit 7fa2b6c touched Book/NsComparisonOperator.lean; no sorry";
+        let r = bw(&mut state, "FACT", "w1", msg);
+        assert_eq!(r["entry"]["text"], msg);
+    }
+
+    #[test]
+    fn board_write_rejects_a_missing_or_unknown_kind() {
+        let mut state = AgentState::new();
+        for params in [
+            serde_json::json!({"worker": "w", "text": "t"}),
+            serde_json::json!({"kind": "NONSENSE", "worker": "w", "text": "t"}),
+            serde_json::json!({"kind": 7, "worker": "w", "text": "t"}),
+        ] {
+            let resp = state.handle(&AgentRequest::new("g1-bad", "board_write", params));
+            assert!(!resp.ok);
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn an_unknown_kind_lists_the_valid_ones() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g1-bad2",
+            "board_write",
+            serde_json::json!({"kind": "NONSENSE", "worker": "w", "text": "t"}),
+        ));
+        let diag = resp.error.unwrap();
+        let hints = diag.hints.iter().map(|h| h.suggestion.clone()).collect::<Vec<_>>().join(" ");
+        assert!(hints.contains("PATCH_SUMMARY"), "hint does not list the kinds: {hints:?}");
+    }
+
+    #[test]
+    fn board_write_requires_a_worker_and_non_empty_text() {
+        let mut state = AgentState::new();
+        for params in [
+            serde_json::json!({"kind": "FACT", "text": "t"}),
+            serde_json::json!({"kind": "FACT", "worker": "  ", "text": "t"}),
+            serde_json::json!({"kind": "FACT", "worker": "w"}),
+            serde_json::json!({"kind": "FACT", "worker": "w", "text": "   "}),
+            serde_json::json!({"kind": "FACT", "worker": "w", "text": 42}),
+        ] {
+            let shown = params.to_string();
+            let resp = state.handle(&AgentRequest::new("g1-bad3", "board_write", params));
+            assert!(!resp.ok, "{shown} should be refused");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn board_read_rejects_a_nonsense_limit() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g1-bad4",
+            "board_read",
+            serde_json::json!({"limit": -3}),
+        ));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+    }
+
+    #[test]
+    fn an_empty_grep_expression_reads_the_whole_board() {
+        // Forgiving on purpose: an empty filter should mean "no filter".
+        let mut state = AgentState::new();
+        for i in 0..3 {
+            bw(&mut state, "OBSERVED", "w", &format!("e{i}"));
+        }
+        let r = state.handle(&AgentRequest::new(
+            "g1-empty",
+            "board_grep",
+            serde_json::json!({"expr": ""}),
+        ));
+        assert!(r.ok, "{:?}", r.error);
+        assert_eq!(r.result.unwrap()["count"], 3);
+    }
+
+    #[test]
+    fn a_grep_of_only_separators_is_refused_rather_than_matching_everything() {
+        // Distinct from the empty string: `","` is a malformed query, and
+        // silently returning the whole board would hide the mistake.
+        let mut state = AgentState::new();
+        bw(&mut state, "OBSERVED", "w", "e");
+        let resp = state.handle(&AgentRequest::new(
+            "g1-sep",
+            "board_grep",
+            serde_json::json!({"expr": ",,&&&"}),
+        ));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+    }
+
+    #[test]
+    fn detail_is_stored_and_greppable() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g1-det",
+            "board_write",
+            serde_json::json!({"kind": "PATCH_SUMMARY", "worker": "i1",
+                               "text": "merged the gauge fix",
+                               "detail": "invariants: 41/41 green"}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        // `effect_kind` is a sibling of `entry`, not a field of it: it describes
+        // the write, not the stored entry.
+        assert_eq!(resp.result.unwrap()["effect_kind"], "mutate");
+        let g = state.handle(&AgentRequest::new(
+            "g1-det2",
+            "board_grep",
+            serde_json::json!({"expr": "41/41"}),
+        ));
+        assert_eq!(g.result.unwrap()["count"], 1);
+    }
+
+    #[test]
+    fn the_board_reports_its_bounds_so_a_reader_knows_it_is_a_window() {
+        use unfer_protocol::board::{Board, CAPACITY};
+        let mut b = Board::new();
+        for i in 0..(CAPACITY + 4) {
+            b.write(
+                unfer_protocol::board::BoardKind::Observed,
+                "w",
+                &format!("e{i}"),
+                None,
+            );
+        }
+        // Through the op, the same numbers must be visible — a reader that
+        // cannot tell a short history from a truncated one is misled.
+        let mut state = AgentState::new();
+        assert_eq!(state.board.len(), 0);
+        for i in 0..(CAPACITY + 4) {
+            bw(&mut state, "OBSERVED", "w", &format!("e{i}"));
+        }
+        let r = state
+            .handle(&AgentRequest::new(
+                "g1-bounds",
+                "board_read",
+                serde_json::json!({}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(r["dropped"], 4);
+        assert_eq!(r["retained"], CAPACITY);
+    }
+
+    // ── G3: claims, direct messages, role hand-off ─────────────────────────
+
+    fn claim(state: &mut AgentState, worker: &str, scope: &str) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "g3-c",
+            "agent_claim",
+            serde_json::json!({"worker": worker, "scope": scope}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    fn dm(state: &mut AgentState, from: &str, to: &str, text: &str, prio: i64) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "g3-dm",
+            "agent_dm",
+            serde_json::json!({"from": from, "to": to, "text": text, "priority": prio}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    fn inbox(state: &mut AgentState, worker: &str, consume: bool) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "g3-in",
+            "agent_dm_read",
+            serde_json::json!({"worker": worker, "consume": consume}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    #[test]
+    fn a_free_scope_is_granted() {
+        let mut state = AgentState::new();
+        let r = claim(&mut state, "w1", "unfer/unfer_ffi/src/handles.rs");
+        assert_eq!(r["outcome"], "granted");
+        assert_eq!(r["scope"], "unfer/unfer_ffi/src/handles.rs");
+        assert_eq!(r["live_claims"].as_array().unwrap().len(), 1);
+        assert_eq!(r["conflicts_with"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            r["claim"]["worker"], "w1",
+            "a granted claim reports what was granted"
+        );
+    }
+
+    #[test]
+    fn an_overlapping_claim_reports_the_holder_and_is_not_registered() {
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "unfer/unfer_ffi/src");
+        let r = claim(&mut state, "w2", "unfer/unfer_ffi/src/handles.rs");
+        assert_eq!(r["outcome"], "overlaps");
+        let c = r["conflicts_with"].as_array().unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0]["worker"], "w1");
+        // Only one live claim: two workers must not both believe they own it.
+        assert_eq!(r["live_claims"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn disjoint_claims_do_not_collide() {
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "NS/mainstream");
+        let r = claim(&mut state, "w2", "QG/density");
+        assert_eq!(r["outcome"], "granted");
+        assert_eq!(r["live_claims"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn two_workers_reach_a_resolution_without_duplicate_merged_work() {
+        // The G3 acceptance criterion: a collision happens, both workers learn
+        // about it, they negotiate, and exactly one ends up holding the scope.
+        let mut state = AgentState::new();
+
+        // Both reach for the same file. w2 is told, not silently allowed.
+        let first = claim(&mut state, "w1", "unfer/unfer_ffi/src/handles.rs");
+        assert_eq!(first["outcome"], "granted");
+        let second = claim(&mut state, "w2", "unfer/unfer_ffi/src/handles.rs");
+        assert_eq!(second["outcome"], "overlaps");
+        assert_eq!(second["conflicts_with"][0]["worker"], "w1");
+
+        // w2 negotiates rather than duplicating the work.
+        dm(&mut state, "w2", "w1", "collide on handles.rs — you have it, I will take event_log.rs", 5);
+        let w1_sees = inbox(&mut state, "w1", false);
+        assert_eq!(w1_sees["count"], 1);
+        assert!(
+            w1_sees["messages"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("you have it"),
+            "the negotiation must name the resolution"
+        );
+
+        // w2 moves to a free scope instead of retrying the taken one. Had it
+        // retried the same scope it would collide again — which is the
+        // "duplicate merged work" this loop exists to prevent.
+        let moved = claim(&mut state, "w2", "unfer/unfer_ffi/src/event_log.rs");
+        assert_eq!(moved["outcome"], "granted");
+
+        // Exactly two live claims, one per worker, no duplicates.
+        let live = second["live_claims"].as_array().unwrap();
+        assert_eq!(live.len(), 1);
+        let scopes: Vec<&str> = live.iter().map(|c| c["scope"].as_str().unwrap()).collect();
+        assert_eq!(scopes, vec!["unfer/unfer_ffi/src/handles.rs"]);
+    }
+
+    #[test]
+    fn an_unresolvable_overlap_is_escalatable_and_leaves_one_holder() {
+        // The "escalate to a human" branch: neither worker backs off, and the
+        // invariant that matters still holds — one holder, not two.
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "a/b");
+        claim(&mut state, "w2", "a/b");
+        claim(&mut state, "w3", "a/b");
+        // The board shows all three attempts, so the escalation has evidence.
+        let board = state
+            .handle(&AgentRequest::new(
+                "g3-esc",
+                "board_grep",
+                serde_json::json!({"expr": "CLAIM"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(board["count"], 3);
+        let live = claim(&mut state, "w4", "a/b")["live_claims"].as_array().unwrap().clone();
+        assert_eq!(live.len(), 1, "exactly one holder despite four attempts");
+        assert_eq!(live[0]["worker"], "w1");
+    }
+
+    #[test]
+    fn a_glob_claim_collides_with_a_concrete_one() {
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "docs/*.md");
+        let r = claim(&mut state, "w2", "docs/RUNBOOK.md");
+        assert_eq!(r["outcome"], "overlaps");
+    }
+
+    #[test]
+    fn a_prefix_claim_does_not_collide_with_a_sibling_name() {
+        // `src/foo` must not block `src/foobar`, or one claim silently blocks
+        // every similarly-named file.
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "src/foo");
+        assert_eq!(claim(&mut state, "w2", "src/foobar")["outcome"], "granted");
+    }
+
+    #[test]
+    fn a_message_reaches_only_its_recipient() {
+        let mut state = AgentState::new();
+        dm(&mut state, "w1", "w2", "hello", 0);
+        assert_eq!(inbox(&mut state, "w2", false)["count"], 1);
+        assert_eq!(inbox(&mut state, "w1", false)["count"], 0);
+        assert_eq!(inbox(&mut state, "w3", false)["count"], 0);
+    }
+
+    #[test]
+    fn reading_the_inbox_does_not_consume_unless_asked() {
+        // A worker polls mid-turn; a crash between read and act must not lose it.
+        let mut state = AgentState::new();
+        dm(&mut state, "w1", "w2", "hello", 0);
+        assert_eq!(inbox(&mut state, "w2", false)["count"], 1);
+        assert_eq!(inbox(&mut state, "w2", false)["count"], 1);
+        assert_eq!(inbox(&mut state, "w2", true)["count"], 1);
+        assert_eq!(inbox(&mut state, "w2", false)["count"], 0);
+    }
+
+    #[test]
+    fn an_urgent_message_sorts_above_a_normal_one() {
+        let mut state = AgentState::new();
+        dm(&mut state, "w1", "w2", "normal", 0);
+        dm(&mut state, "w1", "w2", "urgent", 10);
+        let msgs = inbox(&mut state, "w2", false);
+        assert_eq!(msgs["messages"][0]["text"], "urgent");
+    }
+
+    #[test]
+    fn a_dropped_message_is_counted_rather_than_silently_lost() {
+        use unfer_protocol::coop::DM_CAPACITY;
+        let mut state = AgentState::new();
+        for i in 0..(DM_CAPACITY + 3) {
+            dm(&mut state, "w1", "w2", &format!("m{i}"), 0);
+        }
+        let r = inbox(&mut state, "w2", false);
+        assert_eq!(r["count"], DM_CAPACITY);
+        assert_eq!(r["dropped"], 3);
+    }
+
+    #[test]
+    fn a_message_is_auditable_on_the_board() {
+        let mut state = AgentState::new();
+        dm(&mut state, "w1", "w2", "taking a/b", 1);
+        let r = state
+            .handle(&AgentRequest::new(
+                "g3-audit",
+                "board_grep",
+                serde_json::json!({"expr": "dm"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(r["count"], 1, "a negotiation must leave a board trace");
+    }
+
+    #[test]
+    fn a_claim_is_recorded_on_the_board_as_a_claim_kind() {
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "a/b");
+        let r = state
+            .handle(&AgentRequest::new(
+                "g3-kind",
+                "board_grep",
+                serde_json::json!({"expr": "CLAIM"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["entries"][0]["kind"], "CLAIM");
+        assert_eq!(r["entries"][0]["detail"], "a/b", "the scope is the detail");
+    }
+
+    #[test]
+    fn claims_and_board_entries_share_one_cursor_sequence() {
+        let mut state = AgentState::new();
+        let a = claim(&mut state, "w1", "a/1");
+        dm(&mut state, "w1", "w2", "fyi", 0);
+        let b = claim(&mut state, "w2", "a/2");
+        let cursors: Vec<u64> = [a, b]
+            .iter()
+            .map(|c| c["entry"]["cursor"].as_u64().unwrap())
+            .collect();
+        assert_eq!(cursors, vec![1, 3], "the dm occupies cursor 2");
+    }
+
+    #[test]
+    fn a_role_hand_off_is_recorded_and_only_confers_a_role_on_accept() {
+        let mut state = AgentState::new();
+        let asked = state.handle(&AgentRequest::new(
+            "g3-h1",
+            "agent_handoff",
+            serde_json::json!({"by": "w2", "claim_cursor": 1, "role": "reviewer"}),
+        ));
+        assert!(asked.ok, "{:?}", asked.error);
+        // A request is not a role.
+        assert_eq!(asked.result.unwrap()["role_held"], serde_json::Value::Null);
+
+        let took = state.handle(&AgentRequest::new(
+            "g3-h2",
+            "agent_handoff",
+            serde_json::json!({"by": "w2", "claim_cursor": 1, "role": "reviewer", "accept": true}),
+        ));
+        assert_eq!(took.result.unwrap()["role_held"], "Reviewer");
+    }
+
+    #[test]
+    fn a_hand_off_is_visible_in_the_board_history() {
+        let mut state = AgentState::new();
+        state.handle(&AgentRequest::new(
+            "g3-h3",
+            "agent_handoff",
+            serde_json::json!({"by": "w2", "claim_cursor": 1, "role": "integrator", "accept": true}),
+        ));
+        let r = state
+            .handle(&AgentRequest::new(
+                "g3-h4",
+                "board_grep",
+                serde_json::json!({"expr": "integrator"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(r["count"], 1);
+    }
+
+    #[test]
+    fn coop_ops_reject_missing_identifiers() {
+        let mut state = AgentState::new();
+        for (op, params) in [
+            ("agent_claim", serde_json::json!({"scope": "a"})),
+            ("agent_claim", serde_json::json!({"worker": "w"})),
+            ("agent_claim", serde_json::json!({"worker": " ", "scope": "a"})),
+            ("agent_dm", serde_json::json!({"from": "w1", "text": "t"})),
+            ("agent_dm", serde_json::json!({"from": "w1", "to": "w2"})),
+            ("agent_dm", serde_json::json!({"from": "w1", "to": "w2", "text": "  "})),
+            ("agent_handoff", serde_json::json!({"claim_cursor": 1, "role": "reviewer"})),
+            ("agent_handoff", serde_json::json!({"by": "w", "role": "reviewer"})),
+            ("agent_handoff", serde_json::json!({"by": "w", "claim_cursor": 1})),
+            ("agent_handoff", serde_json::json!({"by": "w", "claim_cursor": 1, "role": "wizard"})),
+            ("agent_dm_read", serde_json::json!({})),
+        ] {
+            let resp = state.handle(&AgentRequest::new("g3-bad", op.to_string(), params.clone()));
+            assert!(!resp.ok, "{op} {params} should be refused");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn a_non_integer_priority_is_refused() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g3-prio",
+            "agent_dm",
+            serde_json::json!({"from": "w1", "to": "w2", "text": "t", "priority": "high"}),
+        ));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+    }
+
+    #[test]
+    fn every_coop_op_is_reachable_and_the_census_still_holds() {
+        // Re-run the G1 census: adding six ops must not reintroduce the
+        // advertised-but-unwired drift.
+        let mut state = AgentState::new();
+        let unimplemented = ["exec", "kernel_exec"];
+        for op in VALID_OPS {
+            let resp = state.handle(&AgentRequest::new(
+                "g3-census",
+                *op,
+                serde_json::json!({"model_id": 999_999}),
+            ));
+            if unimplemented.contains(op) {
+                assert!(!resp.ok);
+                continue;
+            }
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|d| d.message.clone())
+                .unwrap_or_default();
+            assert!(
+                !msg.contains("Unknown op"),
+                "advertised op '{op}' has no dispatch arm"
+            );
+        }
     }
 }
