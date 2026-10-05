@@ -601,9 +601,7 @@ impl AgentState {
                 let events: Vec<serde_json::Value> = pending
                     .iter()
                     .take(max)
-                    .map(|ce| {
-                        serde_json::json!({ "cursor": ce.cursor, "event": ce.event })
-                    })
+                    .map(|ce| serde_json::json!({ "cursor": ce.cursor, "event": ce.event }))
                     .collect();
 
                 AgentResponse::ok(
@@ -633,7 +631,9 @@ impl AgentState {
                     None => {
                         return AgentResponse::err(
                             &req.id,
-                            bad_json_diag("missing 'kind' field (OBSERVED/FACT/FAIL/CLAIM/PATCH_SUMMARY)"),
+                            bad_json_diag(
+                                "missing 'kind' field (OBSERVED/FACT/FAIL/CLAIM/PATCH_SUMMARY)",
+                            ),
                         );
                     }
                 };
@@ -681,10 +681,7 @@ impl AgentState {
                     }
                 };
                 if text.trim().is_empty() {
-                    return AgentResponse::err(
-                        &req.id,
-                        bad_json_diag("'text' must not be empty"),
-                    );
+                    return AgentResponse::err(&req.id, bad_json_diag("'text' must not be empty"));
                 }
                 let detail = req.params.get("detail").and_then(|v| v.as_str());
                 let entry = self.board.write(kind, &worker, text, detail);
@@ -740,7 +737,11 @@ impl AgentState {
             }
             // G1: `,` is OR, `&` is AND, case-insensitive; AND binds tighter.
             "board_grep" => {
-                let expr = req.params.get("expr").and_then(|v| v.as_str()).unwrap_or("");
+                let expr = req
+                    .params
+                    .get("expr")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let parsed = unfer_protocol::board::GrepExpr::parse(expr);
                 if parsed.is_empty_selection() && !expr.trim().is_empty() {
                     return AgentResponse::err(
@@ -1037,13 +1038,7 @@ impl AgentState {
                     .map(str::to_string);
                 // Reserve from the board, do not predict: see Board::reserve_cursor.
                 let cursor = self.board.reserve_cursor();
-                let run = self.runs.record(
-                    &source,
-                    verdict,
-                    cursor,
-                    digest,
-                    summary,
-                );
+                let run = self.runs.record(&source, verdict, cursor, digest, summary);
                 AgentResponse::ok(
                     &req.id,
                     serde_json::json!({"run": run, "runs_retained": self.runs.len()}),
@@ -1150,48 +1145,46 @@ impl AgentState {
                     }
                 };
                 // An optional custom schedule; the default is the project's.
-                let schedule: Vec<unfer_protocol::nudge::Checkpoint> = match req
-                    .params
-                    .get("checkpoints")
-                {
-                    None | Some(serde_json::Value::Null) => {
-                        unfer_protocol::nudge::DEFAULT_CHECKPOINTS.to_vec()
-                    }
-                    Some(serde_json::Value::Array(a)) => {
-                        let mut out = Vec::with_capacity(a.len());
-                        for c in a {
-                            let at = c.get("at_secs_remaining").and_then(|v| v.as_u64());
-                            let kind = c
-                                .get("kind")
-                                .and_then(|v| v.as_str())
-                                .and_then(unfer_protocol::nudge::NudgeKind::parse);
-                            match (at, kind) {
-                                (Some(at_secs_remaining), Some(kind)) => {
-                                    out.push(unfer_protocol::nudge::Checkpoint {
-                                        at_secs_remaining,
-                                        kind,
-                                    });
-                                }
-                                _ => {
-                                    return AgentResponse::err(
-                                        &req.id,
-                                        bad_json_diag(
-                                            "each checkpoint needs an integer \
+                let schedule: Vec<unfer_protocol::nudge::Checkpoint> =
+                    match req.params.get("checkpoints") {
+                        None | Some(serde_json::Value::Null) => {
+                            unfer_protocol::nudge::DEFAULT_CHECKPOINTS.to_vec()
+                        }
+                        Some(serde_json::Value::Array(a)) => {
+                            let mut out = Vec::with_capacity(a.len());
+                            for c in a {
+                                let at = c.get("at_secs_remaining").and_then(|v| v.as_u64());
+                                let kind = c
+                                    .get("kind")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(unfer_protocol::nudge::NudgeKind::parse);
+                                match (at, kind) {
+                                    (Some(at_secs_remaining), Some(kind)) => {
+                                        out.push(unfer_protocol::nudge::Checkpoint {
+                                            at_secs_remaining,
+                                            kind,
+                                        });
+                                    }
+                                    _ => {
+                                        return AgentResponse::err(
+                                            &req.id,
+                                            bad_json_diag(
+                                                "each checkpoint needs an integer \
                                              'at_secs_remaining' and a known 'kind'",
-                                        ),
-                                    );
+                                            ),
+                                        );
+                                    }
                                 }
                             }
+                            out
                         }
-                        out
-                    }
-                    Some(_) => {
-                        return AgentResponse::err(
-                            &req.id,
-                            bad_json_diag("'checkpoints' must be an array"),
-                        );
-                    }
-                };
+                        Some(_) => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'checkpoints' must be an array"),
+                            );
+                        }
+                    };
 
                 let fired = unfer_protocol::nudge::due(remaining, &schedule);
                 let mut delivered = Vec::new();
@@ -2048,10 +2041,7 @@ impl AgentState {
             // allowlist. That is a security-sensitive feature with its own review,
             // not a missing `match` arm, so it is tracked as a work order rather
             // than done as an afterthought here.
-            "exec" | "kernel_exec" => AgentResponse::err(
-                &req.id,
-                unimplemented_op_diag(&req.op),
-            ),
+            "exec" | "kernel_exec" => AgentResponse::err(&req.id, unimplemented_op_diag(&req.op)),
             _ => AgentResponse::err(&req.id, unknown_op_diag(&req.op)),
         }
     }
@@ -3154,7 +3144,10 @@ mod tests {
         let mut state = AgentState::new();
         let model_id = model_for(&mut state);
         push_n(&mut state, model_id, 2);
-        let checkpoint = cursors(&poll(&mut state, model_id, 0)).last().copied().unwrap();
+        let checkpoint = cursors(&poll(&mut state, model_id, 0))
+            .last()
+            .copied()
+            .unwrap();
         assert_eq!(checkpoint, 2);
 
         // Consumer restarts and re-reads from its checkpoint. Nothing between the
@@ -3210,7 +3203,10 @@ mod tests {
 
         let behind = cursors(&poll(&mut state, model_id, 0));
         let r = poll(&mut state, model_id, 0);
-        assert_eq!(r["gap"], true, "a stale cursor must be reported, not hidden");
+        assert_eq!(
+            r["gap"], true,
+            "a stale cursor must be reported, not hidden"
+        );
         assert_eq!(
             r["dropped_total"].as_u64().unwrap(),
             10,
@@ -3229,7 +3225,10 @@ mod tests {
         let mut state = AgentState::new();
         let model_id = model_for(&mut state);
         push_n(&mut state, model_id, 3);
-        let last = cursors(&poll(&mut state, model_id, 0)).last().copied().unwrap();
+        let last = cursors(&poll(&mut state, model_id, 0))
+            .last()
+            .copied()
+            .unwrap();
 
         let r = poll(&mut state, model_id, last);
         assert_eq!(r["gap"], false);
@@ -3333,7 +3332,11 @@ mod tests {
     fn events_poll_rejects_a_negative_or_non_integer_cursor() {
         let mut state = AgentState::new();
         let model_id = model_for(&mut state);
-        for bad in [serde_json::json!(-1), serde_json::json!("3"), serde_json::json!(1.5)] {
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!("3"),
+            serde_json::json!(1.5),
+        ] {
             let resp = state.handle(&AgentRequest::new(
                 "c1-badcur",
                 "events_poll",
@@ -3497,7 +3500,10 @@ mod tests {
         let es = entries(&r);
         assert_eq!(es.len(), 5);
         let texts: Vec<&str> = es.iter().map(|e| e["text"].as_str().unwrap()).collect();
-        assert_eq!(texts, vec!["entry 0", "entry 1", "entry 2", "entry 3", "entry 4"]);
+        assert_eq!(
+            texts,
+            vec!["entry 0", "entry 1", "entry 2", "entry 3", "entry 4"]
+        );
     }
 
     #[test]
@@ -3527,7 +3533,12 @@ mod tests {
             "w1",
             "the square-comparison route for N_NS is refuted (not_nsEnergy_surjective)",
         );
-        bw(&mut state, "FACT", "w1", "the Leray energy N_E = 1 + ||u||^2 is the valid comparison");
+        bw(
+            &mut state,
+            "FACT",
+            "w1",
+            "the Leray energy N_E = 1 + ||u||^2 is the valid comparison",
+        );
 
         let resp = state.handle(&AgentRequest::new(
             "g1-peer",
@@ -3615,7 +3626,10 @@ mod tests {
     #[test]
     fn the_write_acknowledgement_reports_the_s21_effect_kind() {
         let mut state = AgentState::new();
-        assert_eq!(bw(&mut state, "OBSERVED", "w", "t")["effect_kind"], "observe");
+        assert_eq!(
+            bw(&mut state, "OBSERVED", "w", "t")["effect_kind"],
+            "observe"
+        );
         assert_eq!(bw(&mut state, "FACT", "w", "t")["effect_kind"], "observe");
         assert_eq!(bw(&mut state, "FAIL", "w", "t")["effect_kind"], "observe");
         assert_eq!(bw(&mut state, "CLAIM", "w", "t")["effect_kind"], "mutate");
@@ -3647,8 +3661,14 @@ mod tests {
             "zenodo push rejected; sent api_key=sk-live-abc123",
         );
         let text = r["entry"]["text"].as_str().unwrap().to_string();
-        assert!(!text.contains("abc123"), "secret survived redaction: {text}");
-        assert!(text.contains("zenodo push rejected"), "context lost: {text}");
+        assert!(
+            !text.contains("abc123"),
+            "secret survived redaction: {text}"
+        );
+        assert!(
+            text.contains("zenodo push rejected"),
+            "context lost: {text}"
+        );
 
         // And it is not findable by the secret either.
         let g = state.handle(&AgentRequest::new(
@@ -3690,8 +3710,16 @@ mod tests {
             serde_json::json!({"kind": "NONSENSE", "worker": "w", "text": "t"}),
         ));
         let diag = resp.error.unwrap();
-        let hints = diag.hints.iter().map(|h| h.suggestion.clone()).collect::<Vec<_>>().join(" ");
-        assert!(hints.contains("PATCH_SUMMARY"), "hint does not list the kinds: {hints:?}");
+        let hints = diag
+            .hints
+            .iter()
+            .map(|h| h.suggestion.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            hints.contains("PATCH_SUMMARY"),
+            "hint does not list the kinds: {hints:?}"
+        );
     }
 
     #[test]
@@ -3819,7 +3847,13 @@ mod tests {
         resp.result.unwrap()
     }
 
-    fn dm(state: &mut AgentState, from: &str, to: &str, text: &str, prio: i64) -> serde_json::Value {
+    fn dm(
+        state: &mut AgentState,
+        from: &str,
+        to: &str,
+        text: &str,
+        prio: i64,
+    ) -> serde_json::Value {
         let resp = state.handle(&AgentRequest::new(
             "g3-dm",
             "agent_dm",
@@ -3889,7 +3923,13 @@ mod tests {
         assert_eq!(second["conflicts_with"][0]["worker"], "w1");
 
         // w2 negotiates rather than duplicating the work.
-        dm(&mut state, "w2", "w1", "collide on handles.rs — you have it, I will take event_log.rs", 5);
+        dm(
+            &mut state,
+            "w2",
+            "w1",
+            "collide on handles.rs — you have it, I will take event_log.rs",
+            5,
+        );
         let w1_sees = inbox(&mut state, "w1", false);
         assert_eq!(w1_sees["count"], 1);
         assert!(
@@ -3931,7 +3971,10 @@ mod tests {
             .result
             .unwrap();
         assert_eq!(board["count"], 3);
-        let live = claim(&mut state, "w4", "a/b")["live_claims"].as_array().unwrap().clone();
+        let live = claim(&mut state, "w4", "a/b")["live_claims"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(live.len(), 1, "exactly one holder despite four attempts");
         assert_eq!(live[0]["worker"], "w1");
     }
@@ -4084,14 +4127,32 @@ mod tests {
         for (op, params) in [
             ("agent_claim", serde_json::json!({"scope": "a"})),
             ("agent_claim", serde_json::json!({"worker": "w"})),
-            ("agent_claim", serde_json::json!({"worker": " ", "scope": "a"})),
+            (
+                "agent_claim",
+                serde_json::json!({"worker": " ", "scope": "a"}),
+            ),
             ("agent_dm", serde_json::json!({"from": "w1", "text": "t"})),
             ("agent_dm", serde_json::json!({"from": "w1", "to": "w2"})),
-            ("agent_dm", serde_json::json!({"from": "w1", "to": "w2", "text": "  "})),
-            ("agent_handoff", serde_json::json!({"claim_cursor": 1, "role": "reviewer"})),
-            ("agent_handoff", serde_json::json!({"by": "w", "role": "reviewer"})),
-            ("agent_handoff", serde_json::json!({"by": "w", "claim_cursor": 1})),
-            ("agent_handoff", serde_json::json!({"by": "w", "claim_cursor": 1, "role": "wizard"})),
+            (
+                "agent_dm",
+                serde_json::json!({"from": "w1", "to": "w2", "text": "  "}),
+            ),
+            (
+                "agent_handoff",
+                serde_json::json!({"claim_cursor": 1, "role": "reviewer"}),
+            ),
+            (
+                "agent_handoff",
+                serde_json::json!({"by": "w", "role": "reviewer"}),
+            ),
+            (
+                "agent_handoff",
+                serde_json::json!({"by": "w", "claim_cursor": 1}),
+            ),
+            (
+                "agent_handoff",
+                serde_json::json!({"by": "w", "claim_cursor": 1, "role": "wizard"}),
+            ),
             ("agent_dm_read", serde_json::json!({})),
         ] {
             let resp = state.handle(&AgentRequest::new("g3-bad", op.to_string(), params.clone()));
@@ -4168,7 +4229,13 @@ mod tests {
         resp.result.unwrap()["entry"]["cursor"].as_u64().unwrap()
     }
 
-    fn submit(state: &mut AgentState, worker: &str, files: &[&str], idea: &str, run_id: u64) -> serde_json::Value {
+    fn submit(
+        state: &mut AgentState,
+        worker: &str,
+        files: &[&str],
+        idea: &str,
+        run_id: u64,
+    ) -> serde_json::Value {
         let resp = state.handle(&AgentRequest::new(
             "g4-sub",
             "patch_submit",
@@ -4185,7 +4252,13 @@ mod tests {
         let mut state = AgentState::new();
         touch(&mut state, "w1");
         let run = record_run(&mut state, "verify-invariants", "pass");
-        let r = submit(&mut state, "w1", &["unfer_protocol/src/board.rs"], "add the board", run);
+        let r = submit(
+            &mut state,
+            "w1",
+            &["unfer_protocol/src/board.rs"],
+            "add the board",
+            run,
+        );
         assert_eq!(r["accepted"], true, "{:?}", r["reason"]);
         assert_eq!(r["run"]["id"], run);
         assert_eq!(r["run"]["verdict"], "pass");
@@ -4243,7 +4316,10 @@ mod tests {
         let run = resp.result.unwrap();
         assert_eq!(run["run"]["verdict"], "unknown");
         let id = run["run"]["id"].as_u64().unwrap();
-        assert_eq!(submit(&mut state, "w1", &["a.rs"], "fix", id)["accepted"], false);
+        assert_eq!(
+            submit(&mut state, "w1", &["a.rs"], "fix", id)["accepted"],
+            false
+        );
     }
 
     #[test]
@@ -4269,10 +4345,16 @@ mod tests {
         touch(&mut state, "w1");
         let stale = record_run(&mut state, "verify-invariants", "pass");
         touch(&mut state, "w1");
-        assert_eq!(submit(&mut state, "w1", &["a.rs"], "fix", stale)["accepted"], false);
+        assert_eq!(
+            submit(&mut state, "w1", &["a.rs"], "fix", stale)["accepted"],
+            false
+        );
 
         let fresh = record_run(&mut state, "verify-invariants", "pass");
-        assert_eq!(submit(&mut state, "w1", &["a.rs"], "fix", fresh)["accepted"], true);
+        assert_eq!(
+            submit(&mut state, "w1", &["a.rs"], "fix", fresh)["accepted"],
+            true
+        );
     }
 
     #[test]
@@ -4286,8 +4368,14 @@ mod tests {
         touch(&mut state, "w2");
         let w2_run = record_run(&mut state, "verify-invariants", "pass");
 
-        assert_eq!(submit(&mut state, "w2", &["b.rs"], "w2 work", w2_run)["accepted"], true);
-        assert_eq!(submit(&mut state, "w1", &["a.rs"], "w1 work", w1_run)["accepted"], false);
+        assert_eq!(
+            submit(&mut state, "w2", &["b.rs"], "w2 work", w2_run)["accepted"],
+            true
+        );
+        assert_eq!(
+            submit(&mut state, "w1", &["a.rs"], "w1 work", w1_run)["accepted"],
+            false
+        );
     }
 
     #[test]
@@ -4332,7 +4420,10 @@ mod tests {
         let mut state = AgentState::new();
         touch(&mut state, "w1");
         let run = record_run(&mut state, "verify-invariants", "pass");
-        let files = vec!["unfer_protocol/src/board.rs", "unfer_protocol/src/evidence.rs"];
+        let files = vec![
+            "unfer_protocol/src/board.rs",
+            "unfer_protocol/src/evidence.rs",
+        ];
         let r = submit(&mut state, "w1", &files, "add evidence checking", run);
         assert_eq!(r["accepted"], true);
         let detail: serde_json::Value =
@@ -4347,8 +4438,14 @@ mod tests {
         let mut state = AgentState::new();
         touch(&mut state, "w1");
         let run = record_run(&mut state, "verify-invariants", "pass");
-        assert_eq!(submit(&mut state, "w1", &[], "fix", run)["refusal"]["error"], "no_files");
-        assert_eq!(submit(&mut state, "w1", &["a.rs"], "  ", run)["refusal"]["error"], "no_idea");
+        assert_eq!(
+            submit(&mut state, "w1", &[], "fix", run)["refusal"]["error"],
+            "no_files"
+        );
+        assert_eq!(
+            submit(&mut state, "w1", &["a.rs"], "  ", run)["refusal"]["error"],
+            "no_idea"
+        );
     }
 
     #[test]
@@ -4394,13 +4491,34 @@ mod tests {
         let mut state = AgentState::new();
         for (op, params) in [
             ("gate_record", serde_json::json!({"verdict": "pass"})),
-            ("gate_record", serde_json::json!({"source": "  ", "verdict": "pass"})),
-            ("patch_submit", serde_json::json!({"files": [], "idea": "i", "run_id": 1})),
-            ("patch_submit", serde_json::json!({"worker": "w", "idea": "i", "run_id": 1})),
-            ("patch_submit", serde_json::json!({"worker": "w", "files": "a.rs", "idea": "i", "run_id": 1})),
-            ("patch_submit", serde_json::json!({"worker": "w", "files": [], "run_id": 1})),
-            ("patch_submit", serde_json::json!({"worker": "w", "files": [], "idea": "i"})),
-            ("patch_submit", serde_json::json!({"worker": "w", "files": [], "idea": "i", "run_id": "one"})),
+            (
+                "gate_record",
+                serde_json::json!({"source": "  ", "verdict": "pass"}),
+            ),
+            (
+                "patch_submit",
+                serde_json::json!({"files": [], "idea": "i", "run_id": 1}),
+            ),
+            (
+                "patch_submit",
+                serde_json::json!({"worker": "w", "idea": "i", "run_id": 1}),
+            ),
+            (
+                "patch_submit",
+                serde_json::json!({"worker": "w", "files": "a.rs", "idea": "i", "run_id": 1}),
+            ),
+            (
+                "patch_submit",
+                serde_json::json!({"worker": "w", "files": [], "run_id": 1}),
+            ),
+            (
+                "patch_submit",
+                serde_json::json!({"worker": "w", "files": [], "idea": "i"}),
+            ),
+            (
+                "patch_submit",
+                serde_json::json!({"worker": "w", "files": [], "idea": "i", "run_id": "one"}),
+            ),
         ] {
             let shown = params.to_string();
             let resp = state.handle(&AgentRequest::new("g4-bad", op.to_string(), params.clone()));
@@ -4423,8 +4541,15 @@ mod tests {
                 assert!(!resp.ok);
                 continue;
             }
-            let msg = resp.error.as_ref().map(|d| d.message.clone()).unwrap_or_default();
-            assert!(!msg.contains("Unknown op"), "advertised op '{op}' has no dispatch arm");
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|d| d.message.clone())
+                .unwrap_or_default();
+            assert!(
+                !msg.contains("Unknown op"),
+                "advertised op '{op}' has no dispatch arm"
+            );
         }
     }
 
@@ -4519,10 +4644,12 @@ mod tests {
         let mut state = AgentState::new();
         let r = nudge(&mut state, "w1", 4 * 60);
         assert_eq!(r["nudges"][0]["remaining_secs"], 240);
-        assert!(r["nudges"][0]["entry"]["detail"]
-            .as_str()
-            .unwrap()
-            .contains("240s remaining"));
+        assert!(
+            r["nudges"][0]["entry"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("240s remaining")
+        );
     }
 
     #[test]
@@ -4619,8 +4746,15 @@ mod tests {
                 assert!(!resp.ok);
                 continue;
             }
-            let msg = resp.error.as_ref().map(|d| d.message.clone()).unwrap_or_default();
-            assert!(!msg.contains("Unknown op"), "advertised op '{op}' has no dispatch arm");
+            let msg = resp
+                .error
+                .as_ref()
+                .map(|d| d.message.clone())
+                .unwrap_or_default();
+            assert!(
+                !msg.contains("Unknown op"),
+                "advertised op '{op}' has no dispatch arm"
+            );
         }
     }
 }

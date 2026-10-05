@@ -524,7 +524,9 @@ mod tests {
 // loop's last step). Blocking is the operator's call, not this function's.
 
 /// A block range in byte offsets, as `[start, end)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct BlockRange {
     pub start: usize,
     pub end: usize,
@@ -958,10 +960,7 @@ mod conflict_tests {
         let mut t = ConflictTracker::new("w2");
         t.local_edit(vec![rng(0, 10)], vec![]);
         let p = packet(1, 2, vec![rng(0, 10)]);
-        assert!(
-            t.classify(&p).is_clean(),
-            "the peer already had this block"
-        );
+        assert!(t.classify(&p).is_clean(), "the peer already had this block");
     }
 
     #[test]
@@ -979,11 +978,18 @@ mod conflict_tests {
     fn a_conflict_record_explains_itself() {
         let mut t = ConflictTracker::new("w2");
         t.local_edit(vec![rng(0, 10)], vec![]);
-        let c = t.classify(&packet(0, 2, vec![rng(5, 15)])).conflict().unwrap().clone();
+        let c = t
+            .classify(&packet(0, 2, vec![rng(5, 15)]))
+            .conflict()
+            .unwrap()
+            .clone();
         let s = c.explain();
         assert!(s.contains("w2"), "{s}");
         assert!(s.contains("re-check"), "it should say what to do: {s}");
-        assert!(s.contains("merged"), "it should be clear the edits were kept: {s}");
+        assert!(
+            s.contains("merged"),
+            "it should be clear the edits were kept: {s}"
+        );
         assert!(s.len() > 80, "too terse to act on: {s}");
     }
 

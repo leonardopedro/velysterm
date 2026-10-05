@@ -280,6 +280,7 @@ pub enum DeliveryError {
 }
 
 /// Tracks the mechanical side of one worker's loop.
+#[derive(Debug)]
 pub struct LoopState {
     pub step: Step,
     /// Backtracks used at the current step, against that step's budget.
@@ -425,11 +426,7 @@ impl LoopState {
     }
 
     /// Advance the virtual clock and return any deadline nudges now due.
-    pub fn tick(
-        &mut self,
-        remaining_secs: u64,
-        checkpoints: &[Checkpoint],
-    ) -> Vec<NudgeKind> {
+    pub fn tick(&mut self, remaining_secs: u64, checkpoints: &[Checkpoint]) -> Vec<NudgeKind> {
         self.minutes_elapsed += 1;
         nudge::due(remaining_secs, checkpoints)
             .into_iter()
@@ -560,7 +557,10 @@ mod tests {
         s.step = Step::Claim;
         let e = s.backtrack().expect_err("the budget must run out");
         assert!(e.contains("exhausted"), "{e}");
-        assert!(e.contains("escalate"), "the error should say what to do: {e}");
+        assert!(
+            e.contains("escalate"),
+            "the error should say what to do: {e}"
+        );
     }
 
     #[test]
@@ -588,10 +588,16 @@ mod tests {
         // A template that drifts from the op registry is worse than none: the
         // worker follows the prompt.
         let expect: &[(Step, &[&str])] = &[
-            (Step::Gather, &["board_read", "agent_dm_read", "board_grep", "FAIL"]),
+            (
+                Step::Gather,
+                &["board_read", "agent_dm_read", "board_grep", "FAIL"],
+            ),
             (Step::Claim, &["agent_claim", "conflicts_with", "agent_dm"]),
             (Step::Act, &["OBSERVED", "FACT", "FAIL", "claim"]),
-            (Step::Verify, &["gate_record", "patch_submit", "stale", "unknown_run"]),
+            (
+                Step::Verify,
+                &["gate_record", "patch_submit", "stale", "unknown_run"],
+            ),
             (Step::Merge, &["agent_handoff", "accept"]),
         ];
         for (step, needles) in expect {
@@ -648,7 +654,10 @@ mod tests {
         ]);
         let mut s = LoopState::new();
         let got = s.deliver_all(&mut d, &policy()).expect("delivered");
-        assert_eq!(got.first().map(String::as_str), Some("w2 is editing your file"));
+        assert_eq!(
+            got.first().map(String::as_str),
+            Some("w2 is editing your file")
+        );
         assert_eq!(got.last().map(String::as_str), Some("some background"));
     }
 
@@ -681,16 +690,21 @@ mod tests {
         // "nothing to report" would proceed alone.
         let mut d = QueueDeliverer::new(vec![Delivery::urgent("u1", "collision")]).failing("u1", 2);
         let mut s = LoopState::new();
-        let got = s.deliver_all(&mut d, &policy()).expect("retries should succeed");
+        let got = s
+            .deliver_all(&mut d, &policy())
+            .expect("retries should succeed");
         assert_eq!(got, vec!["collision"]);
         assert!(d.attempts >= 3, "it should have tried more than once");
     }
 
     #[test]
     fn a_permanent_failure_is_reported_rather_than_silently_dropped() {
-        let mut d = QueueDeliverer::new(vec![Delivery::urgent("u1", "collision")]).failing("u1", 99);
+        let mut d =
+            QueueDeliverer::new(vec![Delivery::urgent("u1", "collision")]).failing("u1", 99);
         let mut s = LoopState::new();
-        let e = s.deliver_all(&mut d, &policy()).expect_err("must not report success");
+        let e = s
+            .deliver_all(&mut d, &policy())
+            .expect_err("must not report success");
         match e {
             DeliveryError::Exhausted { id, attempts, .. } => {
                 assert_eq!(id, "u1");
@@ -885,7 +899,9 @@ mod three_worker_tests {
         fn submit(&mut self, who: usize, files: &[&str], idea: &str, run_id: u64) -> bool {
             let worker = self.workers[who].id.clone();
             let files: Vec<String> = files.iter().map(|s| s.to_string()).collect();
-            evidence::submit(&mut self.board, &self.runs, &worker, &files, idea, run_id).1.is_ok()
+            evidence::submit(&mut self.board, &self.runs, &worker, &files, idea, run_id)
+                .1
+                .is_ok()
         }
 
         fn step(&self, who: usize) -> Step {
@@ -938,7 +954,12 @@ mod three_worker_tests {
         assert_eq!(moved, "granted", "the resolution must actually free it");
 
         // Exactly one live claim per worker: no duplicated work.
-        let live: Vec<&str> = org.coop.claims().iter().map(|c| c.worker.as_str()).collect();
+        let live: Vec<&str> = org
+            .coop
+            .claims()
+            .iter()
+            .map(|c| c.worker.as_str())
+            .collect();
         assert_eq!(live.len(), 3, "one scope each: {live:?}");
         let mut sorted = live.clone();
         sorted.sort_unstable();
@@ -1003,7 +1024,11 @@ mod three_worker_tests {
         let claims = org
             .board
             .grep(&unfer_protocol::board::GrepExpr::parse("CLAIM"));
-        assert_eq!(claims.len(), 5, "every claim attempt is on the record: 3 + 2 collisions");
+        assert_eq!(
+            claims.len(),
+            5,
+            "every claim attempt is on the record: 3 + 2 collisions"
+        );
         let summaries = org
             .board
             .grep(&unfer_protocol::board::GrepExpr::parse("PATCH_SUMMARY"));
@@ -1011,7 +1036,9 @@ mod three_worker_tests {
         // accepted after re-running. The refused one is on the record too.
         assert_eq!(summaries.len(), 3);
         // The negotiation is visible.
-        let dms = org.board.grep(&unfer_protocol::board::GrepExpr::parse("dm "));
+        let dms = org
+            .board
+            .grep(&unfer_protocol::board::GrepExpr::parse("dm "));
         assert_eq!(dms.len(), 1);
     }
 
