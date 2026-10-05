@@ -200,6 +200,9 @@ struct AgentState {
     /// G7: the hand-off log, so `role_over` can answer "is this worker
     /// reviewing claim N" without re-reading the board.
     handoffs: Vec<unfer_protocol::coop::Handoff>,
+    /// G4: recorded gate runs, so a patch summary cites a run that happened
+    /// rather than pasted output that cannot be checked.
+    runs: unfer_protocol::evidence::GateRuns,
 }
 
 impl AgentState {
@@ -224,6 +227,7 @@ impl AgentState {
             board: unfer_protocol::board::Board::new(),
             coop: unfer_protocol::coop::Coop::new(),
             handoffs: Vec::new(),
+            runs: unfer_protocol::evidence::GateRuns::new(),
         }
     }
 
@@ -980,6 +984,137 @@ impl AgentState {
                         "claim_cursor": claim_cursor,
                     }),
                 )
+            }
+            // G4: record a run of a gate that already exists.
+            //
+            // This does not run anything -- `verify-invariants`, the golden
+            // manifest, a test suite are all invoked by whoever holds the
+            // workspace. What it does is make the *result* a thing the system
+            // knows about, so a later patch summary can cite it instead of
+            // pasting text that nobody can check.
+            //
+            // The cursor is taken from the board rather than supplied, because a
+            // caller who could choose it could backdate evidence and defeat the
+            // staleness check that is the entire point.
+            "gate_record" => {
+                let source = match req.params.get("source").and_then(|v| v.as_str()) {
+                    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'source' field"),
+                        );
+                    }
+                };
+                let verdict = match req
+                    .params
+                    .get("verdict")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("pass") => unfer_protocol::evidence::Verdict::Pass,
+                    Some("fail") => unfer_protocol::evidence::Verdict::Fail,
+                    // Defaulting an unrecognised verdict to `unknown` rather than
+                    // to `pass` is the point: an unreadable verdict must not be
+                    // able to authorise a merge.
+                    _ => unfer_protocol::evidence::Verdict::Unknown,
+                };
+                let digest = req
+                    .params
+                    .get("digest")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let summary = req
+                    .params
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                // Reserve from the board, do not predict: see Board::reserve_cursor.
+                let cursor = self.board.reserve_cursor();
+                let run = self.runs.record(
+                    &source,
+                    verdict,
+                    cursor,
+                    digest,
+                    summary,
+                );
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({"run": run, "runs_retained": self.runs.len()}),
+                )
+            }
+            // G4: submit a patch summary, citing a recorded gate run.
+            //
+            // The board entry is written whether or not the evidence checks out.
+            // A refused summary is part of the history: a reader later must be
+            // able to see that a merge was attempted and why it did not happen,
+            // rather than seeing nothing at all.
+            "patch_submit" => {
+                let worker = match req.params.get("worker").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'worker' field"),
+                        );
+                    }
+                };
+                let files: Vec<String> = match req.params.get("files") {
+                    Some(serde_json::Value::Array(a)) => a
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-array 'files' field"),
+                        );
+                    }
+                };
+                let idea = match req.params.get("idea").and_then(|v| v.as_str()) {
+                    Some(i) => i.to_string(),
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-string 'idea' field"),
+                        );
+                    }
+                };
+                let run_id = match req.params.get("run_id").and_then(|v| v.as_u64()) {
+                    Some(r) => r,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-integer 'run_id' field"),
+                        );
+                    }
+                };
+                let (entry, verdict) = unfer_protocol::evidence::submit(
+                    &mut self.board,
+                    &self.runs,
+                    &worker,
+                    &files,
+                    &idea,
+                    run_id,
+                );
+                let mut resp = serde_json::json!({
+                    "entry": entry,
+                    "accepted": verdict.is_ok(),
+                });
+                match &verdict {
+                    Ok(run) => {
+                        resp["run"] = serde_json::to_value(run).unwrap_or(serde_json::Value::Null);
+                    }
+                    Err(e) => {
+                        // A structured refusal, so a caller can branch on the
+                        // reason rather than parsing prose.
+                        resp["refusal"] =
+                            serde_json::to_value(e).unwrap_or(serde_json::Value::Null);
+                        resp["reason"] = serde_json::Value::String(e.explain());
+                    }
+                }
+                AgentResponse::ok(&req.id, resp)
             }
             "save_session" => {
                 let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
@@ -3894,6 +4029,294 @@ mod tests {
                 !msg.contains("Unknown op"),
                 "advertised op '{op}' has no dispatch arm"
             );
+        }
+    }
+
+    // ── G4: verify-before-merge ────────────────────────────────────────────
+    //
+    // The acceptance criterion is that a merge with hand-written evidence is
+    // refused. "Hand-written" is enforced structurally: evidence is a *reference
+    // to a recorded run*, so a summary that cites nothing, or cites an id this
+    // system never issued, cannot be made to pass by writing convincing prose.
+
+    fn record_run(state: &mut AgentState, source: &str, verdict: &str) -> u64 {
+        let resp = state.handle(&AgentRequest::new(
+            "g4-rec",
+            "gate_record",
+            serde_json::json!({"source": source, "verdict": verdict}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()["run"]["id"].as_u64().unwrap()
+    }
+
+    /// Record a change, returning its cursor so ordering can be asserted.
+    fn touch(state: &mut AgentState, worker: &str) -> u64 {
+        let resp = state.handle(&AgentRequest::new(
+            "g4-touch",
+            "board_write",
+            serde_json::json!({"kind": "FACT", "worker": worker, "text": "changed a file"}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()["entry"]["cursor"].as_u64().unwrap()
+    }
+
+    fn submit(state: &mut AgentState, worker: &str, files: &[&str], idea: &str, run_id: u64) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "g4-sub",
+            "patch_submit",
+            serde_json::json!({
+                "worker": worker, "files": files, "idea": idea, "run_id": run_id
+            }),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    #[test]
+    fn a_patch_citing_a_fresh_green_run_is_accepted() {
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let run = record_run(&mut state, "verify-invariants", "pass");
+        let r = submit(&mut state, "w1", &["unfer_protocol/src/board.rs"], "add the board", run);
+        assert_eq!(r["accepted"], true, "{:?}", r["reason"]);
+        assert_eq!(r["run"]["id"], run);
+        assert_eq!(r["run"]["verdict"], "pass");
+    }
+
+    #[test]
+    fn a_hand_written_summary_citing_no_run_is_refused() {
+        // The literal acceptance criterion: prose in place of evidence.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let r = submit(&mut state, "w1", &["a.rs"], "trust me, the tests pass", 0);
+        assert_eq!(r["accepted"], false);
+        assert_eq!(r["refusal"]["error"], "unknown_run");
+        assert!(
+            r["reason"].as_str().unwrap().contains("never recorded"),
+            "the reason must say the run does not exist: {:?}",
+            r["reason"]
+        );
+    }
+
+    #[test]
+    fn a_cited_run_that_was_never_recorded_is_refused() {
+        // The trivial forgery: an id that looks plausible but was never issued.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let real = record_run(&mut state, "verify-invariants", "pass");
+        let r = submit(&mut state, "w1", &["a.rs"], "fix", real + 500);
+        assert_eq!(r["accepted"], false);
+        assert_eq!(r["refusal"]["error"], "unknown_run");
+    }
+
+    #[test]
+    fn a_failing_gate_run_does_not_authorise_a_merge() {
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let run = record_run(&mut state, "release-golden", "fail");
+        let r = submit(&mut state, "w1", &["a.rs"], "fix", run);
+        assert_eq!(r["accepted"], false);
+        assert_eq!(r["refusal"]["error"], "not_passing");
+        assert_eq!(r["refusal"]["verdict"], "fail");
+        assert_eq!(r["refusal"]["source"], "release-golden");
+    }
+
+    #[test]
+    fn an_unrecognised_verdict_is_recorded_as_unknown_not_pass() {
+        // An unreadable verdict must not be able to authorise anything.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let resp = state.handle(&AgentRequest::new(
+            "g4-weird",
+            "gate_record",
+            serde_json::json!({"source": "x", "verdict": "totally fine"}),
+        ));
+        assert!(resp.ok);
+        let run = resp.result.unwrap();
+        assert_eq!(run["run"]["verdict"], "unknown");
+        let id = run["run"]["id"].as_u64().unwrap();
+        assert_eq!(submit(&mut state, "w1", &["a.rs"], "fix", id)["accepted"], false);
+    }
+
+    #[test]
+    fn evidence_from_before_the_last_change_is_stale_and_refused() {
+        // The common real failure: run the tests, then fix one more thing.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let run = record_run(&mut state, "verify-invariants", "pass");
+        touch(&mut state, "w1"); // one more edit, after the run
+        let r = submit(&mut state, "w1", &["a.rs"], "fix", run);
+        assert_eq!(r["accepted"], false);
+        assert_eq!(r["refusal"]["error"], "stale");
+        assert!(
+            r["refusal"]["last_change"].as_u64().unwrap()
+                > r["refusal"]["run_cursor"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn re_running_the_gate_after_the_change_makes_the_summary_acceptable() {
+        // The remediation path has to work, or the check is a dead end.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let stale = record_run(&mut state, "verify-invariants", "pass");
+        touch(&mut state, "w1");
+        assert_eq!(submit(&mut state, "w1", &["a.rs"], "fix", stale)["accepted"], false);
+
+        let fresh = record_run(&mut state, "verify-invariants", "pass");
+        assert_eq!(submit(&mut state, "w1", &["a.rs"], "fix", fresh)["accepted"], true);
+    }
+
+    #[test]
+    fn one_workers_stale_evidence_does_not_condemn_anothers_fresh_one() {
+        // w1's evidence goes stale (they edit again afterwards); w2's does not.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let w1_run = record_run(&mut state, "verify-invariants", "pass");
+        touch(&mut state, "w1"); // w1 keeps working -- w1's evidence is now stale
+
+        touch(&mut state, "w2");
+        let w2_run = record_run(&mut state, "verify-invariants", "pass");
+
+        assert_eq!(submit(&mut state, "w2", &["b.rs"], "w2 work", w2_run)["accepted"], true);
+        assert_eq!(submit(&mut state, "w1", &["a.rs"], "w1 work", w1_run)["accepted"], false);
+    }
+
+    #[test]
+    fn a_gate_run_and_the_next_entry_never_share_a_cursor() {
+        // Freshness is a comparison between two cursors from one ordering. If a
+        // run could take the same cursor as an entry, "newer than" would be
+        // ambiguous exactly when it is being relied on.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let run = record_run(&mut state, "verify-invariants", "pass");
+        let entry = touch(&mut state, "w1");
+        let r = submit(&mut state, "w1", &["a.rs"], "fix", run);
+        let run_cursor = r["refusal"]["run_cursor"].as_u64().expect("stale");
+        assert_ne!(
+            run_cursor, entry,
+            "a gate run and a board entry must not share a cursor"
+        );
+        assert!(run_cursor < entry, "the run was recorded before the entry");
+    }
+
+    #[test]
+    fn a_refused_summary_is_still_on_the_board_with_its_reason() {
+        // A reader later must see that a merge was attempted and refused.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let r = submit(&mut state, "w1", &["a.rs"], "fix", 999);
+        assert_eq!(r["accepted"], false);
+        assert_eq!(r["entry"]["kind"], "PATCH_SUMMARY");
+        let found = state
+            .handle(&AgentRequest::new(
+                "g4-audit",
+                "board_grep",
+                serde_json::json!({"expr": "PATCH_SUMMARY"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(found["count"], 1);
+    }
+
+    #[test]
+    fn an_accepted_summary_records_its_files_and_idea_structurally() {
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let run = record_run(&mut state, "verify-invariants", "pass");
+        let files = vec!["unfer_protocol/src/board.rs", "unfer_protocol/src/evidence.rs"];
+        let r = submit(&mut state, "w1", &files, "add evidence checking", run);
+        assert_eq!(r["accepted"], true);
+        let detail: serde_json::Value =
+            serde_json::from_str(r["entry"]["detail"].as_str().expect("detail")).expect("json");
+        assert_eq!(detail["idea"], "add evidence checking");
+        assert_eq!(detail["files"][1], "unfer_protocol/src/evidence.rs");
+        assert_eq!(detail["run_id"], run);
+    }
+
+    #[test]
+    fn a_summary_with_no_files_or_no_idea_is_refused() {
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let run = record_run(&mut state, "verify-invariants", "pass");
+        assert_eq!(submit(&mut state, "w1", &[], "fix", run)["refusal"]["error"], "no_files");
+        assert_eq!(submit(&mut state, "w1", &["a.rs"], "  ", run)["refusal"]["error"], "no_idea");
+    }
+
+    #[test]
+    fn freshness_fails_closed_when_the_workers_base_is_gone() {
+        // Assuming freshness we cannot establish is how an unverified change
+        // ships, so this must refuse rather than pass.
+        let mut state = AgentState::new();
+        touch(&mut state, "ghost");
+        let run = record_run(&mut state, "verify-invariants", "pass");
+        // Overflow the bounded board so the ghost's change ages out.
+        for i in 0..(unfer_protocol::board::CAPACITY + 5) {
+            state.handle(&AgentRequest::new(
+                "g4-fill",
+                "board_write",
+                serde_json::json!({"kind": "OBSERVED", "worker": "filler", "text": format!("e{i}")}),
+            ));
+        }
+        let r = submit(&mut state, "ghost", &["a.rs"], "fix", run);
+        assert_eq!(r["accepted"], false);
+        assert_eq!(r["refusal"]["error"], "unknown_base");
+    }
+
+    #[test]
+    fn a_recorded_run_carries_its_digest_not_its_output() {
+        // The point of the design: the board cites a run, it does not carry the
+        // log. A digest identifies the artefact without pasting it.
+        let mut state = AgentState::new();
+        touch(&mut state, "w1");
+        let resp = state.handle(&AgentRequest::new(
+            "g4-dig",
+            "gate_record",
+            serde_json::json!({"source": "release-golden", "verdict": "pass",
+                               "digest": "sha256:deadbeef", "summary": "manifest unchanged"}),
+        ));
+        let run = resp.result.unwrap();
+        assert_eq!(run["run"]["digest"], "sha256:deadbeef");
+        assert_eq!(run["run"]["summary"], "manifest unchanged");
+        assert_eq!(run["run"]["source"], "release-golden");
+    }
+
+    #[test]
+    fn gate_and_patch_ops_reject_missing_identifiers() {
+        let mut state = AgentState::new();
+        for (op, params) in [
+            ("gate_record", serde_json::json!({"verdict": "pass"})),
+            ("gate_record", serde_json::json!({"source": "  ", "verdict": "pass"})),
+            ("patch_submit", serde_json::json!({"files": [], "idea": "i", "run_id": 1})),
+            ("patch_submit", serde_json::json!({"worker": "w", "idea": "i", "run_id": 1})),
+            ("patch_submit", serde_json::json!({"worker": "w", "files": "a.rs", "idea": "i", "run_id": 1})),
+            ("patch_submit", serde_json::json!({"worker": "w", "files": [], "run_id": 1})),
+            ("patch_submit", serde_json::json!({"worker": "w", "files": [], "idea": "i"})),
+            ("patch_submit", serde_json::json!({"worker": "w", "files": [], "idea": "i", "run_id": "one"})),
+        ] {
+            let shown = params.to_string();
+            let resp = state.handle(&AgentRequest::new("g4-bad", op.to_string(), params.clone()));
+            assert!(!resp.ok, "{op} {shown} should be refused");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn the_census_still_holds_with_the_gate_ops_added() {
+        let mut state = AgentState::new();
+        let unimplemented = ["exec", "kernel_exec"];
+        for op in VALID_OPS {
+            let resp = state.handle(&AgentRequest::new(
+                "g4-census",
+                *op,
+                serde_json::json!({"model_id": 999_999}),
+            ));
+            if unimplemented.contains(op) {
+                assert!(!resp.ok);
+                continue;
+            }
+            let msg = resp.error.as_ref().map(|d| d.message.clone()).unwrap_or_default();
+            assert!(!msg.contains("Unknown op"), "advertised op '{op}' has no dispatch arm");
         }
     }
 }
