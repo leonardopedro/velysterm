@@ -73,7 +73,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 768 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-05 -->
+<!-- status: verified | tests: 797 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-05 -->
 
 Note: the workspace needs the flake devshell (`nix develop -c cargo test
 --workspace`). A bare `cargo test` fails in `libudev-sys`, which has no pkg-config
@@ -84,7 +84,7 @@ outside it — worth knowing before concluding the tree is broken.
 ```sh
 export PKG_CONFIG_PATH=/tmp/emthin-work/pc:$PKG_CONFIG_PATH   # or your own
 cargo test -p mathed_core -p mathed_mini -p kernel_client \
-         -p delta_algebra -p delta_sirk -p mathed_biblio    # 768 passed
+         -p delta_algebra -p delta_sirk -p mathed_biblio    # 797 passed
 ```
 
 Measured 2026-10-05: mathed_core 269 / mathed_mini 246 / kernel_client 168 /
@@ -95,7 +95,7 @@ here is differential-testing-the-reference-oracle, not GPU coverage.
 board ops, the G3 claim/DM/hand-off ops, the G4 gate/patch ops, the G9 nudge
 op and the G2 cooperation loop.
 
-**The Bevy `mathed` crate is not in the 768.** It needs `pkg-config` plus the
+**The Bevy `mathed` crate is not in the 797.** It needs `pkg-config` plus the
 X/wayland client libraries, so it does not build in a bare shell; CI installs
 them and runs it there. Quoting a number that silently included a crate nobody
 ran is how this line read 658 when the real figure was 609.

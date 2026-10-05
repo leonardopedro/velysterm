@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod checkpoint;
 pub mod coop_loop;
 pub mod jupyter_stdio;
