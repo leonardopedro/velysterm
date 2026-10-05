@@ -37,7 +37,20 @@ Three repos form one system:
 3. **Commit discipline**: meaningful messages; commit after every stage.
 4. Stages ordered small → large, each with an acceptance command.
 
-## Current state (2026-07-24)
+## Current state (2026-10-05)
+
+> **This section is the single status for this repo** (project review item **X2**,
+> finding **G-V1**). `PROGRESS.md` used to be a second place that claimed to
+> describe the state of the world, and the two disagreed: the log narrated
+> mid-2026 "Stage A/R" work while this file recorded Plan C complete. It has been
+> folded — the goal and current status are here, the dated development log moved
+> to `CHANGELOG.md`'s "Historical development log", and the durable engineering
+> rules moved to `AGENTS.md` → Conventions. Nothing was dropped silently; the
+> mapping table is in `CHANGELOG.md`.
+>
+> **Goal.** A mathematical editor with semantic awareness (renaming, definition
+> tracking) that also serves as the project's human UI and AI-agent interface to
+> the unfer kernel.
 
 - **velyst is consumed, not forked (2026-09-30).** The vendored `velyst`, `kanva`,
   `kanva_svg`, `kanva_typst` and `typst_imaging` crates were removed from `crates/`;
@@ -58,11 +71,41 @@ Three repos form one system:
   - C14: performance (translator hash tracking, 100-block benchmark < 16 ms).
   - C15: agent protocol (logos_compile + ode_to_hamiltonian ops, 24 VALID_OPS).
   - C16: export (Typst/JSON/Markdown CLI modes).
-- Test counts: mathed_core 146 / mathed_mini 116 / mathed 39 / kernel_client 36 /
-  mathed_biblio 11 = **348 total**.
+- Test counts, measured 2026-10-05 on CPU: mathed_core 252 / mathed_mini 246 /
+  kernel_client 139 / delta_algebra 13 / delta_sirk 2 / mathed_biblio 13 =
+  **665**. The Bevy `mathed` crate is **not** in that figure: it needs
+  `pkg-config` plus the X/wayland client libraries, so it does not build in a bare
+  dev shell and is covered by CI instead. The previous figure here — 348 —
+  predated roughly 300 tests and is part of why this file disagreed with the
+  README.
 - `mathed_mini` is fully Bevy-free (zero Bevy deps in both `--no-default-features` and
   default `gui` configurations).
-- The `unfer_agent` has 24 ops (kernel + federation + logos + ODE).
+- **`crates/delta_algebra` / `crates/delta_sirk` are workspace members and do
+  build and run** — `members = ["crates/*"]` picks them up, and they contribute
+  the 15 tests counted above. An earlier revision of this section described them
+  as "outside the workspace glob, and are not built"; that was true when they were
+  archived and stopped being true when they were revived. Their GPU tests skip
+  without an adapter (`scripts/test-delta-gpu.sh` runs them on a GPU box), so a
+  green CPU run is differential testing against the reference oracle, not GPU
+  coverage.
+- The `unfer_agent` op registry is `unfer_protocol::ops::AGENT_OPS` = **47 ops**
+  (`SESSION_OPS` 48, `EDGE_ALLOWED_OPS` 27; the registry invariants — no
+  duplicates, agent/edge ⊆ session, session = union — are machine-checked in
+  `unfer_protocol`'s `ops::tests`). This file previously said 24 ops, true of an
+  early S17 snapshot. Six were added on 2026-10-05: the G1 board
+  (`board_write` / `board_read` / `board_grep`) and G3/G7 cooperation
+  (`agent_claim` / `agent_dm` / `agent_dm_read` / `agent_handoff`), documented in
+  `unfer/docs/PROTOCOL.md`.
+- **`events_poll` is now reachable over NDJSON.** It was registered in the op
+  registry with no dispatch arm, so sending it returned UK-1001 "Unknown op" while
+  `version` advertised it. It is now a real op with cursor-based, non-destructive
+  delivery; `every_advertised_op_is_either_handled_or_explicitly_unimplemented`
+  in `unfer_agent.rs` walks the registry so that class of drift fails a test.
+- `exec` and `kernel_exec` remain **registered but unimplemented** — they are
+  specified in `unfer/docs/PROTOCOL.md` (UK-4908..4913) and would launch
+  subprocesses under a grant allowlist. They now answer with an explicit
+  "not implemented" diagnostic rather than UK-1001, so a caller stops treating a
+  real feature as a typo. They are a work order, not a missing `match` arm.
 - PROTOCOL.md `[SYNC]` complete — all ops + 6xxx/7xxx codes documented in unfer.
 
 ---

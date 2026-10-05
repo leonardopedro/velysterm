@@ -12,7 +12,7 @@ contains earlier specs; where they overlap, THIS file wins.
 ## Status — audited 2026-06-12, after commit `bfa9675`
 
 A first implementation pass created every planned file and committed it
-as `bfa9675` (see `PROGRESS.md`, the implementer's log). Audit verdict:
+as `bfa9675` (see `CHANGELOG.md` -> "Historical development log", the implementer's log; that section was recovered verbatim from the now-folded `PROGRESS.md`). Audit verdict:
 
 **The workspace does not compile.** `cargo test -p mathed_core` fails
 with 4 errors, all in `doc.rs::segment_marks()` /
@@ -61,8 +61,9 @@ compiling baseline):
 
 **Next step: execute Stage R below starting at R3 (R1/R2 are done).**
 After Stage R the remaining open work, in order, is: F1 (search UI),
-any E2 gaps found while testing, then Stage G. Keep `PROGRESS.md`
-updated, and record honestly which gate commands actually passed.
+any E2 gaps found while testing, then Stage G. Record the outcome in
+`PLAN_parallel_velysterm.md` -> Current state, and record honestly which gate
+commands actually passed. (This said `PROGRESS.md`; folded away as X2.)
 
 ## Ground rules (apply to every task)
 
@@ -198,8 +199,8 @@ covering at least:
    `\bold(#1,#2)` tokens are hidden and revealed when the caret touches
    them; Ctrl+B bolds a selection; Ctrl+Z undoes; Ctrl+S saves without
    panicking.
-3. Record in `PROGRESS.md` which gates passed and what was verified by
-   eye. Do not mark a stage done on the strength of files existing.
+3. Record in `PLAN_parallel_velysterm.md` -> Current state which gates passed
+   and what was verified by eye. (This said `PROGRESS.md`; folded away as X2.) Do not mark a stage done on the strength of files existing.
 
 ---
 

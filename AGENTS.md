@@ -60,6 +60,25 @@ codes, typed repair hints.
   verbatim; do not invent ad-hoc error strings.
 - Adding a kernel-bearing `PropKind`: markers.rs → semantics.rs → kernel_sys.rs
   → overlay (see `unfer/docs/ARCHITECTURE.md` extension point #3).
+- **Use UTF-8 byte offsets** for every document position. `GlyphIndex`
+  (`caret_for_byte`, `byte_for_point`, `band_for_byte`) and `accessibility`
+  (`build_access_nodes`) both key on byte offsets, and the layout cache
+  (`DocLayout`) recomputes only on edit/resize — a char offset silently
+  disagrees with them at the first non-ASCII glyph.
+- **Compliance gates**: `cargo fmt`, `cargo test`, `cargo clippy`, `cargo check`.
+  `cargo clippy -p mathed_core` was held at 0 warnings during the Stage R repair
+  and that is the bar, not 0 errors.
+- `mathed_mini` is an optional crate (`gui` feature); `--no-default-features`
+  builds the headless render core. **The GUI cannot be run in a headless
+  environment** (no display) — the Bevy-free frontend is verified by compile +
+  link + unit-tested render path only. Do not record a GUI behaviour as verified
+  on the basis of a headless run.
+- `crates/velyst`, `crates/typst_imaging` and `crates/kanva` were **never
+  modified in place** while they were vendored, and are now gone entirely
+  (2026-09-30): `velyst` and `typst_imaging` are upstream git dependencies at
+  `v0.0.1`. The rule survives as "do not fork upstream to make a local change
+  easier" — a change we need goes in this workspace, or upstream, not in a
+  patched copy.
 
 ## Verify
 

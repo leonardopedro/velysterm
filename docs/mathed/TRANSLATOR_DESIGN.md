@@ -399,7 +399,9 @@ pub enum TranslateError {
   passthrough).
 - Update `unfer/docs/IMPLEMENTATION_PLAN.md` P3 #10 to point here.
 - Update `velysterm/AGENTS.md` with translator architecture.
-- Update `velysterm/PROGRESS.md`.
+- Record the outcome in `velysterm/PLAN_parallel_velysterm.md` → Current state.
+  (This list originally said `PROGRESS.md`; that file was folded away as project
+  review item X2 — one history in `CHANGELOG.md`, one status in the plan.)
 
 ## 5. Technical risks (open)
 
