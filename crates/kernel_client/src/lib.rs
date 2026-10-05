@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod coop_loop;
 pub mod jupyter_stdio;
 pub mod runner;
 pub mod stdio_driver;
