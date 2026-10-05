@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod jupyter_stdio;
+pub mod runner;
 pub mod stdio_driver;
 pub mod worker;
 

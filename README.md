@@ -73,7 +73,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 649 cargo | last_verified: 2026-10-05 -->
+<!-- status: verified | tests: 658 cargo | last_verified: 2026-10-05 -->
 
 Note: the workspace needs the flake devshell (`nix develop -c cargo test
 --workspace`). A bare `cargo test` fails in `libudev-sys`, which has no pkg-config
