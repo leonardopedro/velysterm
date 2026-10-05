@@ -73,7 +73,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 665 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-05 -->
+<!-- status: verified | tests: 694 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-05 -->
 
 Note: the workspace needs the flake devshell (`nix develop -c cargo test
 --workspace`). A bare `cargo test` fails in `libudev-sys`, which has no pkg-config
@@ -84,17 +84,18 @@ outside it — worth knowing before concluding the tree is broken.
 ```sh
 export PKG_CONFIG_PATH=/tmp/emthin-work/pc:$PKG_CONFIG_PATH   # or your own
 cargo test -p mathed_core -p mathed_mini -p kernel_client \
-         -p delta_algebra -p delta_sirk -p mathed_biblio    # 665 passed
+         -p delta_algebra -p delta_sirk -p mathed_biblio    # 694 passed
 ```
 
-Measured 2026-10-05: mathed_core 252 / mathed_mini 246 / kernel_client 139 /
+Measured 2026-10-05: mathed_core 252 / mathed_mini 246 / kernel_client 168 /
 delta_algebra 13 / delta_sirk 2 / mathed_biblio 13. The `delta_*` figures are the
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
-`kernel_client` grew by 56: the C1 `events_poll` delivery path, the G1 board ops,
-and the G3 claim/DM/hand-off ops.
+`kernel_client` grew by 85: the C1 `events_poll` delivery path, the G1
+board ops, the G3 claim/DM/hand-off ops, the G4 gate/patch ops and the G9 nudge
+op.
 
-**The Bevy `mathed` crate is not in the 665.** It needs `pkg-config` plus the
+**The Bevy `mathed` crate is not in the 694.** It needs `pkg-config` plus the
 X/wayland client libraries, so it does not build in a bare shell; CI installs
 them and runs it there. Quoting a number that silently included a crate nobody
 ran is how this line read 658 when the real figure was 609.

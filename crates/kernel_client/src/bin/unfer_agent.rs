@@ -203,6 +203,10 @@ struct AgentState {
     /// G4: recorded gate runs, so a patch summary cites a run that happened
     /// rather than pasted output that cannot be checked.
     runs: unfer_protocol::evidence::GateRuns,
+    /// G9 (b): which (worker, nudge kind) pairs have already been delivered.
+    /// Without this a worker polled every second is told to stop claiming new
+    /// scope a thousand times, which trains it to ignore nudges entirely.
+    nudges_sent: std::collections::HashSet<(String, unfer_protocol::nudge::NudgeKind)>,
 }
 
 impl AgentState {
@@ -228,6 +232,7 @@ impl AgentState {
             coop: unfer_protocol::coop::Coop::new(),
             handoffs: Vec::new(),
             runs: unfer_protocol::evidence::GateRuns::new(),
+            nudges_sent: std::collections::HashSet::new(),
         }
     }
 
@@ -1115,6 +1120,109 @@ impl AgentState {
                     }
                 }
                 AgentResponse::ok(&req.id, resp)
+            }
+            // G9 (b): task-scoped budget nudges.
+            //
+            // The caller supplies `remaining_secs`; this process owns no clock.
+            // The harness knows how much time is left, and the *policy* -- which
+            // checkpoints exist and what they say -- is `unfer_protocol::nudge`.
+            //
+            // A checkpoint already delivered is not repeated. Without that, a
+            // worker polled every second would be told "stop claiming new scope"
+            // a thousand times, which trains it to ignore nudges entirely.
+            "agent_nudge" => {
+                let worker = match req.params.get("worker").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'worker' field"),
+                        );
+                    }
+                };
+                let remaining = match req.params.get("remaining_secs").and_then(|v| v.as_u64()) {
+                    Some(r) => r,
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or non-integer 'remaining_secs' field"),
+                        );
+                    }
+                };
+                // An optional custom schedule; the default is the project's.
+                let schedule: Vec<unfer_protocol::nudge::Checkpoint> = match req
+                    .params
+                    .get("checkpoints")
+                {
+                    None | Some(serde_json::Value::Null) => {
+                        unfer_protocol::nudge::DEFAULT_CHECKPOINTS.to_vec()
+                    }
+                    Some(serde_json::Value::Array(a)) => {
+                        let mut out = Vec::with_capacity(a.len());
+                        for c in a {
+                            let at = c.get("at_secs_remaining").and_then(|v| v.as_u64());
+                            let kind = c
+                                .get("kind")
+                                .and_then(|v| v.as_str())
+                                .and_then(unfer_protocol::nudge::NudgeKind::parse);
+                            match (at, kind) {
+                                (Some(at_secs_remaining), Some(kind)) => {
+                                    out.push(unfer_protocol::nudge::Checkpoint {
+                                        at_secs_remaining,
+                                        kind,
+                                    });
+                                }
+                                _ => {
+                                    return AgentResponse::err(
+                                        &req.id,
+                                        bad_json_diag(
+                                            "each checkpoint needs an integer \
+                                             'at_secs_remaining' and a known 'kind'",
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        out
+                    }
+                    Some(_) => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("'checkpoints' must be an array"),
+                        );
+                    }
+                };
+
+                let fired = unfer_protocol::nudge::due(remaining, &schedule);
+                let mut delivered = Vec::new();
+                for n in fired {
+                    let key = (worker.clone(), n.kind);
+                    if self.nudges_sent.contains(&key) {
+                        continue;
+                    }
+                    self.nudges_sent.insert(key);
+                    let text = unfer_protocol::nudge::board_text(&n, &worker);
+                    let entry = self.board.write(
+                        unfer_protocol::board::BoardKind::Observed,
+                        &worker,
+                        &text,
+                        Some(&format!("{}s remaining", n.remaining_secs)),
+                    );
+                    delivered.push(serde_json::json!({
+                        "kind": n.kind,
+                        "remaining_secs": n.remaining_secs,
+                        "entry": entry,
+                    }));
+                }
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "worker": worker,
+                        "remaining_secs": remaining,
+                        "nudges": delivered,
+                        "count": delivered.len(),
+                    }),
+                )
             }
             "save_session" => {
                 let model_id = match req.params.get("model_id").and_then(|v| v.as_u64()) {
@@ -4308,6 +4416,202 @@ mod tests {
         for op in VALID_OPS {
             let resp = state.handle(&AgentRequest::new(
                 "g4-census",
+                *op,
+                serde_json::json!({"model_id": 999_999}),
+            ));
+            if unimplemented.contains(op) {
+                assert!(!resp.ok);
+                continue;
+            }
+            let msg = resp.error.as_ref().map(|d| d.message.clone()).unwrap_or_default();
+            assert!(!msg.contains("Unknown op"), "advertised op '{op}' has no dispatch arm");
+        }
+    }
+
+    // ── G9 (b): budget nudges ──────────────────────────────────────────────
+
+    fn nudge(state: &mut AgentState, worker: &str, remaining: u64) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "g9-n",
+            "agent_nudge",
+            serde_json::json!({"worker": worker, "remaining_secs": remaining}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    #[test]
+    fn nothing_is_nudged_while_there_is_time() {
+        let mut state = AgentState::new();
+        assert_eq!(nudge(&mut state, "w1", 60 * 60)["count"], 0);
+        assert_eq!(nudge(&mut state, "w1", 46 * 60)["count"], 0);
+    }
+
+    #[test]
+    fn the_stop_claiming_nudge_arrives_at_45_minutes() {
+        let mut state = AgentState::new();
+        let r = nudge(&mut state, "w1", 45 * 60);
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["nudges"][0]["kind"], "stop_claiming");
+    }
+
+    #[test]
+    fn both_nudges_arrive_inside_the_last_five_minutes() {
+        let mut state = AgentState::new();
+        // The first nudge at 45min has not fired yet if we jump straight to 4min?
+        // It must: a worker not polled for an hour still hears what it slept through.
+        let r = nudge(&mut state, "w1", 4 * 60);
+        assert_eq!(r["count"], 2);
+        let kinds: Vec<&str> = r["nudges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["kind"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"stop_claiming"));
+        assert!(kinds.contains(&"merge_or_report_blocked"));
+    }
+
+    #[test]
+    fn a_nudge_is_delivered_once_not_once_per_poll() {
+        // The property that keeps nudges worth reading.
+        let mut state = AgentState::new();
+        assert_eq!(nudge(&mut state, "w1", 4 * 60)["count"], 2);
+        for _ in 0..20 {
+            assert_eq!(nudge(&mut state, "w1", 3 * 60)["count"], 0);
+        }
+    }
+
+    #[test]
+    fn one_workers_nudges_do_not_silence_anothers() {
+        let mut state = AgentState::new();
+        assert_eq!(nudge(&mut state, "w1", 60)["count"], 2);
+        assert_eq!(nudge(&mut state, "w2", 60)["count"], 2);
+        assert_eq!(nudge(&mut state, "w1", 60)["count"], 0);
+    }
+
+    #[test]
+    fn nudges_appear_on_the_board_where_a_human_can_see_them() {
+        // The plan's acceptance criterion: nudge events observed in board history.
+        let mut state = AgentState::new();
+        nudge(&mut state, "w1", 4 * 60);
+        let found = state
+            .handle(&AgentRequest::new(
+                "g9-board",
+                "board_grep",
+                serde_json::json!({"expr": "nudge"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(found["count"], 2);
+        assert!(
+            found["entries"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("stop claiming"),
+            "{:?}",
+            found["entries"]
+        );
+    }
+
+    #[test]
+    fn the_nudge_entry_records_how_much_time_was_left() {
+        let mut state = AgentState::new();
+        let r = nudge(&mut state, "w1", 4 * 60);
+        assert_eq!(r["nudges"][0]["remaining_secs"], 240);
+        assert!(r["nudges"][0]["entry"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("240s remaining"));
+    }
+
+    #[test]
+    fn a_custom_schedule_is_honoured_over_the_default() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g9-custom",
+            "agent_nudge",
+            serde_json::json!({
+                "worker": "w1", "remaining_secs": 5,
+                "checkpoints": [{"at_secs_remaining": 10, "kind": "wrap_up"}]
+            }),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["count"], 1);
+        assert_eq!(r["nudges"][0]["kind"], "wrap_up");
+    }
+
+    #[test]
+    fn an_unknown_nudge_kind_in_a_schedule_is_refused_rather_than_ignored() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g9-badkind",
+            "agent_nudge",
+            serde_json::json!({
+                "worker": "w1", "remaining_secs": 5,
+                "checkpoints": [{"at_secs_remaining": 10, "kind": "have_a_nap"}]
+            }),
+        ));
+        assert!(!resp.ok, "a typo'd nudge kind must not silently do nothing");
+        assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+    }
+
+    #[test]
+    fn a_malformed_checkpoint_is_refused() {
+        let mut state = AgentState::new();
+        for cp in [
+            serde_json::json!({"kind": "wrap_up"}),
+            serde_json::json!({"at_secs_remaining": 10}),
+            serde_json::json!("ten"),
+        ] {
+            let shown = cp.to_string();
+            let resp = state.handle(&AgentRequest::new(
+                "g9-badcp",
+                "agent_nudge",
+                serde_json::json!({"worker": "w1", "remaining_secs": 5, "checkpoints": [cp]}),
+            ));
+            assert!(!resp.ok, "{shown} should be refused");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn a_non_array_schedule_is_refused() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g9-badcp2",
+            "agent_nudge",
+            serde_json::json!({"worker": "w1", "remaining_secs": 5, "checkpoints": "soon"}),
+        ));
+        assert!(!resp.ok);
+        assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+    }
+
+    #[test]
+    fn the_nudge_op_requires_a_worker_and_a_remaining_time() {
+        let mut state = AgentState::new();
+        for params in [
+            serde_json::json!({"remaining_secs": 5}),
+            serde_json::json!({"worker": "  ", "remaining_secs": 5}),
+            serde_json::json!({"worker": "w1"}),
+            serde_json::json!({"worker": "w1", "remaining_secs": -1}),
+            serde_json::json!({"worker": "w1", "remaining_secs": "soon"}),
+        ] {
+            let shown = params.to_string();
+            let resp = state.handle(&AgentRequest::new("g9-bad", "agent_nudge", params));
+            assert!(!resp.ok, "{shown} should be refused");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
+        }
+    }
+
+    #[test]
+    fn the_census_still_holds_with_the_nudge_op_added() {
+        let mut state = AgentState::new();
+        let unimplemented = ["exec", "kernel_exec"];
+        for op in VALID_OPS {
+            let resp = state.handle(&AgentRequest::new(
+                "g9-census",
                 *op,
                 serde_json::json!({"model_id": 999_999}),
             ));
