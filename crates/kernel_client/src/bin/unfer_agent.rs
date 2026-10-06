@@ -299,7 +299,19 @@ struct AgentState {
     /// point is that entries from different models — and different workers —
     /// are visible to each other. Bounded and append-only; see
     /// `unfer_protocol::board`.
-    board: unfer_protocol::board::Board,
+    ///
+    /// A [`unfer_protocol::board::BoardLog`] rather than a bare `Board` (G1
+    /// host wiring): the same board, with a `DurableStore` behind it when
+    /// `UNFER_DURABLE_DIR` names one. Every mutation is flushed before the
+    /// op's reply is sent, so a restart replays the board instead of starting
+    /// it over — and with no directory configured this is exactly the RAM-only
+    /// board this host always was.
+    board: unfer_protocol::board::BoardLog,
+    /// G1: whether `board` writes through to a real directory.
+    ///
+    /// `false` for in-memory stores, where `flush` would be theatre: no reply
+    /// may imply durability the process cannot deliver.
+    board_on_disk: bool,
     /// G3/G7: live claims and per-worker message queues, layered over the board
     /// so both share one cursor sequence. See `unfer_protocol::coop`.
     coop: unfer_protocol::coop::Coop,
@@ -323,6 +335,58 @@ struct AgentState {
 
 impl AgentState {
     fn new() -> Self {
+        // Durability follows the kernel's H4 environment: `UNFER_DURABLE_DIR`
+        // (optional; in-memory when unset) and `UNFER_DURABLE_BACKEND`
+        // (default Loro) — the same two variables the C ABI host reads, so one
+        // deployment config points both hosts at one store.
+        //
+        // Test builds deliberately ignore the variable: a developer with it
+        // exported would replay a real board log into every fresh test state
+        // and break this file's cursor-starts-at-1 expectations. The durable
+        // path is tested through `with_board_store` instead, against an
+        // explicit directory.
+        #[cfg(test)]
+        let dir: Option<std::path::PathBuf> = None;
+        #[cfg(not(test))]
+        let dir: Option<std::path::PathBuf> = std::env::var("UNFER_DURABLE_DIR")
+            .ok()
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from);
+        let backend = unfer_ffi::durable::Backend::parse(
+            std::env::var("UNFER_DURABLE_BACKEND").ok().as_deref(),
+        );
+        let on_disk = dir.is_some();
+        let store = match unfer_ffi::durable::open_store(dir.as_deref(), backend) {
+            Ok(s) => s,
+            // Refuse to start rather than silently downgrade to RAM: a caller
+            // who configured durability must not get a board that quietly
+            // forgets. There is no ring to log to before the first op, so a
+            // clear panic beats a silent degradation.
+            Err(e) => panic!("unfer_agent: cannot open the board store: {e}"),
+        };
+        Self::from_store(store, on_disk)
+    }
+
+    /// Open the board log at an explicit directory. The durable seam tests
+    /// use this instead of the environment (G1: write, drop the "process",
+    /// reopen — nothing is carried in memory across that boundary).
+    #[cfg(test)]
+    fn with_board_store(dir: &Path, backend: unfer_ffi::durable::Backend) -> Self {
+        let store = match unfer_ffi::durable::open_store(Some(dir), backend) {
+            Ok(s) => s,
+            Err(e) => panic!("unfer_agent: test board store will not open: {e}"),
+        };
+        Self::from_store(store, true)
+    }
+
+    /// The shared constructor: everything *except* the board comes from the
+    /// environment or the defaults; the board comes from an already-opened
+    /// store, which is what makes `new` and `with_board_store` the same state
+    /// with a different directory behind it.
+    fn from_store(
+        store: Box<dyn unfer_protocol::durable::DurableStore>,
+        board_on_disk: bool,
+    ) -> Self {
         let roster = std::env::var("UNFER_PRESETS_DIR")
             .ok()
             .map(|dir| {
@@ -331,6 +395,15 @@ impl AgentState {
                 )
             })
             .unwrap_or_default();
+        let board = match unfer_protocol::board::BoardLog::open(std::sync::Arc::from(store)) {
+            Ok(log) => log,
+            // A corrupt log refuses to open rather than half-load — the same
+            // reasoning as `Board::from_ndjson`: a partial replay hands out a
+            // cursor that collides with history. Before G1 this host had no
+            // log to be corrupt; now a corrupt one must be visible, not
+            // silently replaced by an empty board.
+            Err(e) => panic!("unfer_agent: cannot open the board log: {e}"),
+        };
         Self {
             sessions: HashMap::new(),
             events: HashMap::new(),
@@ -340,7 +413,8 @@ impl AgentState {
             consensus: ConsensusNode::new(Box::new(LocalConsensus::new())),
             keypairs: HashMap::new(),
             roster,
-            board: unfer_protocol::board::Board::new(),
+            board,
+            board_on_disk,
             coop: unfer_protocol::coop::Coop::new(),
             handoffs: Vec::new(),
             runs: unfer_protocol::evidence::GateRuns::new(),
@@ -463,7 +537,29 @@ impl AgentState {
 
     fn handle(&mut self, req: &AgentRequest) -> AgentResponse {
         let t0 = Instant::now();
-        let resp = self.dispatch(req);
+        let mut resp = self.dispatch(req);
+        // G1: every board mutation is flushed before this reply is written,
+        // so "the caller saw ok" and "the log has it" coincide. The fields
+        // are attached here, once, rather than at each of the fifteen
+        // mutation sites — a site that forgets is a site that lies.
+        if self.board_on_disk && self.board.latest_cursor() > self.board.persisted_through() {
+            match self.board.flush() {
+                Ok(through) => {
+                    if let Some(v) = resp.result.as_mut() {
+                        v["persisted_through"] = serde_json::json!(through);
+                    }
+                }
+                // The write itself succeeded (append is best-effort at write
+                // time, authoritative at flush) — so the reply must carry the
+                // failure rather than imply the durability it did not get.
+                Err(e) => {
+                    eprintln!("unfer_agent: board flush failed: {e}");
+                    if let Some(v) = resp.result.as_mut() {
+                        v["durable_error"] = serde_json::json!(e);
+                    }
+                }
+            }
+        }
         let ms = t0.elapsed().as_millis() as u64;
         resp.with_timing(ms)
     }
@@ -5810,5 +5906,115 @@ mod tests {
         let r = resp.result.unwrap();
         assert_eq!(r["state"]["needs_recalibration"], false);
         assert_eq!(r["state"]["observed_drift"], 0.0);
+    }
+
+    // ── G1: this host is durable when a store is configured ─────────────────
+    //
+    // The acceptance is not "the wrapper compiles" but "the agent's own
+    // restart replays what the dispatcher wrote" — a fresh `AgentState` over
+    // the same directory with nothing carried across.
+
+    fn g1_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("unfer-agent-g1-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn board_entries_survive_a_restart_when_durability_is_configured() {
+        let dir = g1_dir("restart");
+
+        {
+            // The "first process": writes through the real dispatcher, then dies.
+            let mut state = AgentState::with_board_store(&dir, unfer_ffi::durable::Backend::Loro);
+            let resp = state.handle(&AgentRequest::new(
+                "g1-d1",
+                "board_write",
+                serde_json::json!({
+                    "kind": "FAIL",
+                    "worker": "w1",
+                    "text": "the Lavine route is refuted"
+                }),
+            ));
+            assert!(resp.ok, "{:?}", resp.error);
+            let r = resp.result.unwrap();
+            assert_eq!(
+                r["persisted_through"], 1,
+                "the mutation is flushed before the reply leaves the process: {r}"
+            );
+        }
+
+        // The restart: a new state, a fresh replay, nothing in common.
+        let mut state = AgentState::with_board_store(&dir, unfer_ffi::durable::Backend::Loro);
+        let resp = state.handle(&AgentRequest::new(
+            "g1-d2",
+            "board_read",
+            serde_json::json!({}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let es = resp.result.unwrap()["entries"]
+            .as_array()
+            .expect("entries")
+            .clone();
+        assert_eq!(es.len(), 1, "the entry survived the restart");
+        assert_eq!(es[0]["text"], "the Lavine route is refuted");
+        assert_eq!(
+            es[0]["cursor"], 1,
+            "the cursor continues rather than restarting"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restart_after_a_gate_run_reservation_still_replays() {
+        let dir = g1_dir("reservation");
+
+        {
+            let mut state = AgentState::with_board_store(&dir, unfer_ffi::durable::Backend::Loro);
+            // Entry at cursor 1.
+            let r = bw(&mut state, "FACT", "w1", "before the gate run");
+            assert_eq!(r["entry"]["cursor"], 1);
+            // `gate_record` reserves cursor 2 for the run registry *without*
+            // writing an entry — the hole that `Board::from_ndjson` would
+            // refuse in a snapshot file.
+            let run = record_run(&mut state, "verify-invariants", "pass");
+            assert!(run >= 1);
+            // Entry at cursor 3.
+            let r = bw(&mut state, "FACT", "w1", "after the gate run");
+            assert_eq!(r["entry"]["cursor"], 3, "the reservation is not reused");
+        }
+
+        let mut state = AgentState::with_board_store(&dir, unfer_ffi::durable::Backend::Loro);
+        let resp = state.handle(&AgentRequest::new(
+            "g1-d3",
+            "board_read",
+            serde_json::json!({}),
+        ));
+        let es = resp.result.unwrap()["entries"]
+            .as_array()
+            .expect("entries")
+            .clone();
+        assert_eq!(es.len(), 2, "both entries replayed across the hole");
+        assert_eq!(es[0]["cursor"], 1);
+        assert_eq!(es[1]["cursor"], 3);
+        // And the cursor continues past the hole instead of rewinding into it.
+        let r = bw(&mut state, "FACT", "w1", "third");
+        assert_eq!(r["entry"]["cursor"], 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_durability_the_reply_makes_no_durability_claim() {
+        // The default state (and every other test here): no directory, so no
+        // `persisted_through` — a field that promised flushes the process
+        // never performed would be the exact lie G1 exists to prevent.
+        let mut state = AgentState::new();
+        let r = bw(&mut state, "FACT", "w1", "ram only");
+        assert!(
+            r.get("persisted_through").is_none(),
+            "no store, no durability claim: {r}"
+        );
+        assert!(r.get("durable_error").is_none());
     }
 }

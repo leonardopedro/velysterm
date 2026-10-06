@@ -19,6 +19,12 @@ mathed_core = { path = "../mathed_core" }
 # the sibling `unfer` repo, never a vendored copy.
 decide_core = { path = "../../../unfer/decide_core" }
 nalgebra = "0.34.2"
+# G1/A11: the durable board host. `unfer_ffi` is rlib-compatible (the same
+# dependency `mathed`/`mathed_mini` already carry for the H4 store) and is what
+# turns the agent's `BoardLog` from a type nobody could open into a store on
+# `UNFER_DURABLE_DIR`. Deliberate trade: the agent gains a real dependency tree
+# in exchange for a board that survives its own restart.
+unfer_ffi = { path = "../../../unfer/unfer_ffi" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
