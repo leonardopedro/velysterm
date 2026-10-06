@@ -6,6 +6,63 @@ declaration in `Cargo.toml`.
 
 ## Unreleased
 
+### Added — the result overlay summarizes long kernel text through
+`uk_summarize` before displaying it
+(`mathed_mini::kernel_bridge`, D.6 / C6)
+
+C6's kernel half (`uk_summarize` + `unfer_protocol::summarize`) had
+been done and tested for a while with no consumer: the editor kept
+dumping raw kernel/agent output into an overlay. The overlay here is
+two surfaces — the inline annotation spliced after each statement and
+the results-panel footer — and both now route a `KernelResult::StringValue`
+through `overlay_text` first. Text within `Channel::Editor`'s 320-char
+budget passes through verbatim (summarizing is lossy by construction:
+a sentence scoring at or below zero is dropped even when there is
+room for it, so running it over text that already fits would remove
+information the overlay had space to show). Text that does not fit is
+sent through **`uk_summarize`** with `channel: "editor"` — through the
+symbol rather than the pure Rust function beside it, because the
+wrapper is the part that validates the handle (S28), refuses an
+unknown channel instead of defaulting to one, and records
+`KernelEvent::Summarized`, the S46 observe-kind effect. When anything
+was dropped the line carries `… lossy: the full output is in the cell
+region and the run log`, so a condensed line can never read as a
+complete one; when the summarizer selected nothing at all (a base64
+blob, a progress bar — every sentence scores ≤ 0) the overlay says so
+with the character count instead of showing an empty result.
+
+Nothing was destroyed: the source string is never modified, so the
+full trace stays in `results()`, `run_log()` (verbatim Jupyter
+outputs included), the cell region and every export. The seam is one
+free function over a process-global summarizer session (a 2-mode
+chain created on first use), so the live bridge and the background
+`ScreenshotSnapshot` cannot disagree about what the overlay says.
+Verified end to end: a long `\kernel` stream lands in `results`
+whole, both overlay surfaces show the summary with the lossy flag, and
+the `Summarized{channel: editor, lossy: true}` event is on the
+session's cursored event log. Three tests, plus the existing suite
+(236 passed, 1 ignored).
+
+### Fixed — this repo's own `clippy -D warnings` gate was red
+(`kernel_client`, 11 lints)
+
+`rust.yml` runs `cargo clippy --workspace --all-features --all-targets
+-- -D warnings`, and the committed tree did not pass it: three unused
+imports in `org_runner.rs` (two of them used only by its test module,
+which still fails the lib target), `unnecessary_sort_by` in
+`coop_loop.rs`, `collapsible_if` ×3 and `field_reassign_with_default`
+in `unfer_agent.rs`, `clone_on_copy`, `needless_borrow` in the
+`org_runner` bin and an unused `Gate` import in `bench_runner`. The
+last one is the interesting: `if !((a - b).abs() <= 1e-9)` on f64 was
+refusing a calibrator install through a negated comparison nobody
+reads — and since `<=` on NaN is *false*, the refusal silently
+depended on that negation. It is now `!delta.is_finite() || delta >
+1e-9`, which says out loud what the check means and keeps the NaN arm.
+All 11 fixed at the source; `cargo clippy -p kernel_client
+--all-targets -- -D warnings` and `cargo clippy -p mathed_mini
+--all-targets -- -D warnings` are both green, and the suites they
+guard are unchanged (137 + 123 + 2 passed).
+
 ### Fixed — Up arrow didn't reach the line above when the caret was on
 a line containing a math superscript/subscript
 (`mathed_core::glyphs`, `mathed::glyphs`)

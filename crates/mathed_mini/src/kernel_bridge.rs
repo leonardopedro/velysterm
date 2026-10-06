@@ -27,6 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use kernel_client::worker::BlockResponse;
@@ -41,6 +42,7 @@ use crate::dispatch::{
     statement_to_exec_request_with_stdin, statement_to_kernel_request, statement_to_model_spec,
 };
 use crate::translate::{TranslateError, Translator};
+use unfer_protocol::summarize::{Channel, Summary};
 use unfer_protocol::{HintKind, PriorSpec, RepairHint, SolverSpec};
 
 /// A computed result for a `\prob` / `\event` statement.
@@ -401,11 +403,15 @@ impl KernelBridge {
                         format!("{label}: \\= {p:.4}")
                     }
                 }
+                // D.6: the panel is an overlay, so a long kernel output is
+                // summarized before it lands here (the raw text stays in the
+                // results map / run log / cell region).
                 KernelResult::StringValue(s) => {
+                    let shown = overlay_text(s).text;
                     if label.is_empty() {
-                        s.clone()
+                        shown
                     } else {
-                        format!("{label}: {s}")
+                        format!("{label}: {shown}")
                     }
                 }
                 // Rich media: a footer summary of the payloads
@@ -1780,11 +1786,222 @@ fn translator_offset(
     translators.get("").map(|def| def.span.start)
 }
 
+// ── D.6 / C6: the overlay summarizer seam ─────────────────────────────
+//
+// The overlay is text drawn *on top of* the reader's document — the inline
+// annotation spliced after each statement and the results-panel footer — so it
+// lives under `Channel::Editor`'s budget: anything long enough to need
+// scrolling has stopped being an overlay. Kernel/agent text that does not fit
+// is routed through `uk_summarize` **before** it is displayed; the source is
+// never modified, so the full trace stays exactly where it already was (the
+// results map, the run log, the cell region, every export).
+//
+// It goes through the C symbol rather than calling
+// `unfer_protocol::summarize` directly, because the wrapper is the part that
+// carries the project's rules: it validates the handle first (S28 — "does this
+// handle exist" stays answerable), refuses an unknown channel instead of
+// defaulting to one (a silent fallback would show the reader an amount nobody
+// chose), and records `KernelEvent::Summarized` (S46: an **observe**-kind
+// effect — it reads and renders, it changes nothing and never queues for
+// approval).
+
+/// Marker appended to a summary that dropped something, so a reader of the
+/// overlay can tell a condensed line from a complete one without asking. No
+/// `[`/`]`/`#`/`{`/`}`: the panel is spliced into Typst markup, where those
+/// are syntax.
+const OVERLAY_LOSSY_MARK: &str = " … lossy: the full output is in the cell region and the run log";
+
+/// Shown instead of the text when summarization itself failed. Honest and
+/// bounded: it says how much was withheld and where to read it, and it never
+/// dumps the raw trace into the overlay (the defect D.6 exists to remove).
+fn overlay_unavailable(source_chars: usize) -> String {
+    format!(
+        "{source_chars} chars of output, and the summarizer could not run: \
+         the full output is in the cell region and the run log"
+    )
+}
+
+/// Shown when the summarizer read the whole trace and selected nothing: every
+/// sentence scored at or below zero (no digit, path, code or verdict — a base64
+/// blob, a progress bar, a wall of connective prose). Saying that is better
+/// than an empty overlay that reads as "no output".
+fn overlay_no_signal(source_chars: usize) -> String {
+    format!(
+        "{source_chars} chars of output, and no sentence scored above zero to \
+         select: the full output is in the cell region and the run log"
+    )
+}
+
+/// The session `uk_summarize` is called on.
+///
+/// `uk_summarize` validates its handle before doing anything else — the
+/// capability model (S28) rests on "a call on a handle that does not exist
+/// fails", and the literal-trace path is no exception — so a caller has to
+/// hold a session. One is created on first use and held for the process
+/// lifetime; it is never evolved, conditioned or persisted.
+///
+/// Process-global because the overlay seam is shared by the live
+/// [`KernelBridge`] and the background [`ScreenshotSnapshot`] (different
+/// threads): if each held its own, the composed screenshot could disagree with
+/// the editor about what the overlay says.
+static OVERLAY_SUMMARIZER: Mutex<Option<i64>> = Mutex::new(None);
+
+/// Spec for the summarizer session — the cheapest model `prob_kernel` builds
+/// (the same 2-mode chain `unfer_ffi`'s own tests use). It exists so
+/// `uk_summarize` has a handle to validate, nothing more.
+const OVERLAY_SUMMARIZER_SPEC: &str = r#"{
+  "hamiltonian": {
+    "kind": "builtin",
+    "name": "harmonic_chain",
+    "params": {"n_modes": 2, "omega": 1.0}
+  },
+  "prior": {
+    "kind": "superposition",
+    "terms": [
+      {"re": 0.5, "im": 0.0, "spec": {"kind": "vacuum"}},
+      {"re": 0.5, "im": 0.0, "spec": {"kind": "bosons", "modes": [[0, 1]]}}
+    ]
+  },
+  "solver": {
+    "krylov_dim": 4,
+    "prune_eps": 1e-12,
+    "max_components": 50000,
+    "restarts": 1,
+    "device": {"kind": "cpu"}
+  }
+}"#;
+
+/// The summarizer handle, created on first use.
+///
+/// Returns `None` when the session could not be created. The failure is cached:
+/// retrying a failed `Session::new` on every overlay rebuild would turn one
+/// broken environment into a per-frame cost, and the caller's fallback is a
+/// bounded, honest line either way.
+fn overlay_summarizer() -> Option<i64> {
+    let mut guard = OVERLAY_SUMMARIZER.lock().unwrap_or_else(|e| e.into_inner());
+    match *guard {
+        Some(handle) => Some(handle),
+        None => {
+            let spec = OVERLAY_SUMMARIZER_SPEC.as_bytes();
+            let handle = unfer_ffi::uk_model_create(spec.as_ptr(), spec.len() as i64);
+            // Cache a failure as `-1`: negative handles are never valid, so
+            // every later caller takes the `<= 0` branch without touching the
+            // FFI again.
+            let stored = if handle > 0 { handle } else { -1 };
+            *guard = Some(stored);
+            (stored > 0).then_some(stored)
+        }
+    }
+}
+
+/// What the overlay shows for one blob of kernel/agent text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayText {
+    /// The text the overlay renders — already summarized when the source did
+    /// not fit [`Channel::Editor`]'s budget.
+    pub text: String,
+    /// True when `text` is not the whole source (something was dropped, or the
+    /// source could not be summarized at all).
+    pub lossy: bool,
+    /// Characters in the source this is standing in for.
+    pub source_chars: usize,
+}
+
+/// D.6 / C6: the display seam — everything the overlay is about to print for
+/// a kernel/agent string goes through here.
+///
+/// Text within the editor budget is returned verbatim: the summarizer is
+/// lossy *by construction* (a sentence scoring at or below zero is dropped even
+/// when there is room for it), so running it over text that already fits would
+/// remove information the overlay has space to show — a loss with no benefit.
+///
+/// Text that does not fit is sent through `uk_summarize` with `channel:
+/// "editor"`, and the overlay renders the summary plus, when anything was
+/// dropped, the `OVERLAY_LOSSY_MARK` pointer to the full trace. The full
+/// trace itself is never modified here: it stays in `results()` / `run_log()` /
+/// the cell region.
+pub fn overlay_text(raw: &str) -> OverlayText {
+    let budget = Channel::Editor.budget();
+    let source_chars = raw.chars().count();
+    if source_chars <= budget {
+        return OverlayText {
+            text: raw.to_string(),
+            lossy: false,
+            source_chars,
+        };
+    }
+    let Some(model) = overlay_summarizer() else {
+        return OverlayText {
+            text: overlay_unavailable(source_chars),
+            lossy: true,
+            source_chars,
+        };
+    };
+    let body = serde_json::json!({
+        "trace": raw,
+        "channel": Channel::Editor.as_str(),
+    })
+    .to_string();
+    if unfer_ffi::uk_summarize(model, body.as_ptr(), body.len() as i64) < 0 {
+        return OverlayText {
+            text: overlay_unavailable(source_chars),
+            lossy: true,
+            source_chars,
+        };
+    }
+    let Some(json) = last_ffi_result(model) else {
+        return OverlayText {
+            text: overlay_unavailable(source_chars),
+            lossy: true,
+            source_chars,
+        };
+    };
+    let Ok(summary) = serde_json::from_str::<Summary>(&json) else {
+        return OverlayText {
+            text: overlay_unavailable(source_chars),
+            lossy: true,
+            source_chars,
+        };
+    };
+    let lossy = summary.lossy;
+    let text = if summary.text.trim().is_empty() {
+        overlay_no_signal(source_chars)
+    } else if lossy {
+        format!("{}{OVERLAY_LOSSY_MARK}", summary.text)
+    } else {
+        summary.text
+    };
+    OverlayText {
+        text,
+        lossy,
+        source_chars,
+    }
+}
+
+/// Read the result slot a `uk_*` call just wrote, via the same two-call buffer
+/// protocol every other consumer uses (probe with a null buffer, then copy).
+fn last_ffi_result(model: i64) -> Option<String> {
+    let needed = unfer_ffi::uk_get_result(model, std::ptr::null_mut(), 0);
+    if needed <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; needed as usize + 1];
+    let written = unfer_ffi::uk_get_result(model, buf.as_mut_ptr(), buf.len() as i64);
+    if written != needed {
+        return None;
+    }
+    buf.truncate(needed as usize);
+    String::from_utf8(buf).ok()
+}
+
 /// Inline annotation markup derived purely from a results map —
 /// the single source of truth shared by the live [`KernelBridge`]
 /// and the background [`ScreenshotSnapshot`] (F1), so the two can
 /// never drift. Keyed by each prob body offset; see
 /// [`KernelBridge::result_annotations`].
+///
+/// D.6: the text half of an annotation goes through [`overlay_text`] first,
+/// so the composed screenshot and the live editor summarize identically.
 pub(crate) fn annotations_markup(results: &HashMap<usize, KernelResult>) -> HashMap<usize, String> {
     results
         .iter()
@@ -1800,7 +2017,7 @@ pub(crate) fn annotations_markup(results: &HashMap<usize, KernelResult>) -> Hash
                 // quote characters, so `#("...")` is required.)
                 KernelResult::StringValue(s) => format!(
                     " #text(rgb(\"#138000\"))[#{}]",
-                    crate::translate::typst_str_lit(s)
+                    crate::translate::typst_str_lit(&overlay_text(s).text)
                 ),
                 // Rich media: inline thumbnails — one small
                 // reflowable `#image` per payload right next to
@@ -2043,6 +2260,242 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// D.6/C6: a kernel stream that does not fit [`Channel::Editor`]'s
+    /// budget, mixing information-bearing sentences (digits, a commit, a path,
+    /// a verdict) with connective ones that score zero and must therefore be
+    /// dropped by the summarizer. One line: it travels as a JSON string in the
+    /// stub's answer.
+    const LONG_STREAM: &str = "Run 42 of the kernel finished with 3 tests passing. \
+                               Commit 5e7b2c6 touched unfer_protocol/src/board.rs. \
+                               Nothing else was noteworthy in this run. \
+                               The gate reported 0 failures across 12 checks. \
+                               I read some documentation for a while. \
+                               Cache 9fbae47 rebuilt in 1.4s and the overlay kept its budget. \
+                               Everything looked fine afterwards and the day continued. \
+                               Result 17 of 18 passed the harness in 0.42s.";
+
+    /// A connective sentence of [`LONG_STREAM`] — score zero, so an extractive
+    /// summarizer cannot select it. Its absence from the overlay is what makes
+    /// "only summarized text" checkable rather than asserted.
+    const DROPPED_SENTENCE: &str = "Nothing else was noteworthy";
+
+    /// An information-bearing sentence of [`LONG_STREAM`] — score above zero,
+    /// so it is eligible for selection.
+    const KEPT_SENTENCE: &str = "Run 42 of the kernel finished";
+
+    /// The overlay-summary tests share one process-wide summarizer session and
+    /// one process-wide event log, so they serialize on this instead of racing
+    /// each other's event counts.
+    static OVERLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Every `summarized` event the summarizer session has recorded (C1 cursored
+    /// log, read back through the same buffer protocol a foreign consumer uses).
+    fn summarized_events(model: i64) -> Vec<serde_json::Value> {
+        let body = serde_json::json!({ "since_cursor": 0u64, "max": 4096u64 }).to_string();
+        assert_eq!(
+            unfer_ffi::uk_events_poll(model, body.as_ptr(), body.len() as i64),
+            0,
+            "uk_events_poll failed"
+        );
+        let needed = unfer_ffi::uk_get_result(model, std::ptr::null_mut(), 0);
+        assert!(needed > 0, "poll payload probe returned {needed}");
+        let mut buf = vec![0u8; needed as usize + 1];
+        let written = unfer_ffi::uk_get_result(model, buf.as_mut_ptr(), buf.len() as i64);
+        assert_eq!(written, needed, "poll payload copied in full");
+        buf.truncate(needed as usize);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&buf).expect("poll payload is JSON");
+        payload["events"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e["event"]["type"] == "summarized")
+            .collect()
+    }
+
+    /// D.6 / C6 — the overlay calls `uk_summarize` for text that does not fit
+    /// the editor budget, and for nothing else.
+    ///
+    /// The event assertion is the point: `KernelEvent::Summarized` is pushed by
+    /// the FFI wrapper and by nothing else in the process, so this proves the
+    /// seam goes through the symbol (handle validated, channel refused when
+    /// unknown, observe-kind record) rather than through the pure Rust
+    /// function beside it.
+    #[test]
+    fn the_overlay_calls_uk_summarize_only_for_text_that_does_not_fit() {
+        let _guard = OVERLAY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let model = overlay_summarizer().expect("the summarizer session is creatable");
+
+        // Text that already fits: verbatim, and nothing recorded — there is no
+        // summarization to record.
+        let short = "kernel stream hi\n";
+        let before = summarized_events(model).len();
+        let got = overlay_text(short);
+        assert_eq!(
+            got,
+            OverlayText {
+                text: short.to_string(),
+                lossy: false,
+                source_chars: short.chars().count(),
+            },
+            "text inside the budget must reach the overlay untouched"
+        );
+        assert_eq!(
+            summarized_events(model).len(),
+            before,
+            "a text that already fits must not summon the summarizer"
+        );
+
+        // Text that does not fit: summarized through the symbol, lossy flagged,
+        // and the observe-kind (S46) record lands on the session.
+        let got = overlay_text(LONG_STREAM);
+        assert!(got.lossy, "a tight budget cannot hold this stream whole");
+        assert_eq!(got.source_chars, LONG_STREAM.chars().count());
+        let summary_chars = got.text.chars().count();
+        assert!(
+            summary_chars <= Channel::Editor.budget() + OVERLAY_LOSSY_MARK.chars().count(),
+            "overlay line {summary_chars} chars: {}",
+            got.text
+        );
+        assert!(
+            got.text.contains(KEPT_SENTENCE),
+            "an eligible sentence must be selected: {}",
+            got.text
+        );
+        assert!(
+            !got.text.contains(DROPPED_SENTENCE),
+            "the overlay shows only the summary: {}",
+            got.text
+        );
+        assert!(
+            got.text.contains("lossy"),
+            "a summary that dropped something must say so: {}",
+            got.text
+        );
+
+        let events = summarized_events(model);
+        assert!(events.len() > before, "an observe-kind record must land");
+        let ev = &events[events.len() - 1]["event"];
+        assert_eq!(ev["type"], "summarized");
+        assert_eq!(ev["channel"], "editor", "the overlay channel");
+        assert_eq!(ev["lossy"], true);
+        assert!(
+            ev["selected_sentences"].as_u64().unwrap() < ev["source_sentences"].as_u64().unwrap(),
+            "the record says how much was left out: {ev}"
+        );
+    }
+
+    /// D.6 / C6 — what a frontend actually renders: the inline annotation and
+    /// the results-panel footer carry the summary, while the results map keeps
+    /// the whole trace (the acceptance criterion has two halves).
+    #[test]
+    fn the_overlay_shows_only_summarized_text_while_the_trace_stays_retrievable() {
+        let _guard = OVERLAY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let raw = LONG_STREAM.to_string();
+
+        let mut results = HashMap::new();
+        results.insert(7usize, KernelResult::StringValue(raw.clone()));
+
+        let ann = annotations_markup(&results);
+        let line = ann.get(&7).expect("annotation for the statement");
+        assert!(
+            !line.contains(DROPPED_SENTENCE),
+            "annotation shows only the summary: {line}"
+        );
+        assert!(line.contains("lossy"), "lossy is surfaced: {line}");
+
+        let mut bridge = KernelBridge::new();
+        bridge
+            .results
+            .insert(7usize, KernelResult::StringValue(raw.clone()));
+        bridge.prob_names.insert(7usize, Some("out".to_string()));
+        let panel = bridge.result_panel_markup().expect("a result to show");
+        assert!(panel.starts_with("out: "), "labelled: {panel}");
+        assert!(
+            !panel.contains(DROPPED_SENTENCE),
+            "panel shows only the summary: {panel}"
+        );
+        assert!(panel.contains("lossy"), "lossy is surfaced: {panel}");
+        assert!(
+            panel.chars().count() < raw.chars().count(),
+            "the overlay is shorter than the trace it stands for"
+        );
+
+        // The other half: nothing was destroyed. The results map still holds
+        // the whole trace, which is what the cell region, the run log and every
+        // export read from.
+        match bridge.results().get(&7) {
+            Some(KernelResult::StringValue(s)) => assert_eq!(s, &raw, "trace retrievable"),
+            other => panic!("the raw result must stay in the map, got {other:?}"),
+        }
+        assert_eq!(
+            results.get(&7),
+            Some(&KernelResult::StringValue(raw.clone())),
+            "summarizing the view must not touch the source"
+        );
+    }
+
+    /// D.6 / C6, end to end: a long `\kernel` run lands in `results` whole,
+    /// and every overlay surface built from it shows the summary.
+    #[test]
+    fn a_long_kernel_run_reaches_the_overlay_summarized_and_the_region_whole() {
+        let _guard = OVERLAY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let stub = stub_kernel_module();
+        let doc = "= Cell\n#1 long #2 \\kernel(#1,#2, lang: \"mathed\", grants: \"kernel\")";
+        let mut bridge = KernelBridge::with_kernel_config(
+            &["kernel"],
+            &["mathed"],
+            Some(stub.to_str().expect("stub path")),
+        );
+        bridge.refresh(doc);
+        settle(&mut bridge, Duration::from_secs(15));
+
+        assert!(
+            LONG_STREAM.chars().count() > Channel::Editor.budget(),
+            "the fixture must actually exceed the overlay budget"
+        );
+        let out = bridge.block_outputs(0);
+        assert_eq!(out.len(), 1, "one kernel statement: {out:?}");
+        let off = out[0].0;
+        match &out[0].1 {
+            KernelResult::StringValue(s) => assert_eq!(s, LONG_STREAM, "region keeps the trace"),
+            other => panic!("expected the long stream, got {other:?}"),
+        }
+
+        let ann = bridge.result_annotations();
+        let line = ann.get(&off).expect("annotation for the kernel statement");
+        assert!(
+            !line.contains(DROPPED_SENTENCE),
+            "the inline overlay shows only the summary: {line}"
+        );
+        assert!(line.contains("lossy"), "lossy is surfaced: {line}");
+
+        let panel = bridge.result_panel_markup().expect("panel");
+        assert!(
+            !panel.contains(DROPPED_SENTENCE),
+            "the results panel shows only the summary: {panel}"
+        );
+        assert!(panel.contains("lossy"), "lossy is surfaced: {panel}");
+
+        // Full trace retrievable: the reproducibility record and the raw
+        // outputs are untouched by anything the overlay renders.
+        let log = bridge.run_log();
+        assert_eq!(log.len(), 1, "one recorded run: {log:?}");
+        match &log[0].result {
+            KernelResult::StringValue(s) => assert_eq!(s, LONG_STREAM, "run log keeps the trace"),
+            other => panic!("expected the raw stream on the record, got {other:?}"),
+        }
+        assert!(
+            log[0].outputs.iter().any(|o| matches!(
+                o,
+                kernel_client::KernelOutput::Stream { text, .. } if text == LONG_STREAM
+            )),
+            "the verbatim Jupyter-shaped outputs stay on the record: {:?}",
+            log[0].outputs
+        );
     }
 
     fn prob_offset(doc: &str) -> usize {
@@ -3384,7 +3837,7 @@ mod tests {
     fn stub_kernel_module() -> std::path::PathBuf {
         use std::hash::{Hash as _, Hasher as _};
         use std::io::Write as _;
-        let script = r#"#!/bin/sh
+        const BASE: &str = r#"#!/bin/sh
 read -r line
 case "$line" in
   *stream*) printf '%s' '{"outputs":[{"output_type":"stream","name":"stdout","text":"kernel stream hi\n"}]}' ;;
@@ -3393,6 +3846,15 @@ case "$line" in
   *error*) printf '%s' '{"outputs":[{"output_type":"error","ename":"KernelFailed","evalue":"boom","traceback":[]}]}' ;;
 esac
 "#;
+        // D.6/C6: the `*long*` branch answers with a stream that does not fit
+        // the editor overlay's budget, so the summarize-before-display path is
+        // exercised end to end (worker → results → overlay) instead of only at
+        // the unit seam. Its body marker is the word `long`.
+        let long_json = format!(
+            r#"{{"outputs":[{{"output_type":"stream","name":"stdout","text":"{LONG_STREAM}"}}]}}"#
+        );
+        let branch = format!("  *long*) printf '%s' '{long_json}' ;;\n");
+        let script = BASE.replacen("  *stream*)", &format!("{branch}  *stream*)"), 1);
         let mut h = std::collections::hash_map::DefaultHasher::new();
         script.hash(&mut h);
         let nonce = std::time::SystemTime::now()
