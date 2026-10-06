@@ -15,7 +15,7 @@
 //! Nothing here claims the project scales. It makes the question *askable*: at
 //! small N, on this machine, against this machine's own golden gates.
 
-use kernel_client::bench::{self, Gate, Options, Task};
+use kernel_client::bench::{self, Options, Task};
 use std::time::Duration;
 
 fn main() {

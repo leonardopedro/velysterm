@@ -52,10 +52,10 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 use unfer_protocol::board::{Board, BoardKind};
-use unfer_protocol::coop::{ClaimOutcome, ClaimScope, Coop, LiveClaim};
-use unfer_protocol::evidence::{GateRun, Verdict};
+use unfer_protocol::coop::{ClaimOutcome, Coop, LiveClaim};
+use unfer_protocol::evidence::GateRun;
 use unfer_protocol::memory::Memory;
-use unfer_protocol::nudge::{Checkpoint, NudgeKind};
+use unfer_protocol::nudge::Checkpoint;
 
 use crate::coop_loop::{Delivery, LoopState, RetryPolicy, Step};
 
@@ -294,14 +294,14 @@ impl OrgHost {
                 worker: id.to_string(),
             });
         }
-        if let Some(budget) = self.spawn_budget {
-            if self.workers.len() >= budget {
-                self.stats.spawn_refusals += 1;
-                return Err(SpawnRefusal::RateLimited {
-                    live: self.workers.len(),
-                    budget,
-                });
-            }
+        if let Some(budget) = self.spawn_budget
+            && self.workers.len() >= budget
+        {
+            self.stats.spawn_refusals += 1;
+            return Err(SpawnRefusal::RateLimited {
+                live: self.workers.len(),
+                budget,
+            });
         }
         self.workers
             .push(WorkerSlot::new(id.to_string(), preset.to_string()));
@@ -353,7 +353,7 @@ impl OrgHost {
         // never acts on stale context, and that only works if delivery happens
         // before the step is chosen rather than as a side effect of it.
         let (step, queued, delivered) = {
-            let policy = self.retry_policy.clone();
+            let policy = self.retry_policy;
             let w = self.worker(worker)?;
             let queued = w.inbox.len();
             let mut sink: Vec<Delivery> = Vec::new();

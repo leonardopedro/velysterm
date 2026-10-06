@@ -2296,17 +2296,17 @@ impl AgentState {
         let claimed = req.params.get("embedding_version").and_then(|v| v.as_str());
         if let Some(engine) = self.decide.as_ref() {
             // D7: this observation must agree with the engine's identity.
-            if let Some(ver) = claimed {
-                if let Err(e) = engine.check_embedding_version(ver) {
-                    return AgentResponse::err(
-                        &req.id,
-                        Diagnostic::new(
-                            Code::BAD_JSON,
-                            format!("decide_update refused: {e}"),
-                            Severity::Error,
-                        ),
-                    );
-                }
+            if let Some(ver) = claimed
+                && let Err(e) = engine.check_embedding_version(ver)
+            {
+                return AgentResponse::err(
+                    &req.id,
+                    Diagnostic::new(
+                        Code::BAD_JSON,
+                        format!("decide_update refused: {e}"),
+                        Severity::Error,
+                    ),
+                );
             }
             let have = engine.config().clone();
             match decide_config_from(&req.params, have.clone()) {
@@ -2327,8 +2327,10 @@ impl AgentState {
                 Err(d) => return AgentResponse::err(&req.id, d),
             }
         } else {
-            let mut base = DecideConfig::default();
-            base.embedding_dim = x.len();
+            let mut base = DecideConfig {
+                embedding_dim: x.len(),
+                ..DecideConfig::default()
+            };
             if let Some(ver) = claimed {
                 base.embedding_version = ver.to_string();
             }
@@ -2336,17 +2338,17 @@ impl AgentState {
                 Ok(c) => c,
                 Err(d) => return AgentResponse::err(&req.id, d),
             };
-            if let Some(ver) = claimed {
-                if cfg.embedding_version != ver {
-                    return AgentResponse::err(
-                        &req.id,
-                        bad_json_diag(&format!(
-                            "'config.embedding_version' ({}) contradicts the observation's \
-                             'embedding_version' ({ver})",
-                            cfg.embedding_version
-                        )),
-                    );
-                }
+            if let Some(ver) = claimed
+                && cfg.embedding_version != ver
+            {
+                return AgentResponse::err(
+                    &req.id,
+                    bad_json_diag(&format!(
+                        "'config.embedding_version' ({}) contradicts the observation's \
+                         'embedding_version' ({ver})",
+                        cfg.embedding_version
+                    )),
+                );
             }
             match DecideCore::new(cfg) {
                 Ok(c) => self.decide = Some(c),
@@ -2366,17 +2368,17 @@ impl AgentState {
             .decide
             .as_mut()
             .expect("engine constructed on the first call");
-        if engine.id_of(&label).is_none() {
-            if let Err(e) = engine.register(&label) {
-                return AgentResponse::err(
-                    &req.id,
-                    Diagnostic::new(
-                        Code::BAD_JSON,
-                        format!("decide_update refused: {e}"),
-                        Severity::Error,
-                    ),
-                );
-            }
+        if engine.id_of(&label).is_none()
+            && let Err(e) = engine.register(&label)
+        {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!("decide_update refused: {e}"),
+                    Severity::Error,
+                ),
+            );
         }
         if let Err(e) = engine.observe(&label, &x) {
             return AgentResponse::err(
@@ -2782,7 +2784,12 @@ impl AgentState {
                 ),
             );
         }
-        if !((report.ece - calibrator.fit_ece).abs() <= 1e-9) {
+        // Written as a magnitude comparison rather than a negated `<=`, which
+        // clippy (rightly) flags on f64: a NaN delta must REFUSE the install,
+        // and `<=` on NaN is false — so the non-finite arm is explicit here
+        // instead of falling out of a negation nobody reads.
+        let ece_delta = (report.ece - calibrator.fit_ece).abs();
+        if !ece_delta.is_finite() || ece_delta > 1e-9 {
             return AgentResponse::err(
                 &req.id,
                 Diagnostic::new(

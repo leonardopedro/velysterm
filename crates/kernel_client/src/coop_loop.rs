@@ -371,7 +371,7 @@ impl LoopState {
         let mut batch = source.drain();
         // Most urgent first, and stable within a priority: an urgent claim
         // collision must reach the worker before the context it sits in.
-        batch.sort_by(|a, b| b.priority.cmp(&a.priority));
+        batch.sort_by_key(|d| std::cmp::Reverse(d.priority));
 
         for d in batch {
             if self.already_seen(&d) {

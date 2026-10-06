@@ -78,7 +78,7 @@ fn main() {
     }
 
     for _ in 0..for_tick {
-        let nudged = host.tick(300, &unfer_protocol::nudge::DEFAULT_CHECKPOINTS);
+        let nudged = host.tick(300, unfer_protocol::nudge::DEFAULT_CHECKPOINTS);
         for id in nudged {
             eprintln!("org_runner: nudged {id}");
         }
