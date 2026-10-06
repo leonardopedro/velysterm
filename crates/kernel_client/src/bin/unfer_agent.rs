@@ -9,7 +9,7 @@
 //! {"id":"1","ok":true,"result":{"version":1},"timing_ms":0}
 //! ```
 //!
-//! Ops: the full 40-op registry lives in
+//! Ops: the full 54-op registry lives in
 //! `unfer_protocol::ops::AGENT_OPS`. Namespaces:
 //! - kernel session: `version`, `create_model`, `set_prior`,
 //!   `evolve`, `condition`, `probability`, `snapshot`,
@@ -24,6 +24,9 @@
 //! - agent-local: `save_session`, `restore_session`, `poll_events`,
 //!   `close_model`, `logos_compile`, `ode_to_hamiltonian`,
 //!   `export_html`, `export_tex`.
+//! - analytic decision engine (observe-kind only): `decide_update`,
+//!   `decide_answer`, `decide_state`, `decide_recalibrate`. Advice, never
+//!   authority — see `unfer_protocol::decide`.
 //!
 //! Unknown ops return `ok:false` with code UK-1001 and a
 //! `ReplaceValue` hint listing the valid op names.
@@ -35,9 +38,12 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::time::Instant;
 
+use decide_core::{DecideConfig, DecideCore};
+use nalgebra::DVector;
 use prob_kernel::{Session, SessionBlob};
 use unfer_consensus::{ConsensusNode, Keypair, LocalConsensus};
 use unfer_identity::DidManager;
+use unfer_protocol::decide::{Answer, DecideState, Question};
 use unfer_protocol::{
     AgentRequest, AgentResponse, BeliefPropagationOptsSpec, Code, ConsensusTransaction, ContentOp,
     ContentRef, Diagnostic, EventPredicate, HintKind, HmcOptsSpec, KernelEvent, ModelSpec,
@@ -99,6 +105,106 @@ fn bad_json_diag(msg: &str) -> Diagnostic {
         format!("Invalid JSON: {}", msg),
         Severity::Error,
     )
+}
+
+// ── D5: the analytic decision engine (`decide_*` ops) ─────────────────────
+//
+// Helpers shared by the four dispatch arms. All four ops are observe-kind:
+// they record, ask, report and re-baseline — there is deliberately no path
+// here that can approve, merge, gate, sign or certify (see
+// `unfer_protocol::decide`).
+
+/// The diagnostic for "no engine exists yet", shared by three ops so a caller
+/// gets one name to grep for instead of three phrasings.
+fn no_decide_engine_diag() -> Diagnostic {
+    Diagnostic::new(
+        Code::BAD_JSON,
+        "No decide engine yet: call decide_update first (the engine is built \
+         from the first observation)",
+        Severity::Error,
+    )
+}
+
+/// A wire embedding: a non-empty array of finite numbers.
+fn parse_embedding(v: Option<&serde_json::Value>, field: &str) -> Result<DVector<f64>, Diagnostic> {
+    let arr = match v {
+        Some(serde_json::Value::Array(a)) => a,
+        Some(_) => {
+            return Err(bad_json_diag(&format!(
+                "'{field}' must be an array of numbers"
+            )));
+        }
+        None => return Err(bad_json_diag(&format!("missing '{field}' field"))),
+    };
+    if arr.is_empty() {
+        return Err(bad_json_diag(&format!("'{field}' must not be empty")));
+    }
+    let mut vals = Vec::with_capacity(arr.len());
+    for (i, x) in arr.iter().enumerate() {
+        match x.as_f64() {
+            Some(f) if f.is_finite() => vals.push(f),
+            _ => {
+                return Err(bad_json_diag(&format!(
+                    "'{field}[{i}]' must be a finite number"
+                )));
+            }
+        }
+    }
+    Ok(DVector::from_row_slice(&vals))
+}
+
+/// Apply the optional `config` object of a `decide_update` onto `base`.
+///
+/// `base` is the default shape (input dimension taken from the first
+/// embedding) on the first update, and the engine in force on later ones — so
+/// a `config` that would change the engine's shape is caught by comparing the
+/// patched result against the engine instead of being silently dropped.
+/// Unknown fields are a bad request, not a default: ignoring a typo'd `head`
+/// would run the engine in a shape the caller never asked for.
+fn decide_config_from(
+    params: &serde_json::Value,
+    base: DecideConfig,
+) -> Result<DecideConfig, Diagnostic> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Patch {
+        embedding_version: Option<String>,
+        embedding_dim: Option<usize>,
+        projected_dim: Option<usize>,
+        heads: Option<usize>,
+        mode: Option<decide_core::Mode>,
+        lambda: Option<f64>,
+        alpha: Option<f64>,
+    }
+    let raw = match params.get("config") {
+        None => return Ok(base),
+        Some(c) => c.clone(),
+    };
+    let patch: Patch = serde_json::from_value(raw)
+        .map_err(|e| bad_json_diag(&format!("invalid 'config': {e}")))?;
+    let mut cfg = base;
+    if let Some(v) = patch.embedding_version {
+        cfg.embedding_version = v;
+    }
+    if let Some(d) = patch.embedding_dim {
+        cfg.embedding_dim = d;
+    }
+    if let Some(d) = patch.projected_dim {
+        cfg.projected_dim = d;
+    }
+    if let Some(h) = patch.heads {
+        cfg.heads = h;
+    }
+    if let Some(m) = patch.mode {
+        cfg.mode = m;
+    }
+    if let Some(l) = patch.lambda {
+        cfg.lambda = l;
+    }
+    if let Some(a) = patch.alpha {
+        cfg.alpha = a;
+    }
+    Ok(cfg)
 }
 
 // ── Plan R: certificate-ledger helpers
@@ -207,6 +313,12 @@ struct AgentState {
     /// Without this a worker polled every second is told to stop claiming new
     /// scope a thousand times, which trains it to ignore nudges entirely.
     nudges_sent: std::collections::HashSet<(String, unfer_protocol::nudge::NudgeKind)>,
+    /// D5: the analytic decision engine. `None` until the first
+    /// `decide_update`: the engine's shape arrives with the first observation,
+    /// so there is nothing honest to construct before that. Observe-kind only —
+    /// nothing reachable through this field can approve, merge, gate, sign or
+    /// certify. See `unfer_protocol::decide`.
+    decide: Option<DecideCore>,
 }
 
 impl AgentState {
@@ -233,6 +345,7 @@ impl AgentState {
             handoffs: Vec::new(),
             runs: unfer_protocol::evidence::GateRuns::new(),
             nudges_sent: std::collections::HashSet::new(),
+            decide: None,
         }
     }
 
@@ -2041,9 +2154,567 @@ impl AgentState {
             // allowlist. That is a security-sensitive feature with its own review,
             // not a missing `match` arm, so it is tracked as a work order rather
             // than done as an afterthought here.
+            // D5: the analytic decision engine. Observe-kind only — these
+            // four ops record, ask, report and re-baseline; none of them can
+            // approve, merge, gate, sign or certify. See
+            // `unfer_protocol::decide` and docs/PROTOCOL.md.
+            "decide_update" => self.decide_update(req),
+            "decide_answer" => self.decide_answer(req),
+            "decide_state" => self.decide_state(req),
+            "decide_recalibrate" => self.decide_recalibrate(req),
             "exec" | "kernel_exec" => AgentResponse::err(&req.id, unimplemented_op_diag(&req.op)),
             _ => AgentResponse::err(&req.id, unknown_op_diag(&req.op)),
         }
+    }
+
+    // ── D5: the four `decide_*` ops ─────────────────────────────────────────
+    //
+    // All four are observe-kind. The engine is advice: it can be asked what it
+    // thinks, and it can be fed, but nothing here reaches a trust path.
+
+    /// `decide_update` — record one labelled embedding.
+    ///
+    /// The engine's config arrives here. On the first call the engine is built
+    /// from the optional `config` object, with `embedding_dim` defaulting to
+    /// the length of the first embedding (the only dimension this process has
+    /// observed); on later calls a `config` must describe the engine in force
+    /// or the op is refused rather than silently ignored. An observation
+    /// carrying a different `embedding_version` than the engine was built
+    /// under is refused too (D7): input-space statistics are not comparable
+    /// across embedding models, so the honest answer is to refuse, never to
+    /// re-project.
+    fn decide_update(&mut self, req: &AgentRequest) -> AgentResponse {
+        let label = match req.params.get("label").and_then(|v| v.as_str()) {
+            Some(l) if !l.trim().is_empty() => l.trim().to_string(),
+            _ => {
+                return AgentResponse::err(
+                    &req.id,
+                    bad_json_diag("missing or empty 'label' field"),
+                );
+            }
+        };
+        let x = match parse_embedding(req.params.get("embedding"), "embedding") {
+            Ok(x) => x,
+            Err(d) => return AgentResponse::err(&req.id, d),
+        };
+        let claimed = req.params.get("embedding_version").and_then(|v| v.as_str());
+        if let Some(engine) = self.decide.as_ref() {
+            // D7: this observation must agree with the engine's identity.
+            if let Some(ver) = claimed {
+                if let Err(e) = engine.check_embedding_version(ver) {
+                    return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::BAD_JSON,
+                            format!("decide_update refused: {e}"),
+                            Severity::Error,
+                        ),
+                    );
+                }
+            }
+            let have = engine.config().clone();
+            match decide_config_from(&req.params, have.clone()) {
+                Ok(want) if want == have => {}
+                Ok(want) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::BAD_JSON,
+                            format!(
+                                "'config' does not match the engine in force: asked \
+                                 {want:?}, engine is {have:?}"
+                            ),
+                            Severity::Error,
+                        ),
+                    );
+                }
+                Err(d) => return AgentResponse::err(&req.id, d),
+            }
+        } else {
+            let mut base = DecideConfig::default();
+            base.embedding_dim = x.len();
+            if let Some(ver) = claimed {
+                base.embedding_version = ver.to_string();
+            }
+            let cfg = match decide_config_from(&req.params, base) {
+                Ok(c) => c,
+                Err(d) => return AgentResponse::err(&req.id, d),
+            };
+            if let Some(ver) = claimed {
+                if cfg.embedding_version != ver {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!(
+                            "'config.embedding_version' ({}) contradicts the observation's \
+                             'embedding_version' ({ver})",
+                            cfg.embedding_version
+                        )),
+                    );
+                }
+            }
+            match DecideCore::new(cfg) {
+                Ok(c) => self.decide = Some(c),
+                Err(e) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        Diagnostic::new(
+                            Code::BAD_JSON,
+                            format!("decide config rejected: {e}"),
+                            Severity::Error,
+                        ),
+                    );
+                }
+            }
+        }
+        let engine = self
+            .decide
+            .as_mut()
+            .expect("engine constructed on the first call");
+        if engine.id_of(&label).is_none() {
+            if let Err(e) = engine.register(&label) {
+                return AgentResponse::err(
+                    &req.id,
+                    Diagnostic::new(
+                        Code::BAD_JSON,
+                        format!("decide_update refused: {e}"),
+                        Severity::Error,
+                    ),
+                );
+            }
+        }
+        if let Err(e) = engine.observe(&label, &x) {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!("decide_update refused: {e}"),
+                    Severity::Error,
+                ),
+            );
+        }
+        // Fit is best-effort: a single class has no solve yet, and the
+        // observation above is already recorded — report that honestly rather
+        // than failing an op that succeeded.
+        let samples = engine.samples();
+        let labels: Vec<String> = engine.labels().to_vec();
+        let version = engine.version().to_string();
+        let (fitted, fit_error) = match engine.fit() {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        AgentResponse::ok(
+            &req.id,
+            serde_json::json!({
+                "ok": true,
+                "label": label,
+                "samples": samples,
+                "labels": labels,
+                "fitted": fitted,
+                "fit_error": fit_error,
+                "engine_version": version,
+                "effect_kind": "observe",
+            }),
+        )
+    }
+
+    /// `decide_answer` — ask a typed `Question`.
+    ///
+    /// The question arrives as serde data, so `unfer_protocol::decide`'s enum
+    /// discipline applies unchanged: a `Choice` carries its options at call
+    /// time and must be given one embedding per option, and the answer that
+    /// comes back carries the question's own `key` (the engine leaves the key
+    /// empty — pairing request with answer is the caller's contract). An
+    /// engine with no fitted readout refuses rather than answering from a
+    /// solve that has not happened.
+    fn decide_answer(&mut self, req: &AgentRequest) -> AgentResponse {
+        let q: Question = match req.params.get("question") {
+            None => {
+                return AgentResponse::err(&req.id, bad_json_diag("missing 'question' field"));
+            }
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(q) => q,
+                Err(e) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid 'question': {e}")),
+                    );
+                }
+            },
+        };
+        if let Err(m) = q.validate() {
+            return AgentResponse::err(&req.id, bad_json_diag(&m));
+        }
+        let engine = match self.decide.as_ref() {
+            Some(e) => e,
+            None => return AgentResponse::err(&req.id, no_decide_engine_diag()),
+        };
+        if !engine.is_fitted() {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    "decide engine has no fitted readout yet; keep calling \
+                     decide_update until 'fitted' is true",
+                    Severity::Error,
+                ),
+            );
+        }
+        let answered: Result<Answer, decide_core::DecideError> = match &q {
+            Question::Noul { .. } => {
+                let x = match parse_embedding(req.params.get("embedding"), "embedding") {
+                    Ok(x) => x,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                engine.answer_noul(q.text(), &x).map(Answer::Noul)
+            }
+            Question::Score { levels, .. } => {
+                let x = match parse_embedding(req.params.get("embedding"), "embedding") {
+                    Ok(x) => x,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                engine
+                    .answer_score(q.text(), &x, *levels)
+                    .map(Answer::Score)
+            }
+            Question::Choice { options, .. } => {
+                let xs = match req.params.get("embeddings") {
+                    None => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag(
+                                "a Choice question needs 'embeddings': one embedding per option",
+                            ),
+                        );
+                    }
+                    Some(v) => match v.as_array() {
+                        None => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'embeddings' must be an array"),
+                            );
+                        }
+                        Some(arr) => {
+                            if arr.len() != options.len() {
+                                return AgentResponse::err(
+                                    &req.id,
+                                    bad_json_diag(&format!(
+                                        "'embeddings' must have one embedding per option: \
+                                         {} option(s), {} embedding(s)",
+                                        options.len(),
+                                        arr.len()
+                                    )),
+                                );
+                            }
+                            let mut xs = Vec::with_capacity(arr.len());
+                            for (i, e) in arr.iter().enumerate() {
+                                match parse_embedding(Some(e), &format!("embeddings[{i}]")) {
+                                    Ok(x) => xs.push(x),
+                                    Err(d) => return AgentResponse::err(&req.id, d),
+                                }
+                            }
+                            xs
+                        }
+                    },
+                };
+                engine.answer_choice(q.text(), &xs).map(Answer::Choice)
+            }
+        };
+        match answered {
+            Ok(mut a) => {
+                match &mut a {
+                    Answer::Noul(x) => x.key = q.key().to_string(),
+                    Answer::Choice(x) => x.key = q.key().to_string(),
+                    Answer::Score(x) => x.key = q.key().to_string(),
+                }
+                let admissible = a.is_admissible_as_advice();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "answer": a,
+                        "admissible_as_advice": admissible,
+                        "effect_kind": "observe",
+                    }),
+                )
+            }
+            Err(e) => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!("decide_answer refused: {e}"),
+                    Severity::Error,
+                ),
+            ),
+        }
+    }
+
+    /// `decide_state` — what the engine has seen, and whether its calibrator
+    /// is still trustworthy.
+    ///
+    /// A `probs` vector, when supplied, is fed to the armed drift monitor
+    /// first, so class-arrival drift is measured on every state read (D12)
+    /// instead of whenever someone remembers to check. `drift_measured: false`
+    /// means no monitor was armed — never "zero drift".
+    fn decide_state(&mut self, req: &AgentRequest) -> AgentResponse {
+        let engine = match self.decide.as_mut() {
+            Some(e) => e,
+            None => return AgentResponse::err(&req.id, no_decide_engine_diag()),
+        };
+        let mut drift_measured = false;
+        if let Some(v) = req.params.get("probs") {
+            let probs: Vec<f64> = match serde_json::from_value(v.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid 'probs': {e}")),
+                    );
+                }
+            };
+            drift_measured = engine.measure_drift(&probs).is_some();
+        }
+        let cfg = engine.config();
+        let cal = engine.calibrator();
+        let state = DecideState {
+            engine_version: engine.version().to_string(),
+            protocol_version: unfer_protocol::decide::PROTOCOL_VERSION.to_string(),
+            mode: match cfg.mode {
+                decide_core::Mode::Anacp => "anacp",
+                decide_core::Mode::Ananc => "ananc",
+            }
+            .to_string(),
+            embedding_version: cfg.embedding_version.clone(),
+            embedding_dim: cfg.embedding_dim,
+            projected_dim: cfg.projected_dim,
+            heads: cfg.heads,
+            labels: engine.labels().to_vec(),
+            samples: engine.samples(),
+            calibrated: cal.is_calibrated(decide_core::DEFAULT_MAX_ECE),
+            calibrator_mechanism: serde_json::to_value(cal.mechanism)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string()),
+            // NaN before any fit — serde renders it as JSON `null`, which is
+            // the honest rendering of "never measured".
+            fit_ece: cal.fit_ece,
+            needs_recalibration: engine.needs_recalibration(),
+            observed_drift: engine.observed_drift(),
+        };
+        let fitted = engine.is_fitted();
+        AgentResponse::ok(
+            &req.id,
+            serde_json::json!({
+                "state": state,
+                "fitted": fitted,
+                "drift_measured": drift_measured,
+                "effect_kind": "observe",
+            }),
+        )
+    }
+
+    /// `decide_recalibrate` — install a pinned calibration, or re-baseline the
+    /// drift monitor.
+    ///
+    /// A calibrator may only enter the engine together with the report that
+    /// earned it: the report must meet the R1–R5 contract, be for *this*
+    /// engine build, and agree with the calibrator on mechanism, version and
+    /// measured ECE — otherwise the install is refused (D6). Re-baselining
+    /// without a calibrator only resets the monitor's reference; it changes no
+    /// number an answer will carry.
+    fn decide_recalibrate(&mut self, req: &AgentRequest) -> AgentResponse {
+        let engine = match self.decide.as_mut() {
+            Some(e) => e,
+            None => return AgentResponse::err(&req.id, no_decide_engine_diag()),
+        };
+        let reference: Vec<f64> = match req.params.get("reference") {
+            None => {
+                return AgentResponse::err(
+                    &req.id,
+                    bad_json_diag(
+                        "missing 'reference' field (per-class probabilities captured at \
+                         calibration time)",
+                    ),
+                );
+            }
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid 'reference': {e}")),
+                    );
+                }
+            },
+        };
+        if reference.is_empty() {
+            return AgentResponse::err(&req.id, bad_json_diag("'reference' must not be empty"));
+        }
+        let report: Option<decide_core::CalibrationReport> = match req.params.get("report") {
+            None => None,
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid 'report': {e}")),
+                    );
+                }
+            },
+        };
+        let epsilon: f64 = match req.params.get("epsilon") {
+            None => report.as_ref().map(|r| r.max_drift_epsilon).unwrap_or(0.05),
+            Some(v) => match v.as_f64() {
+                Some(e) => e,
+                None => {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag("'epsilon' must be a number"),
+                    );
+                }
+            },
+        };
+        if !(epsilon.is_finite() && epsilon >= 0.0) {
+            return AgentResponse::err(
+                &req.id,
+                bad_json_diag("'epsilon' must be a finite, non-negative number"),
+            );
+        }
+        let calibrator = match req.params.get("calibrator") {
+            None => {
+                if report.is_some() {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(
+                            "'report' without 'calibrator': a report alone installs nothing",
+                        ),
+                    );
+                }
+                // Re-baseline only: same calibrator, fresh reference. This
+                // clears `needs_recalibration`, which is exactly the claim
+                // "the distribution was re-measured" — nothing else changes.
+                let cal = engine.calibrator().clone();
+                engine.set_calibrator(cal, reference, epsilon);
+                return AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "ok": true,
+                        "installed": false,
+                        "calibrated": engine
+                            .calibrator()
+                            .is_calibrated(decide_core::DEFAULT_MAX_ECE),
+                        "needs_recalibration": engine.needs_recalibration(),
+                        "observed_drift": engine.observed_drift(),
+                        "effect_kind": "observe",
+                    }),
+                );
+            }
+            Some(v) => match serde_json::from_value::<decide_core::Calibrator>(v.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    return AgentResponse::err(
+                        &req.id,
+                        bad_json_diag(&format!("invalid 'calibrator': {e}")),
+                    );
+                }
+            },
+        };
+        if let Err(r) = calibrator.validate() {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!("calibrator rejected: {r}"),
+                    Severity::Error,
+                ),
+            );
+        }
+        let report = match report {
+            Some(r) => r,
+            None => {
+                return AgentResponse::err(
+                    &req.id,
+                    bad_json_diag(
+                        "installing a calibrator requires its 'report': an unmeasured \
+                         calibrator may not carry the word calibrated",
+                    ),
+                );
+            }
+        };
+        if !report.meets_contract() {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!(
+                        "calibration report does not meet the R1-R5 contract: {}",
+                        report.failed_requirements().join(", ")
+                    ),
+                    Severity::Error,
+                ),
+            );
+        }
+        if report.engine_version != engine.version() {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!(
+                        "calibration report is for engine {}, this engine is {}; \
+                         calibrators do not transfer across engine builds",
+                        report.engine_version,
+                        engine.version()
+                    ),
+                    Severity::Error,
+                ),
+            );
+        }
+        if report.mechanism != calibrator.mechanism
+            || report.calibrator_version != calibrator.version
+        {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!(
+                        "calibrator does not match its report: report has mechanism \
+                         {:?} v{}, calibrator is {:?} v{}",
+                        report.mechanism,
+                        report.calibrator_version,
+                        calibrator.mechanism,
+                        calibrator.version
+                    ),
+                    Severity::Error,
+                ),
+            );
+        }
+        if !((report.ece - calibrator.fit_ece).abs() <= 1e-9) {
+            return AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::BAD_JSON,
+                    format!(
+                        "calibrator fit_ece {} does not match the report's measured \
+                         ece {}; an unmeasured calibrator cannot install",
+                        calibrator.fit_ece, report.ece
+                    ),
+                    Severity::Error,
+                ),
+            );
+        }
+        engine.set_calibrator(calibrator, reference, epsilon);
+        AgentResponse::ok(
+            &req.id,
+            serde_json::json!({
+                "ok": true,
+                "installed": true,
+                "calibrated": engine
+                    .calibrator()
+                    .is_calibrated(decide_core::DEFAULT_MAX_ECE),
+                "needs_recalibration": engine.needs_recalibration(),
+                "observed_drift": engine.observed_drift(),
+                "epsilon": epsilon,
+                "effect_kind": "observe",
+            }),
+        )
     }
 }
 
@@ -4756,5 +5427,388 @@ mod tests {
                 "advertised op '{op}' has no dispatch arm"
             );
         }
+    }
+
+    // ── D5: the analytic decision engine over the real dispatcher ────────────
+    //
+    // The protocol's acceptance (plan 3, D5) is a round trip through the ops,
+    // not just serde: a typed question goes in, an answer with the question's
+    // key comes back, and every op answers `effect_kind: "observe"`.
+
+    fn decide_op(state: &mut AgentState, op: &str, params: serde_json::Value) -> AgentResponse {
+        state.handle(&AgentRequest::new("d5", op, params))
+    }
+
+    /// Boot the engine with a small, separable corpus: three classes, dim 4,
+    /// two observations each. The same `config` travels with every update — a
+    /// config that matches the engine in force must be accepted, not refused.
+    fn decide_boot(state: &mut AgentState, embedding_version: &str) {
+        let cfg = serde_json::json!({
+            "embedding_version": embedding_version,
+            "projected_dim": 16,
+            "heads": 1,
+            "mode": "ananc",
+        });
+        for (label, base) in [
+            ("theory-a", [1.0, 0.0, 0.0, 0.0]),
+            ("theory-b", [0.0, 1.0, 0.0, 0.0]),
+            ("theory-c", [0.0, 0.0, 1.0, 0.0]),
+        ] {
+            for _ in 0..2 {
+                let resp = decide_op(
+                    state,
+                    "decide_update",
+                    serde_json::json!({
+                        "label": label,
+                        "embedding": base,
+                        "config": cfg,
+                    }),
+                );
+                assert!(resp.ok, "{label}: {:?}", resp.error);
+            }
+        }
+        let last = decide_op(state, "decide_state", serde_json::json!({}));
+        assert!(last.ok, "{:?}", last.error);
+        let r = last.result.unwrap();
+        assert_eq!(r["state"]["samples"], 6);
+        assert_eq!(r["fitted"], true, "six observations of three classes fit");
+    }
+
+    #[test]
+    fn decide_ops_answer_a_full_round_trip_through_the_dispatcher() {
+        let mut state = AgentState::new();
+        decide_boot(&mut state, "test-v1");
+
+        // A typed Choice question: options at call time, one embedding each.
+        let resp = decide_op(
+            &mut state,
+            "decide_answer",
+            serde_json::json!({
+                "question": {
+                    "kind": "choice",
+                    "key": "q-1",
+                    "text": "which theory?",
+                    "options": ["a", "b"],
+                },
+                "embeddings": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            }),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["answer"]["kind"], "choice");
+        assert_eq!(
+            r["answer"]["key"], "q-1",
+            "the answer must carry the question's correlation key"
+        );
+        assert_eq!(r["answer"]["scores"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            r["answer"]["calibrated"], false,
+            "no pinned report has passed, so no probability claim"
+        );
+        assert!(
+            r["answer"].get("probabilities").is_none(),
+            "uncalibrated answers omit probabilities entirely"
+        );
+        assert_eq!(r["admissible_as_advice"], true);
+        assert_eq!(r["effect_kind"], "observe");
+
+        // decide_state: what the engine has seen.
+        let resp = decide_op(&mut state, "decide_state", serde_json::json!({}));
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["state"]["samples"], 6);
+        assert_eq!(
+            r["state"]["labels"],
+            serde_json::json!(["theory-a", "theory-b", "theory-c"])
+        );
+        assert_eq!(r["state"]["mode"], "ananc");
+        assert_eq!(r["state"]["protocol_version"], "decide/1");
+        assert_eq!(r["state"]["embedding_dim"], 4);
+        assert_eq!(r["state"]["projected_dim"], 16);
+        assert_eq!(r["state"]["calibrated"], false);
+        assert_eq!(r["state"]["calibrator_mechanism"], "none");
+        assert_eq!(r["state"]["needs_recalibration"], false);
+        assert_eq!(
+            r["drift_measured"], false,
+            "no probs supplied: nothing measured"
+        );
+        assert_eq!(r["effect_kind"], "observe");
+
+        // A Score question gets an ordinal in [0, levels) — not the degenerate
+        // 0 every answer used to come back with.
+        let resp = decide_op(
+            &mut state,
+            "decide_answer",
+            serde_json::json!({
+                "question": {
+                    "kind": "score",
+                    "key": "q-2",
+                    "text": "how settled?",
+                    "labels": ["open", "partial", "closed"],
+                    "levels": 3,
+                },
+                "embedding": [1.0, 0.0, 0.0, 0.0],
+            }),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["answer"]["kind"], "score");
+        assert_eq!(r["answer"]["levels"], 3);
+        let score = r["answer"]["score"].as_u64().unwrap();
+        assert!(score < 3, "score must stay in [0, levels): {score}");
+    }
+
+    #[test]
+    fn decide_ops_without_an_engine_refuse_by_name_not_as_a_typo() {
+        let mut state = AgentState::new();
+        for (op, params) in [
+            ("decide_state", serde_json::json!({})),
+            (
+                "decide_recalibrate",
+                serde_json::json!({"reference": [0.5, 0.5]}),
+            ),
+            (
+                "decide_answer",
+                serde_json::json!({
+                    "question": {"kind": "noul", "key": "k", "text": "true?"},
+                    "embedding": [1.0],
+                }),
+            ),
+        ] {
+            let resp = decide_op(&mut state, op, params);
+            assert!(!resp.ok, "{op} must be refused without an engine");
+            let msg = resp.error.unwrap().message;
+            assert!(!msg.contains("Unknown op"), "{op}: {msg}");
+            assert!(msg.contains("decide_update first"), "{op}: {msg}");
+        }
+    }
+
+    #[test]
+    fn decide_update_refuses_a_changed_embedding_version_or_a_reshaping_config() {
+        let mut state = AgentState::new();
+        decide_boot(&mut state, "test-v1");
+
+        // D7: an observation from another embedding model is refused.
+        let resp = decide_op(
+            &mut state,
+            "decide_update",
+            serde_json::json!({
+                "label": "theory-a",
+                "embedding": [1.0, 0.0, 0.0, 0.0],
+                "embedding_version": "test-v2",
+            }),
+        );
+        assert!(!resp.ok, "cross-version observation must be refused");
+        let msg = resp.error.unwrap().message;
+        assert!(msg.contains("embedding model changed"), "{msg}");
+
+        // A config that would reshape the engine is refused, not ignored.
+        let resp = decide_op(
+            &mut state,
+            "decide_update",
+            serde_json::json!({
+                "label": "theory-a",
+                "embedding": [1.0, 0.0, 0.0, 0.0],
+                "config": {"projected_dim": 32},
+            }),
+        );
+        assert!(!resp.ok, "a reshaping config must be refused");
+        let msg = resp.error.unwrap().message;
+        assert!(msg.contains("does not match the engine in force"), "{msg}");
+
+        // A wrong-dimension embedding is refused too (not truncated).
+        let resp = decide_op(
+            &mut state,
+            "decide_update",
+            serde_json::json!({"label": "theory-a", "embedding": [1.0, 0.0]}),
+        );
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap().message.contains("dimension mismatch"));
+    }
+
+    #[test]
+    fn decide_recalibrate_admits_a_calibrator_only_with_a_passing_matching_report() {
+        let mut state = AgentState::new();
+        decide_boot(&mut state, "test-v1");
+
+        let calibrator = serde_json::json!({
+            "mechanism": "temperature",
+            "temperature": 2.0,
+            "platt_a": 1.0,
+            "platt_b": 0.0,
+            "ood_bias": 0.0,
+            "fit_ece": 0.01,
+            "version": 1,
+        });
+        let mut report = serde_json::json!({
+            "mechanism": "temperature",
+            "calibrator_version": 1,
+            "engine_version": decide_core::ENGINE_VERSION,
+            "n_samples": 64,
+            "ece": 0.01,
+            "auc": 0.9,
+            "fpr95": 0.2,
+            "r1_normalization": true,
+            "r2_calibration": true,
+            "r3_monotonicity": true,
+            "r4_open_world_coherence": true,
+            "r5_class_arrival_stability": true,
+            "max_drift_epsilon": 0.05,
+            "observed_max_drift": 0.01,
+        });
+
+        // No report, no install: an unmeasured calibrator cannot arrive.
+        let resp = decide_op(
+            &mut state,
+            "decide_recalibrate",
+            serde_json::json!({"calibrator": calibrator, "reference": [0.3, 0.3, 0.4]}),
+        );
+        assert!(!resp.ok);
+        assert!(
+            resp.error
+                .unwrap()
+                .message
+                .contains("requires its 'report'")
+        );
+
+        // A report that fails R2 licenses nothing, however good the calibrator
+        // looks on its own.
+        report["r2_calibration"] = serde_json::json!(false);
+        report["ece"] = serde_json::json!(0.4);
+        let resp = decide_op(
+            &mut state,
+            "decide_recalibrate",
+            serde_json::json!({
+                "calibrator": calibrator,
+                "report": report,
+                "reference": [0.3, 0.3, 0.4],
+            }),
+        );
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap().message.contains("R2 calibration"));
+
+        // A passing report for a different engine build does not transfer.
+        report["r2_calibration"] = serde_json::json!(true);
+        report["ece"] = serde_json::json!(0.01);
+        report["engine_version"] = serde_json::json!("decide_core/0.0.0-other");
+        let resp = decide_op(
+            &mut state,
+            "decide_recalibrate",
+            serde_json::json!({
+                "calibrator": calibrator,
+                "report": report,
+                "reference": [0.3, 0.3, 0.4],
+            }),
+        );
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap().message.contains("do not transfer"));
+
+        // The real install: this engine, this report, this calibrator.
+        report["engine_version"] = serde_json::json!(decide_core::ENGINE_VERSION);
+        let resp = decide_op(
+            &mut state,
+            "decide_recalibrate",
+            serde_json::json!({
+                "calibrator": calibrator,
+                "report": report,
+                "reference": [0.3, 0.3, 0.4],
+            }),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["installed"], true);
+        assert_eq!(r["calibrated"], true);
+
+        // The state says calibrated, and names the mechanism that earned it.
+        let resp = decide_op(&mut state, "decide_state", serde_json::json!({}));
+        let r = resp.result.unwrap();
+        assert_eq!(r["state"]["calibrated"], true);
+        assert_eq!(r["state"]["calibrator_mechanism"], "temperature");
+        assert_eq!(r["state"]["fit_ece"], 0.01);
+
+        // And an answer now carries probabilities that sum to 1 (R1), so the
+        // protocol's admissibility check passes.
+        let resp = decide_op(
+            &mut state,
+            "decide_answer",
+            serde_json::json!({
+                "question": {
+                    "kind": "choice",
+                    "key": "q-cal",
+                    "text": "which theory?",
+                    "options": ["a", "b"],
+                },
+                "embeddings": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            }),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["answer"]["calibrated"], true);
+        let probs = r["answer"]["probabilities"].as_array().expect("R1");
+        assert_eq!(probs.len(), 3, "one probability per registered class");
+        let sum: f64 = probs.iter().map(|p| p.as_f64().unwrap()).sum();
+        assert!((sum - 1.0).abs() < 1e-9, "R1 violated: sum = {sum}");
+        assert_eq!(r["admissible_as_advice"], true);
+        assert!(
+            r["answer"]["confidence"].is_number(),
+            "calibrated answers carry confidence"
+        );
+    }
+
+    #[test]
+    fn decide_state_measures_drift_on_every_read_once_a_monitor_is_armed() {
+        let mut state = AgentState::new();
+        decide_boot(&mut state, "test-v1");
+
+        // Unarmed: a probs vector measures nothing, and says so.
+        let resp = decide_op(
+            &mut state,
+            "decide_state",
+            serde_json::json!({"probs": [0.5, 0.5, 0.5]}),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["drift_measured"], false, "no monitor armed");
+
+        // Re-baseline arms the monitor against a reference distribution.
+        let resp = decide_op(
+            &mut state,
+            "decide_recalibrate",
+            serde_json::json!({"reference": [0.9, 0.05, 0.05]}),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["installed"], false, "re-baselining installs nothing");
+
+        // A read far from the reference is measured and declared (R5).
+        let resp = decide_op(
+            &mut state,
+            "decide_state",
+            serde_json::json!({"probs": [0.34, 0.33, 0.33]}),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let r = resp.result.unwrap();
+        assert_eq!(r["drift_measured"], true);
+        assert_eq!(
+            r["state"]["needs_recalibration"], true,
+            "drift beyond epsilon"
+        );
+        assert!(
+            r["state"]["observed_drift"].as_f64().unwrap() > 0.05,
+            "{:?}",
+            r["state"]["observed_drift"]
+        );
+
+        // Re-baselining is the declared re-measurement: the flag clears.
+        let resp = decide_op(
+            &mut state,
+            "decide_recalibrate",
+            serde_json::json!({"reference": [0.34, 0.33, 0.33]}),
+        );
+        assert!(resp.ok, "{:?}", resp.error);
+        let resp = decide_op(&mut state, "decide_state", serde_json::json!({}));
+        let r = resp.result.unwrap();
+        assert_eq!(r["state"]["needs_recalibration"], false);
+        assert_eq!(r["state"]["observed_drift"], 0.0);
     }
 }

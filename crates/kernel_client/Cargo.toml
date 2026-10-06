@@ -14,6 +14,11 @@ unfer_data = { path = "../../../unfer/unfer_data" }
 logos = { path = "../../../unfer/logos" }
 ode_sirk = { path = "../../../unfer/ode_sirk" }
 mathed_core = { path = "../mathed_core" }
+# D5: the analytic decision engine behind the `decide_*` ops (observe-kind).
+# Same discipline as every other path dep here: shared contract crates from
+# the sibling `unfer` repo, never a vendored copy.
+decide_core = { path = "../../../unfer/decide_core" }
+nalgebra = "0.34.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 hex = "0.4"
