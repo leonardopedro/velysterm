@@ -73,7 +73,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 797 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-05 -->
+<!-- status: verified | tests: 850 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-07 -->
 
 Note: the workspace needs the flake devshell (`nix develop -c cargo test
 --workspace`). A bare `cargo test` fails in `libudev-sys`, which has no pkg-config
@@ -84,18 +84,25 @@ outside it — worth knowing before concluding the tree is broken.
 ```sh
 export PKG_CONFIG_PATH=/tmp/emthin-work/pc:$PKG_CONFIG_PATH   # or your own
 cargo test -p mathed_core -p mathed_mini -p kernel_client \
-         -p delta_algebra -p delta_sirk -p mathed_biblio    # 797 passed
+         -p delta_algebra -p delta_sirk -p mathed_biblio    # 850 passed
 ```
 
-Measured 2026-10-05: mathed_core 269 / mathed_mini 246 / kernel_client 168 /
-delta_algebra 13 / delta_sirk 2 / mathed_biblio 13. The `delta_*` figures are the
+Measured 2026-10-07: mathed_core 270 / mathed_mini 249 / kernel_client 303 /
+delta_algebra 13 / delta_sirk 2 / mathed_biblio 13 — 850, and the per-crate
+figures add up to the header this time. The 797 of 2026-10-05 sat above a
+breakdown that summed to 711 (269/246/168/13/2/13); neither number was re-read
+against the other, so this entry restates both from a single log.
+`mathed_mini` 249 = 236 lib + 13 across `caret_geometry` (4) and
+`formal_layout` (9); `kernel_client` 303 = 155 lib + 146 in its `unfer_agent`
+bin + 2 in `snapshot_replay`. Eleven commits landed between the 2026-10-05
+measurement and this one (the D5/D.6/D.4 decide work, G1 DurableStore, G2 org
+sessions, G3 escalate, G5 CRDT collisions, C1 `events_stream`, C2 bounded
+memory, plus a clippy fix and the X9 ledger row) and nearly all of the growth
+is `kernel_client`'s agent surface: 168 → 303. The `delta_*` figures are the
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
-`kernel_client` grew by 111: the C1 `events_poll` delivery path, the G1
-board ops, the G3 claim/DM/escalate/hand-off ops, the G4 gate/patch ops, the
-G9 nudge op and the G2 cooperation loop.
 
-**The Bevy `mathed` crate is not in the 797.** It needs `pkg-config` plus the
+**The Bevy `mathed` crate is not in the 850.** It needs `pkg-config` plus the
 X/wayland client libraries, so it does not build in a bare shell; CI installs
 them and runs it there. Quoting a number that silently included a crate nobody
 ran is how this line read 658 when the real figure was 609.
