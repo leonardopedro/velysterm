@@ -992,6 +992,146 @@ impl AgentState {
                     }),
                 )
             }
+            // C2: append to this session's bounded memory.
+            //
+            // Model-visible state that outlives the call — the same reason
+            // `board_write` is Mutate in the S21 sense. The text is redacted
+            // *before* it is stored (see `unfer_protocol::memory`), which is
+            // what makes appending an unattended summary survivable: a secret
+            // in one was never written, rather than merely hidden on read.
+            "memory_append" => {
+                let model_id = match required_u64(&req.params, "model_id") {
+                    Ok(m) => m,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                if !self.sessions.contains_key(&model_id) {
+                    return AgentResponse::err(&req.id, bad_handle_diag(model_id));
+                }
+                // Optional, defaulting to "kernel" — the same default the C
+                // ABI takes, so a caller that does not name an author gets
+                // one answer on both transports.
+                let worker = match req.params.get("worker") {
+                    None | Some(serde_json::Value::Null) => "kernel".to_string(),
+                    Some(serde_json::Value::String(w)) if !w.trim().is_empty() => {
+                        w.trim().to_string()
+                    }
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("'worker' must be a non-empty string"),
+                        );
+                    }
+                };
+                let text = match req.params.get("text").and_then(|v| v.as_str()) {
+                    Some(t) if !t.trim().is_empty() => t.to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'text' field (nothing to remember)"),
+                        );
+                    }
+                };
+                let (rec, store_chars, records, evicted) = {
+                    let s = self
+                        .sessions
+                        .get_mut(&model_id)
+                        .expect("checked above: the handle is live");
+                    let r = s.memory_append(&worker, &text);
+                    (
+                        r,
+                        s.memory().total_chars(),
+                        s.memory().len(),
+                        s.memory().evicted(),
+                    )
+                };
+                // The same event the FFI pushes, so a subscriber sees one
+                // dialect regardless of which transport appended.
+                let event = serde_json::to_value(unfer_protocol::KernelEvent::MemoryAppended {
+                    record_id: rec.id,
+                    chars: rec.chars(),
+                    evicted,
+                })
+                .expect("KernelEvent serializes");
+                self.push_event(model_id, event);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "record_id": rec.id,
+                        "worker": rec.worker,
+                        "text": rec.text,
+                        "chars": rec.chars(),
+                        "store_chars": store_chars,
+                        "records": records,
+                        "evicted": evicted,
+                        "effect_kind": "mutate",
+                    }),
+                )
+            }
+            // C2: read this session's memory, retrieving if the store has
+            // evicted anything. Observe: an agent loop must be able to
+            // consult its own memory unattended.
+            "memory_read" => {
+                let model_id = match required_u64(&req.params, "model_id") {
+                    Ok(m) => m,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                if !self.sessions.contains_key(&model_id) {
+                    return AgentResponse::err(&req.id, bad_handle_diag(model_id));
+                }
+                let query = match req.params.get("query") {
+                    None | Some(serde_json::Value::Null) => String::new(),
+                    Some(serde_json::Value::String(q)) => q.clone(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("'query' must be a string"),
+                        );
+                    }
+                };
+                // `budget` is in characters: default the store's cap, clamp
+                // the ask. A caller requesting an unbounded read is asking
+                // for the thing the cap exists to prevent — same rule, same
+                // number, as the C ABI.
+                let budget = match req.params.get("budget") {
+                    None | Some(serde_json::Value::Null) => unfer_protocol::memory::MEMORY_CAP,
+                    Some(v) => match v.as_u64() {
+                        Some(b) => match usize::try_from(b) {
+                            Ok(b) => b.min(unfer_protocol::memory::MEMORY_CAP * 4),
+                            Err(_) => {
+                                return AgentResponse::err(
+                                    &req.id,
+                                    bad_json_diag("'budget' does not fit this platform's usize"),
+                                );
+                            }
+                        },
+                        None => {
+                            return AgentResponse::err(
+                                &req.id,
+                                bad_json_diag("'budget' must be a non-negative integer"),
+                            );
+                        }
+                    },
+                };
+                let read = {
+                    let s = self
+                        .sessions
+                        .get(&model_id)
+                        .expect("checked above: the handle is live");
+                    s.memory_read(&query, budget)
+                };
+                let event = serde_json::to_value(unfer_protocol::KernelEvent::MemoryRead {
+                    returned: read.records.len(),
+                    matched: read.matched,
+                    total_chars: read.total_chars,
+                    returned_chars: read.returned_chars,
+                    truncated: read.truncated,
+                })
+                .expect("KernelEvent serializes");
+                self.push_event(model_id, event);
+                let mut payload = serde_json::to_value(&read).expect("MemoryRead serializes");
+                payload["model_id"] = serde_json::json!(model_id);
+                AgentResponse::ok(&req.id, payload)
+            }
             // G1: append one typed entry to the shared context board.
             //
             // `worker` is recorded, not authenticated — see the note on
@@ -3926,6 +4066,155 @@ mod tests {
             !state.streaming,
             "a refused request must not half-enable the mode"
         );
+    }
+
+    // ── C2: bounded memory on the agent channel ──────────────────────
+
+    fn mem_append(
+        state: &mut AgentState,
+        model_id: u64,
+        worker: &str,
+        text: &str,
+    ) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "c2-a",
+            "memory_append",
+            serde_json::json!({"model_id": model_id, "worker": worker, "text": text}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    fn mem_read(state: &mut AgentState, model_id: u64, query: &str) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "c2-r",
+            "memory_read",
+            serde_json::json!({"model_id": model_id, "query": query}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    #[test]
+    fn memory_round_trips_over_ndjson_with_the_c_abi_counts() {
+        let mut state = AgentState::new();
+        let model_id = new_model(&mut state);
+        let rec = mem_append(
+            &mut state,
+            model_id,
+            "w1",
+            "the gate lives in verify-invariants",
+        );
+        assert_eq!(rec["worker"], "w1");
+        assert!(rec["chars"].as_u64().unwrap() > 0);
+        assert_eq!(rec["records"], 1);
+        assert_eq!(rec["evicted"], 0);
+        assert_eq!(
+            rec["effect_kind"], "mutate",
+            "memory is model-visible state that outlives the call"
+        );
+
+        let out = mem_read(&mut state, model_id, "gate");
+        assert_eq!(out["model_id"], model_id);
+        assert_eq!(
+            out["truncated"], false,
+            "under the cap everything comes back"
+        );
+        assert_eq!(
+            out["retrieved"], false,
+            "no selection was needed, and the reply says so"
+        );
+        let records = out["records"].as_array().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("verify-invariants")
+        );
+    }
+
+    #[test]
+    fn an_empty_append_is_refused_because_a_blank_record_is_noise() {
+        // The C ABI tolerates an empty body as "remember nothing"; on a
+        // channel where every field is named, an empty `text` is a caller
+        // mistake, and storing it would cost a record to say nothing.
+        let mut state = AgentState::new();
+        let model_id = new_model(&mut state);
+        let resp = state.handle(&AgentRequest::new(
+            "c2-e",
+            "memory_append",
+            serde_json::json!({"model_id": model_id, "text": "   "}),
+        ));
+        assert!(!resp.ok);
+        assert!(format!("{:?}", resp.error).contains("text"));
+        assert_eq!(
+            mem_read(&mut state, model_id, "")["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn memory_ops_refuse_a_dead_model() {
+        let mut state = AgentState::new();
+        for op in ["memory_append", "memory_read"] {
+            let resp = state.handle(&AgentRequest::new(
+                "c2-h",
+                op,
+                serde_json::json!({"model_id": 999, "text": "x"}),
+            ));
+            assert!(!resp.ok, "{op}");
+            assert_eq!(resp.error.unwrap().code, Code::BAD_HANDLE, "{op}");
+        }
+    }
+
+    #[test]
+    fn a_tiny_budget_truncates_and_says_so() {
+        // The doc's own line: a caller that cannot tell a pruned read from a
+        // short history will draw the wrong conclusion from it.
+        let mut state = AgentState::new();
+        let model_id = new_model(&mut state);
+        for i in 0..5 {
+            mem_append(
+                &mut state,
+                model_id,
+                "w1",
+                &format!("record {i} about the mass gap and its residual"),
+            );
+        }
+        let resp = state.handle(&AgentRequest::new(
+            "c2-b",
+            "memory_read",
+            serde_json::json!({"model_id": model_id, "query": "mass", "budget": 1}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let out = resp.result.unwrap();
+        assert_eq!(out["truncated"], true, "{out}");
+        assert!(
+            out["returned_chars"].as_u64().unwrap() <= 1,
+            "budget is a real bound: {out}"
+        );
+        assert_eq!(out["retrieved"], true, "selection ran");
+    }
+
+    #[test]
+    fn an_append_arrives_as_a_pushed_line_when_streaming_is_on() {
+        // C1 and C2 composing: the same event the C ABI pushes, on the same
+        // cursored log, pushed down the channel when the consumer asked.
+        let mut state = AgentState::new();
+        let model_id = new_model(&mut state);
+        stream(&mut state, true);
+        let rec = mem_append(&mut state, model_id, "w1", "remembered");
+
+        let lines = state.drain_stream_outbox();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].get("id").is_none(), "a push, not a response");
+        assert_eq!(lines[0]["event"]["type"], "memory_appended");
+        assert_eq!(lines[0]["event"]["record_id"], rec["record_id"]);
     }
 
     #[test]
