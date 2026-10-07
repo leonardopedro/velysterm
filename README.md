@@ -92,8 +92,8 @@ delta_algebra 13 / delta_sirk 2 / mathed_biblio 13. The `delta_*` figures are th
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
 `kernel_client` grew by 111: the C1 `events_poll` delivery path, the G1
-board ops, the G3 claim/DM/hand-off ops, the G4 gate/patch ops, the G9 nudge
-op and the G2 cooperation loop.
+board ops, the G3 claim/DM/escalate/hand-off ops, the G4 gate/patch ops, the
+G9 nudge op and the G2 cooperation loop.
 
 **The Bevy `mathed` crate is not in the 797.** It needs `pkg-config` plus the
 X/wayland client libraries, so it does not build in a bare shell; CI installs

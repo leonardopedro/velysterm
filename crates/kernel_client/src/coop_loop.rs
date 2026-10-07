@@ -342,7 +342,8 @@ impl LoopState {
         };
         if self.backtracks >= self.step.backtrack_budget() {
             return Err(format!(
-                "stuck at {}: {} backtrack(s) exhausted; escalate rather than retry",
+                "stuck at {}: {} backtrack(s) exhausted; escalate \
+                 (agent_escalate) rather than retry",
                 self.step.as_str(),
                 self.step.backtrack_budget()
             ));

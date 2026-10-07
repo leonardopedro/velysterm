@@ -979,8 +979,10 @@ impl AgentState {
             // An overlap is *reported*, not refused: the board is a log, not a
             // lock, and refusing would either duplicate the work silently or
             // deadlock two workers on a resource neither owns. The reply carries
-            // the current holders so the workers can negotiate with `agent_dm` or
-            // escalate to a human.
+            // the current holders so the workers can negotiate with `agent_dm` —
+            // and, when that fails, escalate with `agent_escalate` (the
+            // `escalate_with` field below names the op so no caller has to
+            // remember it).
             "agent_claim" => {
                 let worker = match req.params.get("worker").and_then(|v| v.as_str()) {
                     Some(w) if !w.trim().is_empty() => w.trim().to_string(),
@@ -1026,6 +1028,88 @@ impl AgentState {
                         "conflicts_with": conflicts,
                         "live_claims": self.coop.claims(),
                         "latest_cursor": self.board.latest_cursor(),
+                        // Name the next step when there is one, so the
+                        // escalation path is in the reply and not only in a
+                        // prompt the worker may not follow.
+                        "escalate_with": if outcome == "overlaps" {
+                            Some("agent_escalate")
+                        } else {
+                            None
+                        },
+                    }),
+                )
+            }
+            // G3: escalate a negotiation that has failed to the human lane.
+            //
+            // The explicit half of the escalation path. `agent_claim` reports
+            // overlaps and `agent_dm` carries the negotiation, but "escalate to
+            // a human" used to be a sentence in a prompt — nothing a machine
+            // or a human could grep. This writes an `ESCALATE` board entry:
+            // reason as text, current holders as detail, so the human gets the
+            // evidence with the request. The human approval lane then reads
+            // one kind instead of reconstructing escalation from CLAIM plus DM
+            // history, and a worker that keeps retrying does not turn one
+            // pending decision into five (dedup per worker + scope).
+            "agent_escalate" => {
+                let worker = match req.params.get("worker").and_then(|v| v.as_str()) {
+                    Some(w) if !w.trim().is_empty() => w.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'worker' field"),
+                        );
+                    }
+                };
+                let scope = match req.params.get("scope").and_then(|v| v.as_str()) {
+                    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("missing or empty 'scope' field"),
+                        );
+                    }
+                };
+                let reason = match req.params.get("reason").and_then(|v| v.as_str()) {
+                    Some(r) if !r.trim().is_empty() => {
+                        // Redacted here as well as inside `board::write`,
+                        // because the reason is also stored on the Coop side
+                        // and echoed in this reply.
+                        unfer_protocol::board::redact_secrets(r.trim())
+                    }
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag(
+                                "missing or empty 'reason' field (escalations must say why)",
+                            ),
+                        );
+                    }
+                };
+                let canonical = unfer_protocol::coop::ClaimScope::new(&scope).scope;
+                let (entry, fresh) =
+                    self.coop
+                        .escalate(&mut self.board, &worker, &canonical, &reason);
+                let holders = self.coop.conflicting(&worker, &canonical);
+                let escalations_for_scope = self
+                    .coop
+                    .escalations()
+                    .iter()
+                    .filter(|e| e.scope == canonical)
+                    .count();
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        // `false` means "already in front of a human" — the
+                        // original cursor is returned either way.
+                        "escalated": fresh,
+                        "deduped": !fresh,
+                        "cursor": entry.cursor,
+                        "scope": canonical,
+                        "entry": entry,
+                        "holders": holders,
+                        "escalations_for_scope": escalations_for_scope,
+                        "effect_kind": "mutate",
+                        "lane": "board: grep ESCALATE; a human answers by posting the decision on the board",
                     }),
                 )
             }
@@ -4647,6 +4731,24 @@ mod tests {
         resp.result.unwrap()
     }
 
+    fn escalate(
+        state: &mut AgentState,
+        worker: &str,
+        scope: &str,
+        reason: &str,
+    ) -> Result<serde_json::Value, String> {
+        let resp = state.handle(&AgentRequest::new(
+            "g3-esc-op",
+            "agent_escalate",
+            serde_json::json!({"worker": worker, "scope": scope, "reason": reason}),
+        ));
+        if resp.ok {
+            Ok(resp.result.unwrap())
+        } else {
+            Err(format!("{:?}", resp.error))
+        }
+    }
+
     #[test]
     fn a_free_scope_is_granted() {
         let mut state = AgentState::new();
@@ -4751,6 +4853,107 @@ mod tests {
             .clone();
         assert_eq!(live.len(), 1, "exactly one holder despite four attempts");
         assert_eq!(live[0]["worker"], "w1");
+    }
+
+    #[test]
+    fn an_escalation_puts_one_readable_item_in_front_of_the_human_lane() {
+        // G3's missing half: the *explicit* path. w2 collides, negotiates,
+        // gets no answer, and escalates. What the human lane sees is one
+        // ESCALATE entry carrying the reason and the holder — greppable as a
+        // kind, not reconstructed from CLAIM plus DM history.
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "a/b");
+        let overlap = claim(&mut state, "w2", "a/b");
+        assert_eq!(overlap["outcome"], "overlaps");
+        // The overlap reply names the next step, so no caller has to remember
+        // the op that does not exist in their prompt.
+        assert_eq!(overlap["escalate_with"], "agent_escalate");
+        dm(&mut state, "w2", "w1", "you take it?", 5);
+
+        let r = escalate(&mut state, "w2", "a/b", "DM went unanswered").unwrap();
+        assert_eq!(r["escalated"], true);
+        assert_eq!(r["deduped"], false);
+        assert_eq!(
+            r["effect_kind"], "mutate",
+            "an escalation asks a human to act"
+        );
+        assert_eq!(r["holders"][0]["worker"], "w1", "the evidence travels");
+        assert_eq!(r["escalations_for_scope"], 1);
+
+        let lane = state
+            .handle(&AgentRequest::new(
+                "g3-lane",
+                "board_grep",
+                serde_json::json!({"expr": "ESCALATE"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(lane["count"], 1);
+        let entries = lane["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["kind"], "ESCALATE");
+        assert!(
+            entries[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("DM went unanswered"),
+            "the reason is what the human reads first: {}",
+            entries[0]["text"]
+        );
+        assert!(
+            entries[0]["detail"].as_str().unwrap().contains("w1 @ a/b"),
+            "the holders are the evidence: {}",
+            entries[0]["detail"]
+        );
+
+        // Retrying does not turn one pending decision into five.
+        let again = escalate(&mut state, "w2", "a/b", "still unanswered").unwrap();
+        assert_eq!(again["escalated"], false);
+        assert_eq!(again["deduped"], true);
+        assert_eq!(
+            again["cursor"], r["cursor"],
+            "the original entry is returned"
+        );
+        let lane = state
+            .handle(&AgentRequest::new(
+                "g3-lane2",
+                "board_grep",
+                serde_json::json!({"expr": "ESCALATE"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(lane["count"], 1, "the lane stays readable");
+    }
+
+    #[test]
+    fn an_escalation_without_a_reason_is_refused() {
+        // "Escalate" with no why is an item the human cannot act on — the
+        // reason field is required, the same way board_write requires text.
+        let mut state = AgentState::new();
+        claim(&mut state, "w1", "a/b");
+        let msg = escalate(&mut state, "w2", "a/b", "  ").unwrap_err();
+        assert!(msg.contains("reason"), "{msg}");
+        let lane = state
+            .handle(&AgentRequest::new(
+                "g3-lane3",
+                "board_grep",
+                serde_json::json!({"expr": "ESCALATE"}),
+            ))
+            .result
+            .unwrap();
+        assert_eq!(lane["count"], 0, "a refused escalation writes nothing");
+    }
+
+    #[test]
+    fn an_escalation_from_loop_exhaustion_still_reaches_the_lane() {
+        // The other source of escalation: not a collision at all, but a loop
+        // that ran out of backtracks (`coop_loop`: "escalate rather than
+        // retry"). No live holders — and the entry says so instead of
+        // implying a collision that is not there.
+        let mut state = AgentState::new();
+        let r = escalate(&mut state, "w9", "src/loop", "backtracks exhausted").unwrap();
+        assert_eq!(r["escalated"], true);
+        assert_eq!(r["holders"].as_array().unwrap().len(), 0);
+        assert_eq!(r["escalations_for_scope"], 1);
     }
 
     #[test]
