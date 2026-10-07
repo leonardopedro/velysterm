@@ -43,7 +43,7 @@
 //!   measuring reproduction, it is measuring connectivity, and the result would not
 //!   reproduce on an air-gapped machine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -431,8 +431,8 @@ pub fn run_trial(resolved: &ResolvedTask, workers: usize, opts: &Options) -> Tri
     };
 
     let budget = opts.time_budget;
-    let child = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .env("UNFER_BENCH_WORKERS", workers.to_string())
         // Offline means offline: no proxy variables are forwarded, so a gate that
         // tries to reach the network fails rather than quietly succeeding.
@@ -441,8 +441,18 @@ pub fn run_trial(resolved: &ResolvedTask, workers: usize, opts: &Options) -> Tri
         .env_remove("HTTP_PROXY")
         .env_remove("HTTPS_PROXY")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    // A gate is a script that shells out (cargo, test binaries, nix). Giving it
+    // its own process group is what makes the budget below enforceable over the
+    // *tree*: killing only the script would orphan the work it started, and an
+    // orphaned rebuild keeps burning CPU and holding the target-dir lock the
+    // next trial needs while the report already calls the trial over.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn();
 
     let mut child = match child {
         Ok(c) => c,
@@ -486,6 +496,7 @@ pub fn run_trial(resolved: &ResolvedTask, workers: usize, opts: &Options) -> Tri
             }
             Ok(None) => {
                 if started.elapsed().as_millis() as u64 >= budget_ms {
+                    kill_gate_tree(&child);
                     let _ = child.kill();
                     let _ = child.wait();
                     return Trial {
@@ -513,6 +524,34 @@ pub fn run_trial(resolved: &ResolvedTask, workers: usize, opts: &Options) -> Tri
     }
 }
 
+/// Kill a timed-out gate's whole process tree, not just the gate process.
+///
+/// `run_trial` spawns every gate in its own process group, so a negative pid
+/// reaches the script *and* everything the script spawned (cargo, test
+/// binaries, `nix develop`). SIGTERM first so traps can run — the
+/// module-reconstruction gate removes its scratch directory that way — then
+/// SIGKILL after a short grace period: a budget a process can refuse is not a
+/// budget.
+#[cfg(unix)]
+fn kill_gate_tree(child: &std::process::Child) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    const SIGTERM: i32 = 15;
+    const SIGKILL: i32 = 9;
+    let pgid = -(child.id() as i32);
+    unsafe {
+        kill(pgid, SIGTERM);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    unsafe {
+        kill(pgid, SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_gate_tree(_child: &std::process::Child) {}
+
 /// The sweep.
 pub fn sweep(tasks: &[Task], opts: &Options) -> Report {
     let resolved: Vec<ResolvedTask> = tasks.iter().map(resolve).collect();
@@ -532,14 +571,32 @@ pub fn sweep(tasks: &[Task], opts: &Options) -> Report {
 
 /// The project-native reproduction tasks, as the harness knows them.
 ///
-/// Paths are relative to `velysterm/`, which is where the harness is run from.
+/// Every path is **anchored at the sibling-repo root**, not relative to the
+/// caller's cwd: `cargo test` runs the test binary from the package root
+/// (`crates/kernel_client`) while `bench_runner` inherits the shell's
+/// directory, so a `../unfer/…` gate path would mean two different things and
+/// would score bash's "no such file" exit as a gate failure. The sibling
+/// layout is fixed by the workspace's path deps, and `CARGO_MANIFEST_DIR` is
+/// baked in at build time.
 ///
-/// Two of the three tasks the plan names are wired up. The third — module
-/// reconstruction — needs `timepiece/tools/module_builder`, which does not exist,
-/// so it is declared [`Gate::Unavailable`] with that reason rather than omitted.
-/// Declaring it keeps the gap visible in every report; omitting it would make the
-/// harness look complete, which is the opposite of what it is for.
+/// All four task families are wired to a real gate as of 2026-10-07 (D.4):
+/// `mass-gap` runs the one-command regeneration gate
+/// (`unfer/scripts/regen_mass_gap.sh`, which reports its own UNAVAILABLE steps
+/// rather than faking them), and `module-reconstruction` runs
+/// `unfer/tools/module_reconstruct.sh` — unpack a pinned `.cell` blueprint,
+/// hold it to the golden manifest, then `tools/module_builder run` the
+/// reconstructed module. Tasks are still *declared* even when their gate turns
+/// out to be unrunnable on this machine (`Gate::Unavailable` remains for that):
+/// omitting a task would make the harness look complete, which is the opposite
+/// of what it is for.
 pub fn project_tasks() -> Vec<Task> {
+    let projects = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent() // …/velysterm/crates
+        .and_then(|p| p.parent()) // …/velysterm
+        .and_then(|p| p.parent()) // the sibling-repo root
+        .expect("kernel_client is two directories below the sibling-repo root");
+    let at = |rel: &str| projects.join(rel).to_string_lossy().into_owned();
+
     vec![
         // 1. Docs-site reconstruction: regenerate `test/` pages and hold them to the
         //    project's own `check_site.py`. Offline-capable, which makes it the one
@@ -549,38 +606,46 @@ pub fn project_tasks() -> Vec<Task> {
             title: "Regenerate the docs site and pass check_site.py".into(),
             gate: Gate::Command {
                 program: "python3".into(),
-                args: vec!["../test/scripts/check_site.py".into()],
+                args: vec![at("test/scripts/check_site.py")],
             },
-            artifacts: vec!["../test".into()],
+            artifacts: vec![projects.join("test")],
             offline_capable: true,
         },
-        // 2. Mass-gap regeneration. The contract is written up; the rebuild driver
-        //    does not exist as a command yet, so this reports as skipped with a
-        //    reason rather than as a failure.
+        // 2. Mass-gap regeneration: the project's own one-command gate (M2).
+        //    It runs every step that is runnable here and reports the rest as
+        //    UNAVAILABLE with reasons (exit 0 unless a step actually failed;
+        //    `--strict` is for a host that has Charon/Aeneas + lean4export), so
+        //    scoring it does not launder "the chain is unverified end to end"
+        //    into a pass — the gate says that itself, every run.
         Task {
             id: "mass-gap".into(),
             title: "Rebuild the certified mass-gap bands from the bundle".into(),
-            gate: Gate::Unavailable {
-                reason: "the regeneration contract exists \
-                         (timepiece/unfer_contracts/MASS_GAP_REGENERATION.md) but there is \
-                         no command that performs the rebuild, so there is no gate to score \
-                         it against yet"
-                    .into(),
+            gate: Gate::Command {
+                program: "bash".into(),
+                args: vec![at("unfer/scripts/regen_mass_gap.sh")],
             },
-            artifacts: vec!["../timepiece/unfer_contracts/MASS_GAP_REGENERATION.md".into()],
+            artifacts: vec![
+                projects.join("timepiece/unfer_contracts/MASS_GAP_REGENERATION.md"),
+                projects.join("unfer/scripts/regen_mass_gap.sh"),
+            ],
             offline_capable: true,
         },
-        // 3. Module reconstruction from a `.cell` blueprint. Blocked on a tool that
-        //    does not exist.
+        // 3. Module reconstruction from a `.cell` blueprint: unpack the pinned
+        //    blueprint, check it against the golden manifest (extra/missing/
+        //    changed files all fail), then run the project's own module gate
+        //    (`tools/module_builder run`) on the reconstructed directory.
         Task {
             id: "module-reconstruction".into(),
             title: "Rebuild module behaviour from a .cell blueprint".into(),
-            gate: Gate::Unavailable {
-                reason: "needs timepiece/tools/module_builder, which does not exist yet; \
-                         without a golden manifest there is nothing to score against"
-                    .into(),
+            gate: Gate::Command {
+                program: "bash".into(),
+                args: vec![at("unfer/tools/module_reconstruct.sh")],
             },
-            artifacts: vec![],
+            artifacts: vec![
+                projects.join("unfer/tools/module_reconstruction/demo_module.cell"),
+                projects.join("unfer/tools/module_reconstruction/demo_module.manifest"),
+                projects.join("unfer/tools/module_builder"),
+            ],
             offline_capable: true,
         },
         // 4. The control. A task that always passes, so a report showing 0% is
@@ -657,6 +722,65 @@ mod tests {
         }
         assert!(trial.outcome.is_measured());
         assert!(!trial.outcome.is_pass());
+    }
+
+    // ---- the budget must reach the whole process tree ---------------------
+
+    /// Whether `pid` is fully gone, or only awaiting reap (a zombie).
+    #[cfg(target_os = "linux")]
+    fn process_gone(pid: i32) -> bool {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        if unsafe { kill(pid, 0) } != 0 {
+            return true; // ESRCH: gone and reaped
+        }
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(2).map(|state| state == "Z"))
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_budget_kill_reaches_the_gates_children_not_just_the_gate() {
+        // The gates are scripts that shell out; killing only the script at the
+        // budget would orphan the work it started. An orphaned rebuild keeps
+        // burning CPU and holding the target-dir lock the *next* trial needs,
+        // while the report already calls the trial over — so a TimedOut row
+        // would describe a machine that is still running it.
+        let marker =
+            std::env::temp_dir().join(format!("bench_gate_child_{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let t = sh_task(
+            "sleeper",
+            &format!("sleep 60 & echo $! > '{}' ; wait", marker.display()),
+        );
+
+        let trial = run_trial(&resolve(&t), 1, &opts(1, vec![1]));
+        assert!(
+            matches!(trial.outcome, Outcome::TimedOut { .. }),
+            "expected TimedOut, got {:?}",
+            trial.outcome
+        );
+
+        let pid: i32 = std::fs::read_to_string(&marker)
+            .expect("the gate recorded its child pid")
+            .trim()
+            .parse()
+            .expect("pid is a number");
+        let _ = std::fs::remove_file(&marker);
+
+        // The group kill was issued before run_trial returned; allow the
+        // kernel a moment, then require the sleeper to be gone.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !process_gone(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "pid {pid} outlived its gate's budget"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     // ---- skipped is not failed -------------------------------------------
@@ -1063,7 +1187,14 @@ mod tests {
     fn the_registry_contains_a_control_that_always_passes() {
         // Without it, a 0% report is ambiguous between "the organisation failed"
         // and "the harness is broken".
-        let r = sweep(&project_tasks(), &opts(30, vec![1]));
+        //
+        // Short budget on purpose: since D.4 the registry carries heavy real
+        // gates (a physics regeneration, a module build), and unit tests must
+        // not *run* those to completion — that is `bench_runner`'s job (see
+        // BENCH.md). Here they are exercised only through starting them and
+        // through the budget path, so the suite's runtime does not depend on
+        // how fast this machine regenerates mass-gap bands.
+        let r = sweep(&project_tasks(), &opts(5, vec![1]));
         assert!(r.passed() >= 1, "the control task must be runnable here");
     }
 
@@ -1084,8 +1215,9 @@ mod tests {
     fn a_registry_sweep_never_reports_a_full_pass_rate_over_partial_coverage() {
         // The invariant the harness exists to keep: the skipped tasks are counted
         // in the denominator of coverage even though they are excluded from the
-        // pass rate.
-        let r = sweep(&project_tasks(), &opts(60, vec![1]));
+        // pass rate. (5 s budget: see the note above — the heavy gates are
+        // exercised here, measured by `bench_runner`.)
+        let r = sweep(&project_tasks(), &opts(5, vec![1]));
         let has_unavailable = project_tasks().iter().any(|t| !bench_resolve_runnable(t));
         if has_unavailable && r.skipped() > 0 {
             assert!(

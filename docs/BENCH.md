@@ -56,29 +56,42 @@ runnable.
 
 | id | gate | status |
 |---|---|---|
-| `docs-site` | `python3 ../test/scripts/check_site.py` | runnable where `python3` is on `PATH` |
-| `mass-gap` | — | **unavailable**: the contract exists (`timepiece/unfer_contracts/MASS_GAP_REGENERATION.md`) but no command performs the rebuild, so there is nothing to score against yet |
-| `module-reconstruction` | — | **unavailable**: needs `timepiece/tools/module_builder`, which does not exist |
+| `docs-site` | `python3 <sibling>/test/scripts/check_site.py` | runnable where `python3` is on `PATH` |
+| `mass-gap` | `bash <sibling>/unfer/scripts/regen_mass_gap.sh` | runnable (2026-10-07, D.4) — the project's own one-command regeneration gate: it runs every step this host can run and reports the rest as `UNAVAILABLE` with reasons, so scoring it never launders "unverified end to end" into a pass |
+| `module-reconstruction` | `bash <sibling>/unfer/tools/module_reconstruct.sh` | runnable (2026-10-07, D.4) — unpack a pinned `.cell` blueprint, hold it to the golden manifest (extra/missing/changed all fail), then `tools/module_builder run` the reconstructed module |
 | `control` | always exits 0 | runnable |
 
-The two unavailable tasks are *declared*, not omitted, so the gap shows in every
-report. Omitting them would make the harness look complete, which is the opposite
-of what it is for. The control exists so that a 0% report is distinguishable from a
-broken harness rather than a failed organisation.
+Gate paths are anchored at the sibling-repo root at build time
+(`CARGO_MANIFEST_DIR`), not relative to the caller's cwd: `cargo test` runs the
+binary from the package root while `bench_runner` inherits the shell's
+directory, and a `../unfer/…` path would mean two different things — scoring
+bash's "no such file" exit as a gate failure in one of them.
 
-A real run at three worker counts on this machine:
+Every task is *still declared with its reason* when its gate turns out to be
+unrunnable on this machine (an absent `python3` reports `Skipped`, never
+`Failed`), because omitting a task would make the harness look complete, which
+is the opposite of what it is for. The control exists so that a 0% report is
+distinguishable from a broken harness rather than a failed organisation.
+
+A real run at three worker counts on this machine (2026-10-07):
 
 ```
-measured 50% (6/12 trials): 6 passed, 0 failed, 6 skipped, 0 timed out
-  workers=1    pass 100.0%  coverage  50%
-  workers=2    pass 100.0%  coverage  50%
-  workers=4    pass 100.0%  coverage  50%
+measured 100% (12/12 trials): 12 passed, 0 failed, 0 skipped, 0 timed out
+  workers=1    pass 100.0%  coverage 100%
+  workers=2    pass 100.0%  coverage 100%
+  workers=4    pass 100.0%  coverage 100%
 ```
 
-Read honestly, that says: *the one task that could run, passed, at every worker
-count, and half the suite was not measurable.* It does **not** say the
-organisation scales, because one task cannot support that claim and the other two
-never ran.
+Read honestly, that says: *every task ran and passed at every worker count, on
+this machine, against the project's own gates.* It does **not** say the
+organisation scales. The gates all receive `UNFER_BENCH_WORKERS`, but none of
+the current task bundles has agent-level parallelism to spend it on, so equal
+pass rates across N are the expected result rather than evidence of a scaling
+dimension — coverage being complete and equal is what earns the report the
+*right* to state a 1-vs-N number, and the number it currently earns is "no
+difference measured". Elapsed times are not a throughput claim either: they
+were dominated by first-run build caching (the first `module-reconstruction`
+paid the cold `module_builder` build, the next two ran warm).
 
 ## Offline mode
 
