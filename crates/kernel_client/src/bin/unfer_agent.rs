@@ -350,6 +350,24 @@ struct AgentState {
     /// consumer holding several checkpoints can tell them apart at a glance; each
     /// model's `oldest_available` is what makes its own gap detectable.
     event_cursor: u64,
+    /// C1: server-push mode. Off by default — NDJSON stays the degenerate
+    /// single-capability mode per S28, so a client that never asks for a push
+    /// never receives an unsolicited line.
+    streaming: bool,
+    /// C1: events produced while streaming, waiting to be written to the
+    /// channel, in cursor order.
+    ///
+    /// Bounded by [`EVENT_QUEUE_CAPACITY`]: an outbox that grew without limit
+    /// would trade one silent loss (dropped events) for a worse one (a dead
+    /// process). A push dropped here is counted, not hidden — and a consumer
+    /// keeping its own cursor sees the gap through `events_poll` either way,
+    /// because the cursor, not the push, is what carries exactly-once.
+    stream_outbox: VecDeque<CursoredEvent>,
+    /// C1: events dropped from the outbox since the first `events_stream`.
+    /// Cumulative, never reset — the question a caller asks is "have I missed
+    /// anything", and a counter that cleared itself could only answer "not
+    /// just now".
+    stream_dropped: u64,
     next_id: u64,
     consensus: ConsensusNode,
     keypairs: HashMap<String, Keypair>,
@@ -482,6 +500,9 @@ impl AgentState {
             events: HashMap::new(),
             events_dropped: HashMap::new(),
             event_cursor: 1,
+            streaming: false,
+            stream_outbox: VecDeque::new(),
+            stream_dropped: 0,
             next_id: 1,
             consensus: ConsensusNode::new(Box::new(LocalConsensus::new())),
             keypairs: HashMap::new(),
@@ -501,12 +522,40 @@ impl AgentState {
     fn push_event(&mut self, model_id: u64, event: serde_json::Value) {
         let cursor = self.event_cursor;
         self.event_cursor += 1;
+        // Clone only when someone is actually listening: the push half is
+        // opt-in, and paying for it unconditionally would make the default
+        // mode slower to serve a client that never asked.
+        let streamed = self.streaming.then(|| CursoredEvent {
+            cursor,
+            event: event.clone(),
+        });
         let q = self.events.entry(model_id).or_default();
         if q.len() >= EVENT_QUEUE_CAPACITY {
             q.pop_front();
             *self.events_dropped.entry(model_id).or_default() += 1;
         }
         q.push_back(CursoredEvent { cursor, event });
+        if let Some(ce) = streamed {
+            if self.stream_outbox.len() >= EVENT_QUEUE_CAPACITY {
+                self.stream_outbox.pop_front();
+                self.stream_dropped += 1;
+            }
+            self.stream_outbox.push_back(ce);
+        }
+    }
+
+    /// The lines waiting to be pushed to the channel (C1), oldest first.
+    ///
+    /// Drained, not peeked: an event written twice would hand a consumer that
+    /// is keeping its own cursor the duplicate its checkpoint exists to
+    /// prevent. The shape is the same `{"cursor": N, "event": {...}}` object
+    /// `events_poll` returns, with no `id` — which is exactly how a client
+    /// tells a push from a response.
+    fn drain_stream_outbox(&mut self) -> Vec<serde_json::Value> {
+        self.stream_outbox
+            .drain(..)
+            .map(|ce| serde_json::json!({ "cursor": ce.cursor, "event": ce.event }))
+            .collect()
     }
 
     /// Destructive read, for the subscription path (`poll_events`).
@@ -899,6 +948,47 @@ impl AgentState {
                         "gap": gap,
                         "truncated": truncated,
                         "dropped_total": dropped,
+                    }),
+                )
+            }
+            // C1: the push half. The same events, the same cursors, written
+            // to the channel as they happen instead of waiting to be asked.
+            //
+            // Opt-in and per-process because the channel is the consumer: a
+            // client that wants request/response keeps it (S28's degenerate
+            // single-capability mode), and one that opts in must be able to
+            // tell a push from a response — which the missing `id` does.
+            // Turning it off changes nothing about the record: every event
+            // stays queued for `events_poll`, so the cursor — not the push —
+            // remains what carries exactly-once.
+            "events_stream" => {
+                let on = match req.params.get("on") {
+                    Some(serde_json::Value::Bool(b)) => *b,
+                    _ => {
+                        return AgentResponse::err(
+                            &req.id,
+                            bad_json_diag("'on' must be a boolean"),
+                        );
+                    }
+                };
+                self.streaming = on;
+                if !on {
+                    // Nothing pending can belong to a consumer that just
+                    // stopped listening; in the main loop the outbox is
+                    // drained after every response, so this only matters to
+                    // a caller holding the state directly.
+                    self.stream_outbox.clear();
+                }
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "streaming": self.streaming,
+                        "stream_dropped": self.stream_dropped,
+                        "latest_cursor": self.event_cursor.saturating_sub(1),
+                        // The discrimination rule, in the reply rather than
+                        // only in the docs: a response has `id`, a push does
+                        // not.
+                        "shape": "{\"cursor\": N, \"event\": {...}} — no `id`; any line with `id` is a response",
                     }),
                 )
             }
@@ -3282,6 +3372,13 @@ fn main() {
         };
         let resp = state.handle(&req);
         let _ = writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap());
+        // C1 push half: events produced while `events_stream` is on are
+        // written after the response that produced them, on the same channel
+        // and in cursor order. A line without `id` is an event, so a client
+        // that never enabled streaming sees exactly the stream it always saw.
+        for line in state.drain_stream_outbox() {
+            let _ = writeln!(stdout, "{}", serde_json::to_string(&line).unwrap());
+        }
         let _ = stdout.flush();
     }
 }
@@ -3664,6 +3761,171 @@ mod tests {
         ));
         assert!(poll2.ok);
         assert!(poll2.result.unwrap().get("events_dropped").is_none());
+    }
+
+    // ── C1: the push half (`events_stream`) ──────────────────────────
+
+    /// A live model, because `events_poll` refuses an unknown handle and the
+    /// cursor-continuity tests below poll for real.
+    fn new_model(state: &mut AgentState) -> u64 {
+        let resp = state.handle(&AgentRequest::new(
+            "c1-model",
+            "create_model",
+            serde_json::json!({
+                "hamiltonian": {"kind": "builtin", "name": "harmonic_chain", "params": {"n_modes": 2, "omega": 1.0}},
+                "prior": {"kind": "vacuum"},
+                "solver": {"krylov_dim": 4, "prune_eps": 1e-12, "max_components": null, "restarts": 1, "device": {"kind": "cpu"}, "adaptive": false}
+            }),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()["model_id"].as_u64().unwrap()
+    }
+
+    fn stream(state: &mut AgentState, on: bool) -> serde_json::Value {
+        let resp = state.handle(&AgentRequest::new(
+            "c1-stream",
+            "events_stream",
+            serde_json::json!({"on": on}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    #[test]
+    fn pushing_is_off_by_default_so_an_existing_client_sees_nothing_new() {
+        // S28's degenerate single-capability mode: the op existing must not
+        // change one byte of the stream for a client that never calls it.
+        let mut state = AgentState::new();
+        state.push_event(1, serde_json::json!({"seq": 1}));
+        assert!(
+            state.drain_stream_outbox().is_empty(),
+            "off means no unsolicited line, ever"
+        );
+    }
+
+    #[test]
+    fn while_streaming_every_event_becomes_a_line_without_an_id() {
+        let mut state = AgentState::new();
+        assert_eq!(stream(&mut state, true)["streaming"], true);
+
+        state.push_event(1, serde_json::json!({"seq": 1}));
+        state.push_event(1, serde_json::json!({"seq": 2}));
+        let lines = state.drain_stream_outbox();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["cursor"], 1);
+        assert_eq!(lines[1]["cursor"], 2);
+        for line in &lines {
+            assert!(
+                line.get("id").is_none(),
+                "a line with `id` is a response, not a push: {line}"
+            );
+            assert!(line["event"].is_object());
+        }
+        // Drained, not peeked: an event pushed twice would hand a cursor-keeping
+        // consumer the duplicate its checkpoint exists to prevent.
+        assert!(state.drain_stream_outbox().is_empty());
+    }
+
+    #[test]
+    fn the_pushed_cursor_is_the_poll_cursor_so_modes_switch_without_duplicates() {
+        // The push is a latency optimisation; the cursor is the record. This
+        // pins that they are the same cursor — otherwise switching modes
+        // would lose or repeat an event.
+        let mut state = AgentState::new();
+        let model_id = new_model(&mut state);
+        stream(&mut state, true);
+        state.push_event(model_id, serde_json::json!({"seq": 1}));
+        let pushed = state.drain_stream_outbox();
+        let cursor = pushed[0]["cursor"].as_u64().unwrap();
+
+        let poll_after = state.handle(&AgentRequest::new(
+            "c1-p-after",
+            "events_poll",
+            serde_json::json!({"model_id": model_id, "since_cursor": cursor}),
+        ));
+        assert!(poll_after.ok, "{:?}", poll_after.error);
+        assert_eq!(
+            poll_after.result.unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "nothing the push already delivered is delivered again"
+        );
+
+        let poll_all = state.handle(&AgentRequest::new(
+            "c1-p-all",
+            "events_poll",
+            serde_json::json!({"model_id": model_id, "since_cursor": 0}),
+        ));
+        let events = poll_all.result.unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(events.len(), 1, "and nothing is lost either");
+        assert_eq!(events[0]["cursor"], cursor, "one cursor, two transports");
+    }
+
+    #[test]
+    fn turning_streaming_off_leaves_the_record_where_it_was() {
+        let mut state = AgentState::new();
+        let model_id = new_model(&mut state);
+        stream(&mut state, true);
+        state.push_event(model_id, serde_json::json!({"seq": 1}));
+        stream(&mut state, false);
+        assert!(
+            state.drain_stream_outbox().is_empty(),
+            "pending pushes are discarded, not written after the off"
+        );
+        // The event itself is untouched: the per-model log is the record, and
+        // the cursor — not the push — is what carries exactly-once.
+        let poll = state.handle(&AgentRequest::new(
+            "c1-p-off",
+            "events_poll",
+            serde_json::json!({"model_id": model_id, "since_cursor": 0}),
+        ));
+        assert_eq!(poll.result.unwrap()["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_outbox_eviction_is_counted_rather_than_silent() {
+        // The bounded outbox could drop a push; the whole point is that it
+        // says so, cumulatively — a consumer that was away cannot be told by
+        // a counter that resets itself.
+        let mut state = AgentState::new();
+        stream(&mut state, true);
+        for i in 0..(EVENT_QUEUE_CAPACITY as u64 + 5) {
+            state.push_event(1, serde_json::json!({"seq": i}));
+        }
+        assert_eq!(
+            state.drain_stream_outbox().len(),
+            EVENT_QUEUE_CAPACITY,
+            "the outbox is bounded like the log"
+        );
+        assert_eq!(stream(&mut state, true)["stream_dropped"], 5);
+    }
+
+    #[test]
+    fn events_stream_requires_a_boolean_and_a_refusal_changes_nothing() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "c1-bad",
+            "events_stream",
+            serde_json::json!({}),
+        ));
+        assert!(!resp.ok);
+        assert!(format!("{:?}", resp.error).contains("'on'"));
+
+        let resp = state.handle(&AgentRequest::new(
+            "c1-bad2",
+            "events_stream",
+            serde_json::json!({"on": "yes"}),
+        ));
+        assert!(!resp.ok);
+        assert!(
+            !state.streaming,
+            "a refused request must not half-enable the mode"
+        );
     }
 
     #[test]
