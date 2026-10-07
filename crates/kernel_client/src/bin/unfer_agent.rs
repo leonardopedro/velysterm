@@ -107,6 +107,68 @@ fn bad_json_diag(msg: &str) -> Diagnostic {
     )
 }
 
+// ── G5: write-time conflict detection (`sync_edit` / `sync_import`) ─────────
+
+/// A required non-empty string param.
+fn required_str(params: &serde_json::Value, field: &str) -> Result<String, Diagnostic> {
+    match params.get(field).and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
+        _ => Err(bad_json_diag(&format!("missing or empty '{field}' field"))),
+    }
+}
+
+/// A required non-negative integer param.
+fn required_u64(params: &serde_json::Value, field: &str) -> Result<u64, Diagnostic> {
+    match params.get(field).and_then(|v| v.as_u64()) {
+        Some(n) => Ok(n),
+        None => Err(bad_json_diag(&format!(
+            "missing or non-integer '{field}' field"
+        ))),
+    }
+}
+
+/// The `blocks` a `sync_*` op declares: `[{"start": <n>, "end": <n>}, ...]`.
+///
+/// Refused rather than repaired, because both plausible repairs are silent
+/// divergence: an empty list declares nothing, so a "clean" verdict would be
+/// a statement about no information at all; and a reversed range read as an
+/// empty range would drop the very declaration the packet came to make. A
+/// zero-width range (`start == end`) is legal — it is an insertion point.
+fn parse_blocks(
+    params: &serde_json::Value,
+) -> Result<Vec<mathed_core::sync::BlockRange>, Diagnostic> {
+    let arr = match params.get("blocks") {
+        Some(serde_json::Value::Array(a)) if !a.is_empty() => a,
+        _ => {
+            return Err(bad_json_diag(
+                "missing or empty 'blocks' field (nothing declared, nothing checked)",
+            ));
+        }
+    };
+    let mut blocks = Vec::with_capacity(arr.len());
+    for (i, b) in arr.iter().enumerate() {
+        let start = b.get("start").and_then(|v| v.as_u64());
+        let end = b.get("end").and_then(|v| v.as_u64());
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(bad_json_diag(&format!(
+                "blocks[{i}] must be an object with integer 'start' and 'end'"
+            )));
+        };
+        if end < start {
+            return Err(bad_json_diag(&format!(
+                "blocks[{i}] is reversed: {start}..{end}"
+            )));
+        }
+        let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
+            return Err(bad_json_diag(&format!(
+                "blocks[{i}] does not fit this platform's usize"
+            )));
+        };
+        blocks.push(mathed_core::sync::BlockRange::new(start, end));
+    }
+    Ok(blocks)
+}
+
 // ── D5: the analytic decision engine (`decide_*` ops) ─────────────────────
 //
 // Helpers shared by the four dispatch arms. All four ops are observe-kind:
@@ -331,6 +393,17 @@ struct AgentState {
     /// nothing reachable through this field can approve, merge, gate, sign or
     /// certify. See `unfer_protocol::decide`.
     decide: Option<DecideCore>,
+    /// G5: per-document edit footprints, so an imported delta can be
+    /// classified against what *this* document changed since the packet's
+    /// base revision. Keyed by document id, created on first use; see
+    /// `mathed_core::sync`.
+    sync_docs: std::collections::BTreeMap<String, mathed_core::sync::ConflictTracker>,
+    /// G5: conflicts already written to the board, keyed by
+    /// `doc|peer|revision|base|blocks` and valued by the `FAIL` entry's
+    /// cursor. A peer retrying an import gets the original cursor instead of
+    /// a second entry — the dedup rule `agent_escalate` and `agent_nudge`
+    /// already follow: a lane that fills with retries is a lane nobody reads.
+    sync_conflicts: std::collections::BTreeMap<String, u64>,
 }
 
 impl AgentState {
@@ -419,6 +492,8 @@ impl AgentState {
             handoffs: Vec::new(),
             runs: unfer_protocol::evidence::GateRuns::new(),
             nudges_sent: std::collections::HashSet::new(),
+            sync_docs: std::collections::BTreeMap::new(),
+            sync_conflicts: std::collections::BTreeMap::new(),
             decide: None,
         }
     }
@@ -1110,6 +1185,156 @@ impl AgentState {
                         "escalations_for_scope": escalations_for_scope,
                         "effect_kind": "mutate",
                         "lane": "board: grep ESCALATE; a human answers by posting the decision on the board",
+                    }),
+                )
+            }
+            // G5: record this document's own edit footprint — the local half
+            // of write-time conflict detection.
+            //
+            // `sync_import` classifies a peer's packet against exactly this
+            // footprint. Without it the agent has never touched anything,
+            // every import classifies clean, and the conflict path below could
+            // only ever fire from a test.
+            "sync_edit" => {
+                let doc = match required_str(&req.params, "doc") {
+                    Ok(d) => d,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let blocks = match parse_blocks(&req.params) {
+                    Ok(b) => b,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let packet = self
+                    .sync_docs
+                    .entry(doc.clone())
+                    .or_insert_with(mathed_core::sync::ConflictTracker::anonymous)
+                    .local_edit(blocks, Vec::new());
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "doc": doc,
+                        // The envelope a delta carrier would send, `bytes`
+                        // empty by design: this op records *what* changed;
+                        // shipping *how* is the transport's job (the editor's
+                        // reserved `b'D'` frame), not this op's.
+                        "packet": packet,
+                    }),
+                )
+            }
+            // G5: classify an imported delta against this document's own
+            // footprint — and, when the two overlap, put the conflict on the
+            // board.
+            //
+            // The half the plan called missing: `mathed_core::sync` always
+            // produced a `ConflictRecord`, but nothing wrote it anywhere a
+            // reader could see, so G2 step 5 ("re-check both sides, re-merge")
+            // had no input. A clean import writes nothing — an entry per
+            // non-conflicting import would bury the ones that matter.
+            "sync_import" => {
+                let worker = match required_str(&req.params, "worker") {
+                    Ok(w) => w,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let doc = match required_str(&req.params, "doc") {
+                    Ok(d) => d,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let peer = match required_str(&req.params, "peer") {
+                    Ok(p) => p,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let (revision, base_revision) = match (
+                    required_u64(&req.params, "revision"),
+                    required_u64(&req.params, "base_revision"),
+                ) {
+                    (Ok(r), Ok(b)) => (r, b),
+                    (Err(d), _) | (_, Err(d)) => return AgentResponse::err(&req.id, d),
+                };
+                let blocks = match parse_blocks(&req.params) {
+                    Ok(b) => b,
+                    Err(d) => return AgentResponse::err(&req.id, d),
+                };
+                let packet = mathed_core::sync::DeltaPacket {
+                    revision,
+                    base_revision,
+                    blocks,
+                    bytes: Vec::new(),
+                };
+                // Scoped so the tracker's borrow ends before the board write:
+                // what comes out is owned, and the board is the next thing
+                // this method touches.
+                let (outcome, my_revision) = {
+                    let tracker = self
+                        .sync_docs
+                        .entry(doc.clone())
+                        .or_insert_with(mathed_core::sync::ConflictTracker::anonymous);
+                    (tracker.classify_from(&peer, &packet), tracker.revision())
+                };
+                let Some(record) = outcome.conflict().cloned() else {
+                    return AgentResponse::ok(
+                        &req.id,
+                        serde_json::json!({
+                            "conflict": false,
+                            "doc": doc,
+                            "peer": peer,
+                            // Both sides' revisions and the peer's declared
+                            // footprint, so a caller can see a check happened
+                            // rather than a field saying "checked".
+                            "my_revision": my_revision,
+                            "their_revision": packet.revision,
+                            "their_base": packet.base_revision,
+                            "declared_blocks": packet.blocks.len(),
+                        }),
+                    );
+                };
+                let key = format!(
+                    "{doc}|{peer}|{revision}|{base_revision}|{:?}",
+                    packet.blocks
+                );
+                let existing = self.sync_conflicts.get(&key).copied();
+                let (cursor, fresh) = match existing {
+                    Some(c) => (c, false),
+                    None => {
+                        // `FAIL`, not a new kind: this is a "do not merge
+                        // blindly" signal, and `FAIL` is the kind whose whole
+                        // purpose is that a peer stops and reads it (G1's
+                        // acceptance). Observe-kind — recording a conflict
+                        // approves nothing, and only CLAIM/ESCALATE/
+                        // PATCH_SUMMARY mutate.
+                        let text = format!("{doc}: {}", record.explain());
+                        let detail = serde_json::json!({
+                            "doc": doc,
+                            "conflict": record,
+                        })
+                        .to_string();
+                        let entry = self.board.write(
+                            unfer_protocol::board::BoardKind::Fail,
+                            &worker,
+                            &text,
+                            Some(&detail),
+                        );
+                        self.sync_conflicts.insert(key, entry.cursor);
+                        (entry.cursor, true)
+                    }
+                };
+                // Re-read rather than cached: the reply carries the entry as
+                // it is on the board now, and null means the bounded ring has
+                // since dropped it — which is worth seeing, not hiding.
+                let entry = self.board.all().into_iter().find(|e| e.cursor == cursor);
+                AgentResponse::ok(
+                    &req.id,
+                    serde_json::json!({
+                        "conflict": true,
+                        "doc": doc,
+                        // `true` on the first report of this conflict; a retry
+                        // gets the original cursor instead of a second entry.
+                        "deduped": !fresh,
+                        "cursor": cursor,
+                        "entry": entry,
+                        "record": record,
+                        "my_revision": my_revision,
+                        "effect_kind": "observe",
+                        "lane": "board: grep FAIL; G2 step 5 re-checks both sides' acceptance criteria before merging",
                     }),
                 )
             }
@@ -4954,6 +5179,232 @@ mod tests {
         assert_eq!(r["escalated"], true);
         assert_eq!(r["holders"].as_array().unwrap().len(), 0);
         assert_eq!(r["escalations_for_scope"], 1);
+    }
+
+    // ── G5: write-time conflict detection ───────────────────────────────
+    //
+    // The acceptance is not "the tracker produces a record" — that was
+    // already true in `mathed_core::sync` — but that the record reaches the
+    // board, where G2 step 5 (re-check both sides, re-merge) can read it.
+
+    fn sync_edit(
+        state: &mut AgentState,
+        doc: &str,
+        blocks: Vec<(usize, usize)>,
+    ) -> serde_json::Value {
+        let blocks: Vec<serde_json::Value> = blocks
+            .iter()
+            .map(|(s, e)| serde_json::json!({"start": s, "end": e}))
+            .collect();
+        let resp = state.handle(&AgentRequest::new(
+            "g5-e",
+            "sync_edit",
+            serde_json::json!({"doc": doc, "blocks": blocks}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()
+    }
+
+    fn sync_import(
+        state: &mut AgentState,
+        worker: &str,
+        doc: &str,
+        peer: &str,
+        revision: u64,
+        base_revision: u64,
+        blocks: Vec<(usize, usize)>,
+    ) -> Result<serde_json::Value, String> {
+        let blocks: Vec<serde_json::Value> = blocks
+            .iter()
+            .map(|(s, e)| serde_json::json!({"start": s, "end": e}))
+            .collect();
+        let resp = state.handle(&AgentRequest::new(
+            "g5-i",
+            "sync_import",
+            serde_json::json!({
+                "worker": worker,
+                "doc": doc,
+                "peer": peer,
+                "revision": revision,
+                "base_revision": base_revision,
+                "blocks": blocks,
+            }),
+        ));
+        if resp.ok {
+            Ok(resp.result.unwrap())
+        } else {
+            Err(format!("{:?}", resp.error))
+        }
+    }
+
+    /// Every `FAIL` entry on the board, oldest first.
+    fn fail_entries(state: &mut AgentState) -> Vec<serde_json::Value> {
+        let resp = state.handle(&AgentRequest::new(
+            "g5-f",
+            "board_grep",
+            serde_json::json!({"expr": "FAIL"}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        resp.result.unwrap()["entries"]
+            .as_array()
+            .expect("entries")
+            .clone()
+    }
+
+    #[test]
+    fn an_overlapping_import_lands_on_the_board_where_g2_step_5_can_read_it() {
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        let r = sync_import(&mut state, "w1", "notes.md", "w2", 2, 0, vec![(5, 15)]).unwrap();
+
+        assert_eq!(r["conflict"], true);
+        assert_eq!(r["deduped"], false);
+        assert_eq!(
+            r["effect_kind"], "observe",
+            "recording a conflict approves nothing"
+        );
+        // The structured record: whose, against which base, both footprints,
+        // and the specific overlaps — revision ids and block ranges, exactly
+        // what G5's acceptance asks for.
+        assert_eq!(r["record"]["peer"], "w2");
+        assert_eq!(r["record"]["their_base"], 0);
+        assert_eq!(r["record"]["their_revision"], 2);
+        assert_eq!(r["record"]["my_revision"], 1);
+        assert_eq!(
+            r["record"]["overlaps"][0],
+            // A pair: theirs first, ours second — `overlapping_pairs` orders
+            // it that way so the reader sees the incoming edit first.
+            serde_json::json!([
+                {"start": 5, "end": 15},
+                {"start": 0, "end": 10}
+            ])
+        );
+
+        // On the board: FAIL (the kind whose purpose is that a peer stops and
+        // reads it), named for the document so a grep finds it, with the
+        // structured record as detail.
+        let entries = fail_entries(&mut state);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["kind"], "FAIL");
+        assert_eq!(entries[0]["worker"], "w1");
+        assert!(
+            entries[0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("notes.md: "),
+            "the document is what the reader greps on: {}",
+            entries[0]["text"]
+        );
+        let detail: serde_json::Value =
+            serde_json::from_str(entries[0]["detail"].as_str().unwrap()).unwrap();
+        assert_eq!(detail["doc"], "notes.md");
+        assert_eq!(detail["conflict"]["peer"], "w2");
+        assert_eq!(r["cursor"], entries[0]["cursor"]);
+    }
+
+    #[test]
+    fn a_disjoint_import_is_clean_and_writes_nothing() {
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        let r = sync_import(&mut state, "w1", "notes.md", "w2", 2, 0, vec![(100, 110)]).unwrap();
+        assert_eq!(r["conflict"], false);
+        assert_eq!(r["my_revision"], 1);
+        assert_eq!(r["declared_blocks"], 1);
+        assert!(
+            fail_entries(&mut state).is_empty(),
+            "an entry per clean import would bury the ones that matter"
+        );
+    }
+
+    #[test]
+    fn retrying_the_same_import_does_not_fill_the_lane_with_duplicates() {
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        let first = sync_import(&mut state, "w1", "notes.md", "w2", 2, 0, vec![(5, 15)]).unwrap();
+        let second = sync_import(&mut state, "w1", "notes.md", "w2", 2, 0, vec![(5, 15)]).unwrap();
+        assert_eq!(second["conflict"], true, "it is still a conflict");
+        assert_eq!(second["deduped"], true);
+        assert_eq!(second["cursor"], first["cursor"], "the original entry");
+        assert_eq!(fail_entries(&mut state).len(), 1);
+    }
+
+    #[test]
+    fn work_the_peer_already_saw_is_not_a_conflict() {
+        // The peer based its packet on revision 1, so it has our edit — the
+        // same rule `mathed_core::sync` pins, checked through the op.
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        let r = sync_import(&mut state, "w1", "notes.md", "w2", 2, 1, vec![(0, 10)]).unwrap();
+        assert_eq!(r["conflict"], false);
+        assert!(fail_entries(&mut state).is_empty());
+    }
+
+    #[test]
+    fn footprints_are_per_document() {
+        // One agent, many documents: an edit to `a.md` cannot make an import
+        // into `b.md` look stale.
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "a.md", vec![(0, 10)]);
+        let r = sync_import(&mut state, "w1", "b.md", "w2", 2, 0, vec![(5, 15)]).unwrap();
+        assert_eq!(r["conflict"], false, "b.md was never touched");
+    }
+
+    #[test]
+    fn a_packet_that_declares_nothing_is_refused_rather_than_called_clean() {
+        // "Clean" would be a verdict about no information at all — the exact
+        // shape of silent divergence this op exists to prevent.
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        let err = sync_import(&mut state, "w1", "notes.md", "w2", 2, 0, vec![]).unwrap_err();
+        assert!(err.contains("declared"), "{err}");
+        assert!(
+            fail_entries(&mut state).is_empty(),
+            "a refused import writes nothing"
+        );
+    }
+
+    #[test]
+    fn a_reversed_block_range_is_refused_not_silently_dropped() {
+        let mut state = AgentState::new();
+        sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        let err = sync_import(&mut state, "w1", "notes.md", "w2", 2, 0, vec![(15, 5)]).unwrap_err();
+        assert!(err.contains("reversed"), "{err}");
+    }
+
+    #[test]
+    fn sync_import_requires_worker_doc_and_peer() {
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "g5-p",
+            "sync_import",
+            serde_json::json!({"doc": "d"}),
+        ));
+        assert!(!resp.ok);
+        let msg = format!("{:?}", resp.error);
+        assert!(msg.contains("worker"), "{msg}");
+
+        let resp = state.handle(&AgentRequest::new(
+            "g5-p2",
+            "sync_edit",
+            serde_json::json!({"blocks": [{"start": 0, "end": 1}]}),
+        ));
+        assert!(!resp.ok);
+        assert!(
+            format!("{:?}", resp.error).contains("doc"),
+            "a footprint with no document is not a footprint"
+        );
+    }
+
+    #[test]
+    fn sync_edit_replies_with_the_envelope_a_carrier_would_send() {
+        let mut state = AgentState::new();
+        let first = sync_edit(&mut state, "notes.md", vec![(0, 10)]);
+        assert_eq!(first["packet"]["base_revision"], 0);
+        assert_eq!(first["packet"]["revision"], 1);
+        let second = sync_edit(&mut state, "notes.md", vec![(20, 30)]);
+        assert_eq!(second["packet"]["base_revision"], 1);
+        assert_eq!(second["packet"]["revision"], 2);
+        assert_eq!(second["packet"]["blocks"][0]["start"], 20);
     }
 
     #[test]

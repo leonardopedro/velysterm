@@ -779,6 +779,22 @@ impl ConflictTracker {
         }
     }
 
+    /// A tracker with no default peer, for a host where the sender is not
+    /// known in advance.
+    ///
+    /// The agent is that host: many workers edit one document, so "who sent
+    /// this packet" is a property of the packet, never of the tracker. Such a
+    /// tracker classifies only through [`ConflictTracker::classify_from`];
+    /// calling [`ConflictTracker::classify`] on it would stamp every record
+    /// with an empty peer, which is a wrong name rather than a missing one.
+    pub fn anonymous() -> ConflictTracker {
+        ConflictTracker {
+            peer: String::new(),
+            mine: Footprint::new(),
+            theirs: std::collections::BTreeMap::new(),
+        }
+    }
+
     pub fn revision(&self) -> u64 {
         self.mine.revision()
     }
@@ -801,13 +817,24 @@ impl ConflictTracker {
     /// Pure with respect to the document: it does not import. Callers apply the
     /// bytes however they like; this says whether the two sides overlapped.
     pub fn classify(&self, packet: &DeltaPacket) -> ImportOutcome {
+        self.classify_from(&self.peer, packet)
+    }
+
+    /// [`ConflictTracker::classify`], naming the peer the packet came from.
+    ///
+    /// One tracker can serve several peers, because what classification needs
+    /// is *this* document's footprint — shared — plus whose name goes on the
+    /// record. Keying trackers by peer instead would duplicate that footprint,
+    /// and an edit would be invisible to every peer-tracker created before it:
+    /// the miss is the unsafe direction.
+    pub fn classify_from(&self, peer: &str, packet: &DeltaPacket) -> ImportOutcome {
         let mine_since = self.mine.since(packet.base_revision);
         if !footprints_overlap(&packet.blocks, &mine_since) {
             return ImportOutcome::Clean;
         }
         let overlaps = overlapping_pairs(&packet.blocks, &mine_since);
         ImportOutcome::Conflicted(ConflictRecord {
-            peer: self.peer.clone(),
+            peer: peer.to_string(),
             their_revision: packet.revision,
             their_base: packet.base_revision,
             my_revision: self.mine.revision(),
@@ -932,6 +959,32 @@ mod conflict_tests {
             blocks,
             bytes: vec![],
         }
+    }
+
+    #[test]
+    fn classify_from_names_the_sender_rather_than_a_default_peer() {
+        // The agent's case: one document, many possible senders. The record
+        // must carry whoever actually sent the packet, and the default-label
+        // path must be unchanged by the split.
+        let mut t = ConflictTracker::anonymous();
+        t.local_edit(vec![rng(0, 10)], vec![]);
+        let from = t
+            .classify_from("w7", &packet(0, 2, vec![rng(5, 15)]))
+            .conflict()
+            .expect("still a conflict")
+            .clone();
+        assert_eq!(from.peer, "w7");
+
+        // The default-label path is unchanged by the split.
+        let mut t2 = ConflictTracker::new("w2");
+        t2.local_edit(vec![rng(0, 10)], vec![]);
+        assert_eq!(
+            t2.classify(&packet(0, 2, vec![rng(5, 15)]))
+                .conflict()
+                .expect("still a conflict")
+                .peer,
+            "w2"
+        );
     }
 
     #[test]
