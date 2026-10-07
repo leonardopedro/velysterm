@@ -280,7 +280,13 @@ pub enum DeliveryError {
 }
 
 /// Tracks the mechanical side of one worker's loop.
-#[derive(Debug)]
+///
+/// Everything here is the *durable* half of a session: what the worker is
+/// doing, what it has already read, what it has already been told. It
+/// serializes as itself (G2), so [`crate::session::SessionStore`] can write it
+/// out and a restarted host can hand it back — see that module for what is
+/// deliberately not carried across.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoopState {
     pub step: Step,
     /// Backtracks used at the current step, against that step's budget.
@@ -315,8 +321,10 @@ impl LoopState {
 
     /// Record that the start-of-loop delivery happened up to `cursor`.
     ///
-    /// Persisted by the caller, so a restarted worker resumes knowing what it has
-    /// already read rather than re-reading from zero and re-deciding.
+    /// Persisted by the caller — which is [`crate::session::SessionStore`],
+    /// written through [`crate::org_runner::OrgHost`] after every step — so a
+    /// restarted worker resumes knowing what it has already read rather than
+    /// re-reading from zero and re-deciding.
     pub fn mark_gathered(&mut self, cursor: u64) {
         self.gathered_through = self.gathered_through.max(cursor);
     }

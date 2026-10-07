@@ -7,6 +7,7 @@
 //! ```sh
 //!   org_runner --workers 4 --budget 4 --report
 //!   org_runner --workers 8 --budget 4 --report   # 4 refused, UK-4601
+//!   org_runner --workers 4 --session-dir /tmp/org # G2: resumes the last run
 //! ```
 //!
 //! With `--for-tick N` it advances the virtual clock, which is how the deadline
@@ -21,6 +22,7 @@ fn main() {
     let mut model: Option<String> = None;
     let mut report = false;
     let mut for_tick = 0u64;
+    let mut session_dir: Option<String> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -29,11 +31,12 @@ fn main() {
             "--budget" => budget = args.next().and_then(|v| v.parse().ok()),
             "--model" => model = args.next(),
             "--for-tick" => for_tick = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--session-dir" => session_dir = args.next(),
             "--report" => report = true,
             "--help" | "-h" => {
                 eprintln!(
                     "usage: org_runner [--workers N] [--budget N] [--model SPEC] \
-                     [--for-tick N] [--report]"
+                     [--for-tick N] [--session-dir DIR] [--report]"
                 );
                 std::process::exit(0);
             }
@@ -47,6 +50,11 @@ fn main() {
     }
     if let Some(m) = &model {
         host = host.with_worker_model(m);
+    }
+    // G2: with a session dir, the workers spawned here restore whatever the
+    // previous run left, and every step below is persisted for the next one.
+    if let Some(d) = &session_dir {
+        host = host.with_session_dir(d.clone());
     }
 
     let mut refused = Vec::new();
@@ -90,6 +98,13 @@ fn main() {
             serde_json::to_string_pretty(&host.report()).unwrap_or_default()
         );
     }
+
+    // The run may be fine and the record still unwritten; those are different
+    // facts and only the second one is newsworthy here.
+    if let Some(e) = host.session_error() {
+        eprintln!("org_runner: session persist failed: {e}");
+        std::process::exit(1);
+    }
 }
 
 fn describe(e: &SpawnRefusal) -> String {
@@ -99,5 +114,8 @@ fn describe(e: &SpawnRefusal) -> String {
         }
         SpawnRefusal::DuplicateId { worker } => format!("worker id {worker:?} is already live"),
         SpawnRefusal::BlankId => "blank worker id".to_string(),
+        SpawnRefusal::CorruptSession { detail } => {
+            format!("saved session cannot be read: {detail}")
+        }
     }
 }

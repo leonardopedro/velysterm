@@ -4,6 +4,7 @@ pub mod coop_loop;
 pub mod jupyter_stdio;
 pub mod org_runner;
 pub mod runner;
+pub mod session;
 pub mod stdio_driver;
 pub mod worker;
 

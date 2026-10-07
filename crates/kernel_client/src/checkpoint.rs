@@ -38,6 +38,29 @@ pub enum CheckpointError {
     },
 }
 
+/// Write `bytes` to `path` atomically: sibling temp file, durability, rename.
+///
+/// Shared by the cursor checkpoint and the G2 session record
+/// (`crate::session`), because "a crash mid-write leaves the previous version
+/// intact rather than a truncated file that reads as garbage" is one property,
+/// not two, and a second implementation of it would be a second place to get it
+/// wrong.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let outcome = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        // Durability before the rename, or the rename can land before the
+        // bytes do and we publish a checkpoint we never actually wrote.
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    outcome
+}
+
 /// A cursor persisted next to the worker that produced it.
 #[derive(Debug, Clone)]
 pub struct CursorCheckpoint {
@@ -98,26 +121,10 @@ impl CursorCheckpoint {
         {
             return Ok(existing);
         }
-        let tmp = self.path.with_extension("tmp");
-        let write = |path: &Path| -> std::io::Result<()> {
-            let mut f = std::fs::File::create(path)?;
-            f.write_all(cursor.to_string().as_bytes())?;
-            // Durability before the rename, or the rename can land before the
-            // bytes do and we publish a checkpoint we never actually wrote.
-            f.sync_all()
-        };
-        if let Err(e) = write(&tmp) {
-            let _ = std::fs::remove_file(&tmp);
+        if let Err(source) = atomic_write(&self.path, cursor.to_string().as_bytes()) {
             return Err(CheckpointError::Io {
                 path: self.path.clone(),
-                source: e,
-            });
-        }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(CheckpointError::Io {
-                path: self.path.clone(),
-                source: e,
+                source,
             });
         }
         Ok(cursor)

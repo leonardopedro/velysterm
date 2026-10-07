@@ -47,8 +47,23 @@
 //! converges on the same wrong answer and each has run a gate, every gate passes.
 //! That is why the board and the claim ledger exist alongside this rather than
 //! instead of it.
+//!
+//! ## What a restart keeps
+//!
+//! Nothing, by default: the host is in-memory, and a new one starts clean. That
+//! is a legitimate configuration, but it is not the only one.
+//! [`OrgHost::with_session_dir`] gives each worker a durable
+//! [`crate::session::SessionRecord`] — written after every step, read on
+//! `spawn` — so a worker that comes back resumes at its own step, with the
+//! cursor it had already gathered, the deliveries it had already been handed
+//! and the nudges it had already acted on, and with its scopes replayed onto
+//! the board through the normal claim path. What survives is the loop's own
+//! state. What does not — the board, queued deliveries, per-worker memory — is
+//! either re-derived or owned by something more durable (G1's `BoardLog`),
+//! because a second copy of durable state is a second thing to keep honest.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use unfer_protocol::board::{Board, BoardKind};
@@ -58,6 +73,7 @@ use unfer_protocol::memory::Memory;
 use unfer_protocol::nudge::Checkpoint;
 
 use crate::coop_loop::{Delivery, LoopState, RetryPolicy, Step};
+use crate::session::{SessionRecord, SessionStore};
 
 /// Why a worker could not start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +86,13 @@ pub enum SpawnRefusal {
     DuplicateId { worker: String },
     /// The id is blank, so deliveries could never be addressed.
     BlankId,
+    /// The worker's saved session exists but cannot be read, so where it left
+    /// off is unknown.
+    ///
+    /// Refused rather than started fresh: a worker that forgets which scopes it
+    /// held re-derives them while a peer still believes those claims settled,
+    /// which is the silent divergence the record exists to prevent.
+    CorruptSession { detail: String },
 }
 
 impl SpawnRefusal {
@@ -78,10 +101,15 @@ impl SpawnRefusal {
     /// `RateLimited` is UK-4601, the same code `uk_agent_spawn` returns, so a
     /// refusal here and a refusal at the kernel look the same to a caller. Two
     /// spellings of one failure is how a caller ends up handling only one.
+    ///
+    /// `CorruptSession` is UK-1006, the kernel's session-log code — "malformed
+    /// and cannot be replayed" — which is exactly this, for a session record
+    /// this crate owns.
     pub fn code(&self) -> &'static str {
         match self {
             SpawnRefusal::RateLimited { .. } => "UK-4601",
             SpawnRefusal::DuplicateId { .. } | SpawnRefusal::BlankId => "UK-1004",
+            SpawnRefusal::CorruptSession { .. } => "UK-1006",
         }
     }
 }
@@ -222,6 +250,17 @@ pub struct OrgHost {
     /// shares it, and a per-worker copy would let two workers disagree about how
     /// long to wait.
     retry_policy: RetryPolicy,
+    /// G2: where worker sessions are persisted. `None` — the default — means
+    /// RAM-only: no session is written, and `spawn` restores nothing. The right
+    /// choice for a host with no restart story, and the wrong one for an
+    /// organisation expected to outlive its process.
+    session: Option<SessionStore>,
+    /// The most recent failure to persist a session.
+    ///
+    /// Surfaced rather than swallowed: a host that cannot record what its
+    /// workers are doing must not go on looking like one that can, and the
+    /// only honest place for that to show up is where a caller already looks.
+    session_error: Option<String>,
     stats: OrgStats,
 }
 
@@ -248,6 +287,8 @@ impl OrgHost {
             spawn_budget: None,
             worker_model: None,
             retry_policy: RetryPolicy::default(),
+            session: None,
+            session_error: None,
             stats: OrgStats::default(),
         }
     }
@@ -269,6 +310,34 @@ impl OrgHost {
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> OrgHost {
         self.retry_policy = policy;
         self
+    }
+
+    /// Persist every worker's session to `dir/sessions.json`, and restore from
+    /// it on `spawn` (G2).
+    ///
+    /// Restores the loop — step, gathered cursor, seen deliveries, delivered
+    /// nudges, elapsed minutes — and replays the worker's scopes through the
+    /// normal claim path, so the ledger entry and its `CLAIM` board entry are
+    /// rebuilt together and a third worker reading the history still sees who
+    /// holds what.
+    ///
+    /// What this deliberately does *not* restore is the board itself. That is
+    /// G1's durable `BoardLog` — a separate decision with its own failure
+    /// modes — and keeping the two apart means a host can be durable in either
+    /// dimension without inheriting the other.
+    pub fn with_session_dir(mut self, dir: impl Into<PathBuf>) -> OrgHost {
+        let dir: PathBuf = dir.into();
+        self.session = Some(SessionStore::new(dir.join("sessions.json")));
+        self
+    }
+
+    /// The most recent failure to persist a session, if any.
+    ///
+    /// Checked after a run, not instead of it: a write failure does not make
+    /// the in-memory run wrong, it makes the *next* restart wrong, and only a
+    /// caller can decide what to do about that.
+    pub fn session_error(&self) -> Option<&str> {
+        self.session_error.as_deref()
     }
 
     /// The resolved worker model, if any.
@@ -303,9 +372,99 @@ impl OrgHost {
                 budget,
             });
         }
-        self.workers
-            .push(WorkerSlot::new(id.to_string(), preset.to_string()));
+        // G2: a saved session is where this worker left off. Read it *before*
+        // the slot exists, so a record that cannot be read refuses the spawn
+        // outright — starting fresh is precisely the silent divergence the
+        // record exists to prevent.
+        let saved = match &self.session {
+            None => None,
+            Some(store) => match store.load() {
+                Ok(all) => all.get(id).cloned(),
+                Err(e) => {
+                    self.stats.spawn_refusals += 1;
+                    return Err(SpawnRefusal::CorruptSession {
+                        detail: e.to_string(),
+                    });
+                }
+            },
+        };
+        let mut slot = WorkerSlot::new(id.to_string(), preset.to_string());
+        if let Some(record) = saved {
+            // Replay the scopes through the normal claim path instead of
+            // injecting them into the ledger, so the `CLAIM` board entry and
+            // the ledger entry are rebuilt together: a ledger entry with no
+            // board entry behind it is a claim no third worker can see in the
+            // history. The host is fresh after a restart, so a replayed claim
+            // is a reconstruction rather than a duplicate.
+            let mut held = 0usize;
+            for scope in &record.scopes {
+                let attempt = self.claims.claim(&mut self.board, id, scope);
+                if matches!(attempt.outcome, ClaimOutcome::Granted { .. }) {
+                    held += 1;
+                }
+            }
+            let mut state = record.loop_state;
+            let presumes_a_claim = !matches!(state.step, Step::Gather | Step::Claim);
+            // A step past Claim asserts "I hold something". If the replay
+            // could not re-seat every scope — the record lost them, or a peer
+            // took one first — that assertion is now false, and the ledger is
+            // the authority: restart the loop rather than act on a claim
+            // nobody records. Gather/Claim assert nothing, so they stand.
+            if presumes_a_claim && (record.scopes.is_empty() || held < record.scopes.len()) {
+                state.advance(Step::Gather);
+            }
+            slot.loop_state = state;
+        }
+        self.workers.push(slot);
         Ok(self.workers.last_mut().expect("just pushed"))
+    }
+
+    /// Write one worker's session, if a session store is configured.
+    ///
+    /// `Ok(())` for "no store" and for "no such worker": neither is a failure,
+    /// and a caller that treats them as one would report durability problems
+    /// that do not exist.
+    fn write_session(&self, worker: &str) -> Result<(), String> {
+        let Some(store) = &self.session else {
+            return Ok(());
+        };
+        let Some(slot) = self.workers.iter().find(|w| w.id == worker) else {
+            return Ok(());
+        };
+        let scopes: Vec<String> = self
+            .claims
+            .claims()
+            .iter()
+            .filter(|c| c.worker == worker)
+            .map(|c| c.scope.clone())
+            .collect();
+        store
+            .save(
+                worker,
+                &SessionRecord {
+                    loop_state: slot.loop_state.clone(),
+                    scopes,
+                },
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    /// Persist the named workers' sessions (G2).
+    ///
+    /// The *last* failure of the batch is what `session_error` reports, and a
+    /// fully successful batch clears it: the question a caller asks is "can I
+    /// trust what is on disk now", not "has this ever failed once".
+    fn persist(&mut self, workers: &[&str]) {
+        if self.session.is_none() {
+            return;
+        }
+        let mut failure = None;
+        for worker in workers {
+            if let Err(e) = self.write_session(worker) {
+                failure = Some(e);
+            }
+        }
+        self.session_error = failure;
     }
 
     pub fn worker(&mut self, id: &str) -> Option<&mut WorkerSlot> {
@@ -348,7 +507,18 @@ impl OrgHost {
     /// `model_reply` is what the model said on its last turn. It is carried
     /// through rather than interpreted, because interpreting it is judgement and
     /// judgement stays with the model (G2).
+    ///
+    /// The resulting state is persisted (when a session store is configured)
+    /// before the instruction is returned, so a caller that crashes after this
+    /// call resumes from the step it was told about rather than the one before
+    /// it.
     pub fn step(&mut self, worker: &str, model_reply: Option<&str>) -> Option<Instruction> {
+        let instruction = self.step_inner(worker, model_reply);
+        self.persist(std::slice::from_ref(&worker));
+        instruction
+    }
+
+    fn step_inner(&mut self, worker: &str, model_reply: Option<&str>) -> Option<Instruction> {
         // Deliveries first, always. G2's start-of-loop delivery exists so a worker
         // never acts on stale context, and that only works if delivery happens
         // before the step is chosen rather than as a side effect of it.
@@ -514,7 +684,16 @@ impl OrgHost {
     /// board cursor is the organisation's own ordering, so expiry is replayable
     /// and a wall-clock timeout is not.
     pub fn expire_claims(&mut self, cursor: u64) -> Vec<LiveClaim> {
-        self.claims.expire_claims(cursor)
+        let released = self.claims.expire_claims(cursor);
+        if !released.is_empty() {
+            // A worker's session says which scopes it holds, and an expired
+            // claim is no longer one of them: a session written before this
+            // call would re-claim on restore what the ledger just released.
+            let ids: Vec<String> = self.workers.iter().map(|w| w.id.clone()).collect();
+            let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+            self.persist(&borrowed);
+        }
+        released
     }
 
     /// Post to the board on a worker's behalf.
@@ -529,6 +708,7 @@ impl OrgHost {
     /// than only being counted: a nudge nobody receives is a nudge that did not
     /// happen.
     pub fn tick(&mut self, remaining_secs: u64, checkpoints: &[Checkpoint]) -> Vec<String> {
+        let ids: Vec<String> = self.workers.iter().map(|w| w.id.clone()).collect();
         let mut nudged = Vec::new();
         for w in &mut self.workers {
             if let Some(prompt) = w.loop_state.idle_prompt(60, 10) {
@@ -550,6 +730,11 @@ impl OrgHost {
                 nudged.push(w.id.clone());
             }
         }
+        // Nudges are recorded as delivered in the loop state, and a session
+        // written before this tick would hand them out all over again after a
+        // restart — a worker told twice learns to ignore the deadline.
+        let borrowed: Vec<&str> = ids.iter().map(String::as_str).collect();
+        self.persist(&borrowed);
         nudged
     }
 
@@ -584,6 +769,7 @@ impl OrgHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use unfer_protocol::evidence::{GateRun, Verdict};
 
     fn host(n: usize) -> OrgHost {
@@ -1054,5 +1240,272 @@ mod tests {
     fn an_unknown_worker_cannot_be_stepped() {
         let mut h = host(1);
         assert_eq!(h.step("nobody", None), None);
+    }
+
+    // ---- G2: session restore ---------------------------------------------
+
+    /// A fresh directory for one test's session record.
+    fn session_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kc-org-{}-{}-{:?}",
+            std::process::id(),
+            name,
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Write a session for a worker that was never spawned here — the state a
+    /// *previous* process would have left behind.
+    fn saved_session(dir: &Path, worker: &str, state: LoopState, scopes: &[&str]) {
+        SessionStore::new(dir.join("sessions.json"))
+            .save(
+                worker,
+                &SessionRecord {
+                    loop_state: state,
+                    scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                },
+            )
+            .expect("save");
+    }
+
+    #[test]
+    fn a_restarted_worker_resumes_with_its_loop_position_and_scopes() {
+        let dir = session_dir("resume");
+        {
+            let mut h = OrgHost::new().with_session_dir(&dir);
+            h.spawn("w0", "reader").unwrap();
+            h.post("w0", BoardKind::Fact, "the seed entry", None);
+            assert!(matches!(
+                h.step("w0", None),
+                Some(Instruction::Gather { cursor: 1 })
+            ));
+            assert!(matches!(
+                h.step("w0", Some("src/board.rs")),
+                Some(Instruction::Claim { .. })
+            ));
+            assert!(matches!(h.step("w0", None), Some(Instruction::Act { .. })));
+            // The Act instruction advances in the same call, exactly as
+            // `drive_to_verify` below relies on.
+            assert_eq!(h.worker_ref("w0").unwrap().step(), Step::Verify);
+            assert_eq!(h.worker_ref("w0").unwrap().loop_state.gathered_through(), 1);
+        }
+
+        // A new host: fresh board, fresh ledger, same record file.
+        let mut h = OrgHost::new().with_session_dir(&dir);
+        h.spawn("w0", "reader").expect("restored");
+        assert_eq!(
+            h.worker_ref("w0").unwrap().step(),
+            Step::Verify,
+            "the loop resumes where it stopped, not at zero"
+        );
+        assert_eq!(h.worker_ref("w0").unwrap().loop_state.gathered_through(), 1);
+        assert_eq!(h.report().live_claims, 1, "the scope is held again");
+        // The claim is rebuilt *through the board*, so a third worker reading
+        // the history still sees who holds it — a ledger entry with no board
+        // entry behind it would hide the claim it is supposed to record.
+        let claim_cursor = h
+            .board()
+            .all()
+            .into_iter()
+            .find(|e| e.kind == BoardKind::Claim)
+            .expect("the CLAIM entry is back on the fresh board")
+            .cursor;
+
+        // A peer still collides with the restored claim.
+        h.spawn("w1", "reader").unwrap();
+        h.step("w1", None);
+        assert!(matches!(
+            h.step("w1", Some("src/board.rs")),
+            Some(Instruction::ClaimOverlapped { .. })
+        ));
+
+        // And the resumed worker can finish: it is already at Verify, so it
+        // needs only evidence recorded at the rebuilt claim's cursor. A run
+        // from the previous board's ordering would be stale, and stale
+        // evidence is refused.
+        let gate = serde_json::to_string(&run(Verdict::Pass, claim_cursor)).unwrap();
+        assert!(matches!(
+            h.step("w0", Some(&gate)),
+            Some(Instruction::Merge { .. })
+        ));
+        assert_eq!(h.report().merges, 1);
+        assert!(h.session_error().is_none(), "every write succeeded");
+    }
+
+    #[test]
+    fn a_corrupt_session_record_refuses_the_spawn() {
+        // Refused rather than started fresh: a worker that forgets which scopes
+        // it held re-derives them while a peer still believes those claims
+        // settled, and nothing downstream can see that it happened.
+        let dir = session_dir("corrupt");
+        std::fs::write(dir.join("sessions.json"), b"{ not json").unwrap();
+        let mut h = OrgHost::new().with_session_dir(&dir);
+        let err = h.spawn("w0", "reader").expect_err("must not guess");
+        assert!(matches!(err, SpawnRefusal::CorruptSession { .. }));
+        assert_eq!(err.code(), "UK-1006", "the session-log code");
+        assert_eq!(h.len(), 0, "and no half-restored worker exists");
+        assert_eq!(h.report().spawn_refusals, 1);
+    }
+
+    #[test]
+    fn a_session_that_presumes_a_claim_it_cannot_replay_starts_over_at_gather() {
+        // The record says "I am at Verify", but carries no scope: the loop
+        // step asserts a hold the ledger cannot back, and the ledger is the
+        // authority.
+        let dir = session_dir("orphan");
+        let mut state = LoopState::new();
+        state.mark_gathered(5);
+        state.advance(Step::Verify);
+        saved_session(&dir, "w0", state, &[]);
+
+        let mut h = OrgHost::new().with_session_dir(&dir);
+        h.spawn("w0", "reader").unwrap();
+        assert_eq!(
+            h.worker_ref("w0").unwrap().step(),
+            Step::Gather,
+            "re-gather rather than act on a claim nobody records"
+        );
+        assert_eq!(h.report().live_claims, 0);
+        // Only the presumption is dropped: what the worker actually read is
+        // still known, so it does not re-read from zero.
+        assert_eq!(h.worker_ref("w0").unwrap().loop_state.gathered_through(), 5);
+    }
+
+    #[test]
+    fn a_restored_claim_that_a_peer_took_first_yields_instead_of_double_holding() {
+        let dir = session_dir("stolen");
+        let mut state = LoopState::new();
+        state.advance(Step::Act);
+        saved_session(&dir, "w0", state, &["shared/scope.rs"]);
+
+        let mut h = OrgHost::new().with_session_dir(&dir);
+        // The peer is spawned first and takes the scope in this new life.
+        h.spawn("w1", "reader").unwrap();
+        h.step("w1", None);
+        assert!(matches!(
+            h.step("w1", Some("shared/scope.rs")),
+            Some(Instruction::Claim { .. })
+        ));
+
+        h.spawn("w0", "reader").unwrap();
+        assert_eq!(
+            h.report().live_claims,
+            1,
+            "exactly one holder — the replay refused, it did not double-book"
+        );
+        assert_eq!(
+            h.worker_ref("w0").unwrap().step(),
+            Step::Gather,
+            "and the worker whose claim could not be re-seated starts over"
+        );
+    }
+
+    #[test]
+    fn nudges_are_not_reissued_after_a_restart() {
+        let dir = session_dir("nudge");
+        let checkpoints = unfer_protocol::nudge::DEFAULT_CHECKPOINTS;
+        {
+            let mut h = OrgHost::new().with_session_dir(&dir);
+            h.spawn("w0", "reader").unwrap();
+            // First tick: the idle prompt, once. Second: the deadline
+            // reminders, which the idle prompt had taken the turn before —
+            // reported once per kind, because "stop claiming" and "merge or
+            // report blocked" are two different things to be told.
+            assert_eq!(h.tick(300, checkpoints), vec!["w0".to_string()]);
+            assert_eq!(
+                h.tick(300, checkpoints),
+                vec!["w0".to_string(), "w0".to_string()]
+            );
+            assert!(h.tick(300, checkpoints).is_empty());
+        }
+        {
+            let mut h = OrgHost::new().with_session_dir(&dir);
+            h.spawn("w0", "reader").unwrap();
+            assert!(
+                h.tick(300, checkpoints).is_empty(),
+                "a worker told twice learns to ignore the deadline"
+            );
+            assert!(h.worker_ref("w0").unwrap().inbox.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_delivery_id_seen_before_a_restart_is_not_handed_over_again() {
+        let dir = session_dir("dedup");
+        {
+            let mut h = OrgHost::new().with_session_dir(&dir);
+            h.spawn("w0", "reader").unwrap();
+            h.step("w0", None); // Gather -> Claim
+            h.deliver("w0", Delivery::urgent("u1", "w1 is editing your file"));
+            assert!(matches!(
+                h.step("w0", None),
+                Some(Instruction::Interrupt { count: 1 })
+            ));
+        }
+        {
+            let mut h = OrgHost::new().with_session_dir(&dir);
+            h.spawn("w0", "reader").unwrap();
+            assert_eq!(h.worker_ref("w0").unwrap().step(), Step::Claim);
+            h.deliver("w0", Delivery::urgent("u1", "w1 is editing your file"));
+            let instruction = h.step("w0", None);
+            assert!(
+                !matches!(instruction, Some(Instruction::Interrupt { .. })),
+                "the id was already handed over before the restart: {instruction:?}"
+            );
+            // ...and the worker goes on with the step it was actually on.
+            assert_eq!(
+                instruction,
+                Some(Instruction::Idle),
+                "at Claim with no scope named"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_write_failure_is_surfaced_not_swallowed() {
+        // The temp file the atomic write must go through is occupied, so every
+        // *write* fails while every *read* still sees a clean first run.
+        let dir = session_dir("unwritable");
+        std::fs::create_dir_all(dir.join("sessions.tmp")).unwrap();
+
+        let mut h = OrgHost::new().with_session_dir(&dir);
+        h.spawn("w0", "reader")
+            .expect("a record that is absent is a first run");
+        h.step("w0", None);
+        let err = h
+            .session_error()
+            .expect("the failure must be visible, not swallowed");
+        assert!(err.contains("sessions.json"), "{err}");
+
+        // The in-memory run is not poisoned: what the caller is acting on now
+        // is still authoritative, and the error says only that the *next*
+        // restart would not have this step.
+        assert!(matches!(
+            h.step("w0", Some("src/board.rs")),
+            Some(Instruction::Claim { .. })
+        ));
+    }
+
+    #[test]
+    fn without_a_session_dir_nothing_touches_the_disk() {
+        // Sessions are opt-in: a host that was never given a directory neither
+        // reads nor writes one — not even a corrupt record that is sitting
+        // right there.
+        let dir = session_dir("opt-in");
+        std::fs::write(dir.join("sessions.json"), b"{ not json").unwrap();
+
+        let mut h = OrgHost::new();
+        h.spawn("w0", "reader")
+            .expect("no session dir means the record is never consulted");
+        h.step("w0", None);
+        assert!(h.session_error().is_none());
+        assert_eq!(
+            std::fs::read(dir.join("sessions.json")).unwrap(),
+            b"{ not json",
+            "untouched"
+        );
     }
 }
