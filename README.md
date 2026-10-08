@@ -73,7 +73,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 929 cargo (911 workspace incl. Bevy `mathed` + doc-tests under `nix develop` + 18 `mathed_skia` under `nix-shell -p freetype fontconfig`) | last_verified: 2026-10-08 -->
+<!-- status: verified | tests: 934 cargo (916 workspace incl. Bevy `mathed` + doc-tests under `nix develop` + 18 `mathed_skia` under `nix-shell -p freetype fontconfig`) | last_verified: 2026-10-08 -->
 
 Note: the workspace needs the flake devshell —
 `nix develop -c cargo test --workspace --exclude mathed_skia`. A bare
@@ -87,18 +87,18 @@ run, not carried forward.
 ## Verification
 
 ```sh
-nix develop -c cargo test --workspace --exclude mathed_skia        # 911 passed
+nix develop -c cargo test --workspace --exclude mathed_skia        # 916 passed
 nix-shell -p freetype fontconfig --run 'cargo test -p mathed_skia' # 18 passed
 ```
 
-Measured 2026-10-08: mathed_core 278 / mathed_mini 250 / kernel_client 303 /
+Measured 2026-10-08: mathed_core 278 / mathed_mini 250 / kernel_client 308 /
 mathed 47 / mathed_biblio 13 / delta_algebra 13 / delta_sirk 2 /
-velyst_demo 5 — 911, plus 18 in mathed_skia, **929** in total, and the
+velyst_demo 5 — 916, plus 18 in mathed_skia, **934** in total, and the
 per-crate figures add up to the header. The 797 of 2026-10-05 sat above a
 breakdown that summed to 711 (269/246/168/13/2/13); neither number was re-read
 against the other, so this entry restates both from a single log.
-`mathed_mini` 249 = 236 lib + 13 across `caret_geometry` (4) and
-`formal_layout` (9); `kernel_client` 303 = 155 lib + 146 in its `unfer_agent`
+`mathed_mini` 250 = 237 lib + 13 across `caret_geometry` (4) and
+`formal_layout` (9); `kernel_client` 308 = 160 lib + 146 in its `unfer_agent`
 bin + 2 in `snapshot_replay`. Eleven commits landed between the 2026-10-05
 measurement and this one (the D5/D.6/D.4 decide work, G1 DurableStore, G2 org
 sessions, G3 escalate, G5 CRDT collisions, C1 `events_stream`, C2 bounded
@@ -107,7 +107,7 @@ is `kernel_client`'s agent surface: 168 → 303. The `delta_*` figures are the
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
 
-**The Bevy `mathed` crate is now in the 911** (47 tests). It needs
+**The Bevy `mathed` crate is now in the 916** (47 tests). It needs
 `pkg-config` plus the X/wayland client libraries, and the flake devshell
 supplies both — plus a generated `libudev.pc`, because modern nixpkgs no
 longer ships one while `libudev-sys` insists on finding it — so

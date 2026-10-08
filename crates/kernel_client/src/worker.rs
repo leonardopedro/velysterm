@@ -575,7 +575,7 @@ impl KernelWorker {
         let output = child.wait_with_output();
         match output {
             Ok(out) if timed_out => {
-                let captured = truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes);
+                let captured = capture_tail(&out.stdout, cap_bytes);
                 self.audit_exec(Some(grant.to_string()), &command, "timed-out");
                 let _ = self.tx.send(BlockResponse::Error(
                     block_id,
@@ -594,13 +594,13 @@ impl KernelWorker {
                 ));
             }
             Ok(out) if out.status.success() => {
-                let stdout = truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes);
+                let stdout = capture(&out.stdout, cap_bytes);
                 self.audit_exec(Some(grant.to_string()), &command, "ok");
                 let _ = self.tx.send(BlockResponse::Exec(block_id, stdout));
             }
             Ok(out) => {
                 let code = out.status.code().unwrap_or(-1);
-                let stderr = truncate(&String::from_utf8_lossy(&out.stderr), cap_bytes);
+                let stderr = capture_tail(&out.stderr, cap_bytes);
                 self.audit_exec(Some(grant.to_string()), &command, "failed");
                 let _ = self.tx.send(BlockResponse::Error(
                     block_id,
@@ -868,10 +868,7 @@ impl KernelWorker {
                                             Code::KERNEL_FAILED,
                                             format!(
                                                 "kernel outputs unparseable ({e}): {}",
-                                                truncate(
-                                                    &String::from_utf8_lossy(&out.stdout),
-                                                    cap_bytes
-                                                )
+                                                capture_tail(&out.stdout, cap_bytes)
                                             ),
                                             Severity::Error,
                                         ),
@@ -891,7 +888,7 @@ impl KernelWorker {
                                     Code::KERNEL_FAILED,
                                     format!(
                                         "kernel output has no `outputs` array: {}",
-                                        truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes)
+                                        capture_tail(&out.stdout, cap_bytes)
                                     ),
                                     Severity::Error,
                                 ),
@@ -910,7 +907,7 @@ impl KernelWorker {
                                 Code::KERNEL_FAILED,
                                 format!(
                                     "kernel stdout is not JSON ({e}): {}",
-                                    truncate(&String::from_utf8_lossy(&out.stdout), cap_bytes)
+                                    capture_tail(&out.stdout, cap_bytes)
                                 ),
                                 Severity::Error,
                             ),
@@ -920,7 +917,7 @@ impl KernelWorker {
             }
             Ok(out) => {
                 let code = out.status.code().unwrap_or(-1);
-                let stderr = truncate(&String::from_utf8_lossy(&out.stderr), cap_bytes);
+                let stderr = capture_tail(&out.stderr, cap_bytes);
                 self.audit_exec(
                     grants.first().cloned(),
                     &format!("kernel:{language}"),
@@ -973,6 +970,26 @@ impl KernelWorker {
     }
 }
 
+/// Make captured output safe to put in a diagnostic or on a terminal.
+///
+/// `String::from_utf8_lossy` only repairs *invalid* bytes; it hands ESC
+/// sequences, NULs and BEL straight through into a `Diagnostic` string that a
+/// TUI then draws, where an embedded `\x1b]0;…` rewrites the window title and
+/// a NUL truncates somebody's `printf`. Every character that is a control
+/// character *other than* the three that mean something in text — `\n`, `\t`,
+/// `\r` — becomes U+FFFD. The idea is adapted from `loop`'s
+/// `sanitize_binary_output`; the implementation is ours.
+fn sanitize(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|c| match c {
+            '\n' | '\t' | '\r' => c,
+            _ if c.is_control() => '\u{FFFD}',
+            _ => c,
+        })
+        .collect()
+}
+
 /// Truncate `s` to at most `cap` bytes at a char boundary, appending a
 /// marker when anything was cut.
 fn truncate(s: &str, cap: usize) -> String {
@@ -986,6 +1003,43 @@ fn truncate(s: &str, cap: usize) -> String {
     let mut t = s[..end].to_string();
     t.push_str("…(truncated)");
     t
+}
+
+/// The mirror image: keep the **tail** of `s` inside `cap` bytes.
+///
+/// For a *diagnostic* the decisive line is the last one — the compiler error,
+/// the failing assertion, the `Permission denied` — and a head-keeping cut
+/// throws precisely that away while preserving the banner above it. The
+/// marker goes in front, so a reader can tell the head is gone rather than
+/// mistaking a surviving tail for the whole message. UTF-8 safety is the same
+/// char-boundary walk as [`truncate`].
+///
+/// The tail rule is adapted from `loop`'s `truncate_tail`, which uses the
+/// tail for *all* shell output; we keep the head for output that is *read*
+/// top-down (a successful command's stdout) and the tail for output that is
+/// *diagnosed* bottom-up.
+fn truncate_tail(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut start = s.len() - cap;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    let mut t = String::with_capacity(s.len() - start + 14);
+    t.push_str("…(truncated)\n");
+    t.push_str(&s[start..]);
+    t
+}
+
+/// Sanitize then keep the head — the read-top-down case.
+fn capture(bytes: &[u8], cap: usize) -> String {
+    truncate(&sanitize(bytes), cap)
+}
+
+/// Sanitize then keep the tail — the diagnosed-bottom-up case.
+fn capture_tail(bytes: &[u8], cap: usize) -> String {
+    truncate_tail(&sanitize(bytes), cap)
 }
 
 impl KernelWorker {
@@ -1613,9 +1667,10 @@ mod tests {
     #[test]
     fn exec_output_cap_truncates_stdout() {
         let h = Harness::with_grants(&["readonly"]);
-        // `head -c 500 /dev/zero` emits 500 bytes of NULs — more than
-        // the 100-byte cap (NULs become U+FFFD under from_utf8_lossy,
-        // which is fine: the cap counts bytes before conversion).
+        // `head -c 500 /dev/zero` emits 500 bytes of NULs — far past the
+        // 100-byte cap. `capture` sanitizes first (a NUL is a control
+        // character, so it becomes U+FFFD) and applies the cap to *that*, so
+        // the cap bounds the text the caller actually receives.
         let resp = h.send(KernelRequest::Exec {
             block_id: 7,
             command: "head".to_string(),
@@ -1632,6 +1687,88 @@ mod tests {
             }
             other => panic!("expected Exec, got {other:?}"),
         }
+    }
+
+    /// Control characters are the one thing that must never survive into a
+    /// `Diagnostic`: they are invisible in source, but live in a terminal.
+    #[test]
+    fn sanitize_keeps_text_controls_but_strips_the_rest() {
+        let raw = b"ok\nline\ttab\r\x1b]0;pwned\x07\x00tail";
+        let s = sanitize(raw);
+        assert!(
+            s.contains("ok\nline\ttab\r"),
+            "the three controls that mean something in text must survive: {s:?}"
+        );
+        assert!(s.contains("tail"), "ordinary text is untouched: {s:?}");
+        assert!(!s.contains('\x1b'), "an escape must not reach a TUI: {s:?}");
+        assert!(!s.contains('\x07'), "BEL: {s:?}");
+        assert!(!s.contains('\0'), "NUL: {s:?}");
+        assert!(
+            s.contains('\u{FFFD}'),
+            "replaced rather than dropped, so the reader sees that something was there: {s:?}"
+        );
+    }
+
+    /// The reason `capture_tail` exists: a head-keeping cut of a long stderr
+    /// throws away the line that says what failed and keeps the banner.
+    #[test]
+    fn truncating_a_diagnostic_keeps_the_error_at_the_end() {
+        let stderr = format!("{}FATAL: the actual error\n", "banner ".repeat(60));
+        let out = capture_tail(stderr.as_bytes(), 64);
+        assert!(
+            out.starts_with("…(truncated)"),
+            "the reader must be told the head is gone: {out:?}"
+        );
+        assert!(
+            out.contains("FATAL: the actual error"),
+            "the tail is the whole point: {out:?}"
+        );
+        assert!(out.len() < 100, "cap not enforced: {} bytes", out.len());
+    }
+
+    /// ...and the mirror case: output that is read top-down keeps its head.
+    #[test]
+    fn truncating_read_output_keeps_the_head() {
+        let stdout = format!("first line\n{}", "y".repeat(400));
+        let out = capture(stdout.as_bytes(), 64);
+        assert!(out.starts_with("first line"), "{out:?}");
+        assert!(
+            out.ends_with("…(truncated)"),
+            "the marker still marks the cut: {out:?}"
+        );
+        assert!(out.len() < 100, "cap not enforced: {} bytes", out.len());
+    }
+
+    /// A cap that lands inside a multi-byte character must walk back to a char
+    /// boundary rather than panic on the slice — for both directions, at every
+    /// cap.
+    #[test]
+    fn neither_truncation_splits_a_multibyte_character() {
+        let s = "🦀語".repeat(40);
+        for cap in 0..160 {
+            let h = truncate(&s, cap);
+            let t = truncate_tail(&s, cap);
+            assert!(
+                h.ends_with("…(truncated)") || h.len() <= cap,
+                "cap {cap}: {h:?}"
+            );
+            assert!(
+                t.starts_with("…(truncated)\n") || t.len() <= cap,
+                "cap {cap}: {t:?}"
+            );
+        }
+    }
+
+    /// An untruncated input must come back byte-identical — the marker is a
+    /// claim that something was cut, and a false claim would be worse than the
+    /// cut itself.
+    #[test]
+    fn a_short_input_is_never_marked_as_truncated() {
+        let s = "within the cap";
+        assert_eq!(truncate(s, 64), s);
+        assert_eq!(truncate_tail(s, 64), s);
+        assert_eq!(capture(s.as_bytes(), 64), s);
+        assert_eq!(capture_tail(s.as_bytes(), 64), s);
     }
 
     #[test]
