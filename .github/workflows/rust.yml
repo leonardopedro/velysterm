@@ -34,8 +34,8 @@ jobs:
       - name: Checkout dynamic-arctic as sibling (unfer_consensus dep)
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       # Single stable toolchain across the project: rust-toolchain.toml pins
-      # 1.97.1 as the active toolchain here, so the rustfmt component added
-      # below (and the rustfmt run) resolve to 1.97.1 — same rustfmt as the
+      # 1.99.0 as the active toolchain here, so the rustfmt component added
+      # below (and the rustfmt run) resolve to 1.99.0 — same rustfmt as the
       # unfer/dynamic-arctic/australVM format gates. No rustfmt.toml in the
       # repo, so the default style (max_width 100) applies project-wide.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable

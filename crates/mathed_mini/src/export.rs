@@ -616,6 +616,7 @@ pub fn apply_mathed_rules(body: &str, op: &str) -> Option<String> {
 /// binary matches over (the `tools/mathed_rules` contract). Other
 /// ops ignore the slice. Returns `None` when the binary is absent,
 /// fails, or times out — the caller keeps the body (identity path).
+/// The reason is available from [`mathed_rules_engine_detailed`].
 pub fn mathed_rules_engine(body: &str, op: &str, slice: Option<&str>) -> Option<String> {
     let bin = std::env::var("MATHED_RULES_BIN").ok()?;
     mathed_rules_engine_with_bin(&bin, body, op, slice)
@@ -623,22 +624,141 @@ pub fn mathed_rules_engine(body: &str, op: &str, slice: Option<&str>) -> Option<
 
 /// The env-free core of [`apply_mathed_rules`] — testable without
 /// touching process env. Bounded at 5 s so a hung rules binary can
-/// never block an export indefinitely.
+/// never block an export indefinitely. See
+/// [`mathed_rules_engine_detailed`] for the named reasons behind the
+/// `None`.
 pub fn apply_mathed_rules_with_bin(bin: &str, body: &str, op: &str) -> Option<String> {
     mathed_rules_engine_with_bin(bin, body, op, None)
 }
 
-/// The env-free core of [`mathed_rules_engine`]. For selection ops
-/// the pre-sliced rows win over the raw body.
+/// Why the rules seam refused to answer (PLAN_REVIEW D.8).
+///
+/// Production callers only ever see the `None` degraded from this —
+/// the identity path is the contract. The flaky pair named in D.8
+/// asserted only that final `Option`, so a failure read `left: None`
+/// and could not say *which* of the five reasons fired; tests call
+/// [`mathed_rules_engine_detailed`] and assert on the `Err`, so a
+/// future flake names itself instead of hiding behind the degrade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RulesFailure {
+    /// `Command::spawn` failed: the binary could not be started at
+    /// all — missing file or EACCES (a wrong path), but also process
+    /// or file-descriptor pressure on a loaded machine.
+    Spawn(String),
+    /// `try_wait` errored: the child's state is unknown, so there is
+    /// nothing to wait for.
+    Wait(String),
+    /// The deadline passed before the child exited (5 s in
+    /// [`mathed_rules_engine_detailed`]; tests may pass a shorter
+    /// budget to reach this arm cheaply).
+    Deadline,
+    /// The child exited non-zero. A failed stdin write is carried
+    /// alongside the exit code, so "exited non-zero because it read
+    /// a truncated request" does not read as a rules refusal.
+    Exit {
+        code: Option<i32>,
+        stdin: Option<String>,
+    },
+    /// The child answered, but stdout was not the `{markup: …}`
+    /// contract: unparseable JSON, a missing `markup` field, or a
+    /// non-string value.
+    Output(String),
+}
+
+impl std::fmt::Display for RulesFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RulesFailure::Spawn(e) => write!(f, "spawn failed: {e}"),
+            RulesFailure::Wait(e) => write!(f, "try_wait failed: {e}"),
+            RulesFailure::Deadline => write!(f, "deadline exceeded before the child exited"),
+            RulesFailure::Exit { code, stdin } => {
+                write!(f, "child exited non-zero (code {code:?})")?;
+                match stdin {
+                    Some(e) => write!(f, "; the stdin write also failed: {e}"),
+                    None => Ok(()),
+                }
+            }
+            RulesFailure::Output(m) => {
+                write!(f, "stdout is not the {{markup: …}} contract: {m}")
+            }
+        }
+    }
+}
+
+/// The `Result`-returning core: every failure names itself (see
+/// [`RulesFailure`]). Bounded at 5 s so a hung rules binary can
+/// never block an export indefinitely.
+pub fn mathed_rules_engine_detailed(
+    bin: &str,
+    body: &str,
+    op: &str,
+    slice: Option<&str>,
+) -> Result<String, RulesFailure> {
+    rules_engine_within(bin, body, op, slice, std::time::Duration::from_secs(5))
+}
+
+/// The env-free core of [`mathed_rules_engine`], with the failure
+/// reason attached. For selection ops the pre-sliced rows win over
+/// the raw body.
 pub fn mathed_rules_engine_with_bin(
     bin: &str,
     body: &str,
     op: &str,
     slice: Option<&str>,
 ) -> Option<String> {
+    mathed_rules_engine_detailed(bin, body, op, slice).ok()
+}
+
+/// Best-effort scan of `/proc/*/fd` for processes holding `path`
+/// open — only invoked when a spawn has already failed with ETXTBSY,
+/// so the expensive walk never runs on the happy path. Reports the
+/// pid, comm, and which fd points at the file; reports honestly when
+/// no holder is visible (the write-open may already have closed).
+fn etxtbsy_holders(path: &str) -> String {
+    let mut holders: Vec<String> = Vec::new();
+    if let Ok(proc_dir) = std::fs::read_dir("/proc") {
+        'outer: for entry in proc_dir.flatten() {
+            let pid = entry.file_name().to_string_lossy().to_string();
+            if !pid.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) {
+                for fd in fds.flatten() {
+                    if let Ok(target) = std::fs::read_link(fd.path())
+                        && target.as_os_str() == std::ffi::OsStr::new(path)
+                    {
+                        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        let fd_no = fd.file_name().to_string_lossy().to_string();
+                        holders.push(format!("pid {pid} ({comm}) fd {fd_no}"));
+                        continue 'outer;
+                    }
+                }
+            }
+        }
+    }
+    if holders.is_empty() {
+        "no /proc fd open on it at scan time (holder already closed, or not fd-based)".to_string()
+    } else {
+        holders.join(", ")
+    }
+}
+
+/// The deadline-parameterized body of [`mathed_rules_engine_detailed`]
+/// (private so only tests can shorten the budget; production always
+/// pays the full 5 s bound above).
+fn rules_engine_within(
+    bin: &str,
+    body: &str,
+    op: &str,
+    slice: Option<&str>,
+    budget: std::time::Duration,
+) -> Result<String, RulesFailure> {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     let payload = if op.starts_with("select") {
         slice.unwrap_or(body)
@@ -646,66 +766,118 @@ pub fn mathed_rules_engine_with_bin(
         body
     };
     let input = serde_json::json!({ "op": op, "body": payload }).to_string();
-    let mut child = Command::new(bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let stdin = child.stdin.take()?;
+    // ETXTBSY (os error 26) is transient *by definition*: execve was
+    // refused because *somebody* still holds the file open for
+    // writing, and every write-open closes (the D.8 flake: strace
+    // showed the creator's close completing ~800 µs before the
+    // failing execve, and a /proc fd scan right after the failure
+    // found no holder — so the writer is real but shorter-lived than
+    // either observation method). Retry with backoff instead of
+    // failing the export; each attempt re-scans /proc so a final
+    // failure still names the holder if one is visible.
+    const ETXTBSY: i32 = 26;
+    const ETXTBSY_RETRIES: u32 = 5;
+    let mut attempt = 0u32;
+    let mut last_holder_note = String::new();
+    let mut child = loop {
+        match Command::new(bin)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => break c,
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                let holders = etxtbsy_holders(bin);
+                if !holders.starts_with("no /proc fd") {
+                    last_holder_note = holders.clone();
+                }
+                attempt += 1;
+                if attempt > ETXTBSY_RETRIES {
+                    let mut msg = format!("{e} after {ETXTBSY_RETRIES} retries");
+                    if !last_holder_note.is_empty() {
+                        msg.push_str(&format!("; holders: {last_holder_note}"));
+                    } else {
+                        msg.push_str(&format!("; holders: {holders}"));
+                    }
+                    return Err(RulesFailure::Spawn(msg));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5 * attempt as u64));
+            }
+            Err(e) => return Err(RulesFailure::Spawn(e.to_string())),
+        }
+    };
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| RulesFailure::Spawn("piped stdin missing on the spawned child".into()))?;
     // Write stdin on a thread so a full pipe cannot deadlock.
     let writer = std::thread::spawn(move || {
         let mut stdin = stdin;
-        let _ = stdin.write_all(input.as_bytes());
+        stdin.write_all(input.as_bytes())
     });
     // Drain stdout on a thread; wait for exit with a deadline.
-    let stdout = child.stdout.take()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RulesFailure::Spawn("piped stdout missing on the spawned child".into()))?;
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut stdout = stdout;
         let _ = stdout.read_to_end(&mut buf);
         buf
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + budget;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
+            Ok(Some(s)) => break Ok(s),
             Ok(None) => {}
             // The child's state is unknown, so there is nothing to wait for.
             // Break rather than bail with `?`, which used to skip the joins
             // below and leak both threads.
-            Err(_) => {
+            Err(e) => {
                 let _ = child.kill();
-                break None;
+                break Err(RulesFailure::Wait(e.to_string()));
             }
         }
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            break None;
+            break Err(RulesFailure::Deadline);
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(10));
     };
     // Join on *every* path, including the timeout. The reader is blocked in
     // `read_to_end` on the child's stdout; returning without joining detaches it,
     // and a test suite that hits the deadline repeatedly accumulates two leaked
     // threads per timeout -- which is a plausible way for one slow call to make
     // later unrelated spawns fail.
-    let _ = writer.join();
+    let stdin_write = writer
+        .join()
+        .map_err(|_| "writer thread panicked".to_string())
+        .and_then(|r| r.map_err(|e| e.to_string()));
     let out_buf = reader.join().unwrap_or_default();
     // Safe as `?` precisely *because* the joins above already ran.
     let status = status?;
     if !status.success() {
-        return None;
+        return Err(RulesFailure::Exit {
+            code: status.code(),
+            stdin: stdin_write.as_ref().err().cloned(),
+        });
     }
-    if !status.success() {
-        return None;
-    }
-    serde_json::from_slice::<serde_json::Value>(&out_buf)
-        .ok()?
-        .get("markup")?
+    let out = serde_json::from_slice::<serde_json::Value>(&out_buf).map_err(|e| {
+        let mut msg = format!("stdout not parseable JSON: {e}");
+        if let Err(w) = &stdin_write {
+            msg.push_str(&format!(" (the stdin write also failed: {w})"));
+        }
+        RulesFailure::Output(msg)
+    })?;
+    let markup = out
+        .get("markup")
+        .ok_or_else(|| RulesFailure::Output("no `markup` field".into()))?
         .as_str()
-        .map(str::to_string)
+        .ok_or_else(|| RulesFailure::Output("`markup` is not a string".into()))?;
+    Ok(markup.to_string())
 }
 
 pub fn export_typst_template(
@@ -1841,13 +2013,16 @@ mod tests {
     fn rules_binary_json_contract_roundtrips() {
         // The stub answers with the golden rewrite output; the seam
         // must parse the `{markup: …}` JSON and return the string.
+        // D.8: assert through `detailed` so a failure prints the
+        // named reason (`Err(Deadline)` etc.) instead of `left: None`.
         let stub = stub_rules_bin("#!/bin/sh\ncat\n");
         // `cat` echoes the input — make the stub emit the contract
         // output directly instead.
         let stub2 =
             stub_rules_bin("#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"⟨a⟩ b\"}'\n");
-        let got = apply_mathed_rules_with_bin(stub2.to_str().unwrap(), "a†, a, b", "rewrite");
-        assert_eq!(got.as_deref(), Some("⟨a⟩ b"));
+        let got =
+            mathed_rules_engine_detailed(stub2.to_str().unwrap(), "a†, a, b", "rewrite", None);
+        assert_eq!(got, Ok("⟨a⟩ b".to_string()));
         let _ = std::fs::remove_file(&stub);
         let _ = std::fs::remove_file(&stub2);
     }
@@ -1855,32 +2030,36 @@ mod tests {
     #[test]
     fn rules_engine_new_ops_roundtrip() {
         // T8: the generalized seam passes the new op names through;
-        // a stub answers for rewrite/assoc.
+        // a stub answers for rewrite/assoc. D.8: `detailed` so the
+        // assertion names the reason on failure.
         let stub = stub_rules_bin(
             "#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"a + ( b + c )\"}'\n",
         );
-        let got = mathed_rules_engine_with_bin(
+        let got = mathed_rules_engine_detailed(
             stub.to_str().unwrap(),
             "a, +, b, +, c",
             "rewrite/assoc",
             None,
         );
-        assert_eq!(got.as_deref(), Some("a + ( b + c )"));
+        assert_eq!(got, Ok("a + ( b + c )".to_string()));
+        let _ = std::fs::remove_file(&stub);
     }
 
     #[test]
     fn rules_engine_select_ops_use_the_slice() {
         // T8: for select ops the pre-sliced rows win over the raw
-        // body — the slice argument is part of the contract.
+        // body — the slice argument is part of the contract. D.8:
+        // `detailed` so a failure names the reason.
         let stub =
             stub_rules_bin("#!/bin/sh\nread -r _input\nprintf '%s' '{\"markup\":\"x;z\"}'\n");
-        let got = mathed_rules_engine_with_bin(
+        let got = mathed_rules_engine_detailed(
             stub.to_str().unwrap(),
             "unused raw body",
             "select/pattern",
             Some("x:compute(x);y:7;z:compute(z)"),
         );
-        assert_eq!(got.as_deref(), Some("x;z"));
+        assert_eq!(got, Ok("x;z".to_string()));
+        let _ = std::fs::remove_file(&stub);
     }
 
     #[test]
@@ -1895,6 +2074,65 @@ mod tests {
         let stub2 = stub_rules_bin("#!/bin/sh\nprintf '%s' 'not json'\n");
         assert!(apply_mathed_rules_with_bin(stub2.to_str().unwrap(), "x", "rewrite").is_none());
         let _ = std::fs::remove_file(&stub2);
+    }
+
+    /// D.8: every arm of `RulesFailure` names itself, so a flake that
+    /// reads `left: None` today would instead print *which* of the
+    /// five reasons fired (spawn / wait / deadline / exit / output).
+    #[test]
+    fn rules_failure_reasons_name_themselves() {
+        // Spawn: the binary cannot start at all.
+        let err = mathed_rules_engine_detailed("/nonexistent/mathed_rules", "x", "rewrite", None)
+            .unwrap_err();
+        assert!(matches!(err, RulesFailure::Spawn(_)), "{err:?}");
+        assert!(err.to_string().starts_with("spawn failed:"), "{err}");
+
+        // Exit: non-zero exit carries the code. The stdin note is
+        // deliberately not asserted: the stub never reads, so a fast
+        // exit can legitimately EPIPE the writer — `stdin: Some(..)`
+        // beside `code: Some(3)` is true information, not a defect.
+        let stub = stub_rules_bin("#!/bin/sh\nexit 3\n");
+        let err =
+            mathed_rules_engine_detailed(stub.to_str().unwrap(), "x", "rewrite", None).unwrap_err();
+        match &err {
+            RulesFailure::Exit { code, .. } => assert_eq!(*code, Some(3), "{err:?}"),
+            other => panic!("expected Exit, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&stub);
+
+        // Output: a successful child that violates the contract.
+        let stub2 = stub_rules_bin("#!/bin/sh\nprintf '%s' 'not json'\n");
+        let err = mathed_rules_engine_detailed(stub2.to_str().unwrap(), "x", "rewrite", None)
+            .unwrap_err();
+        assert!(matches!(err, RulesFailure::Output(_)), "{err:?}");
+        let _ = std::fs::remove_file(&stub2);
+
+        // Output: JSON without the `markup` field.
+        let stub3 = stub_rules_bin("#!/bin/sh\nprintf '%s' '{\"other\":1}'\n");
+        let err = mathed_rules_engine_detailed(stub3.to_str().unwrap(), "x", "rewrite", None)
+            .unwrap_err();
+        assert_eq!(err, RulesFailure::Output("no `markup` field".into()));
+        let _ = std::fs::remove_file(&stub3);
+
+        // Deadline: a child that never finishes, reached through the
+        // private short-budget entry (the production bound stays 5 s).
+        let stub4 = stub_rules_bin("#!/bin/sh\nexec sleep 30\n");
+        let err = rules_engine_within(
+            stub4.to_str().unwrap(),
+            "x",
+            "rewrite",
+            None,
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert_eq!(err, RulesFailure::Deadline);
+        let _ = std::fs::remove_file(&stub4);
+
+        // The public seam still degrades all of it to None.
+        assert!(
+            mathed_rules_engine_with_bin("/nonexistent/mathed_rules", "x", "rewrite", None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2197,7 +2435,9 @@ esac
         let img = crate::render::render_markup(&out, 600.0).expect("template rasterizes");
         let painted = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(painted, "template image painted pixels");
     }
@@ -2234,7 +2474,9 @@ esac
         // an empty canvas.
         let painted = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
             .count();
         assert!(painted > 100, "page painted {painted} px");
@@ -2313,7 +2555,9 @@ esac
         assert!(img.width > 0 && img.height > 0, "page has size");
         let painted = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
             .count();
         assert!(painted > 100, "plain page painted {painted} px");
@@ -2344,7 +2588,9 @@ esac
         for page in &pages {
             let painted = page
                 .data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
                 .count();
             assert!(painted > 100, "each page painted ({painted} px)");
@@ -2590,9 +2836,36 @@ esac
         assert_eq!(blocks.len(), 2, "one block per cell: {rec}");
         let exec_runs = rec.matches("\"op\":\"exec\"").count();
         assert_eq!(exec_runs, 2, "both blocks executed: {rec}");
-        // Stability: the same doc + worker trace records identically.
+        // Stability: the same doc + worker trace records identically —
+        // except `timing_ms`, which is a wall-clock measurement and so is
+        // load-dependent: on 2026-10-08, while parallel builds saturated
+        // the box, run 1 recorded 60/70 ms and run 2 20/30 ms for the
+        // identical trace (the original byte-equality assert failed;
+        // idle, both runs agree). Every other field is content-derived
+        // (hashes, offsets, bodies), so the reproducibility claim is
+        // checked on the record with each `timing_ms` leaf removed.
+        fn strip_timing(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    map.remove("timing_ms");
+                    for val in map.values_mut() {
+                        strip_timing(val);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for val in arr.iter_mut() {
+                        strip_timing(val);
+                    }
+                }
+                _ => {}
+            }
+        }
         let rec2 = run_all_record(doc, &["readonly"]).expect("record 2");
-        assert_eq!(rec, rec2, "record must be reproducible");
+        let mut v1 = serde_json::from_str::<serde_json::Value>(&rec).expect("record 1 JSON");
+        let mut v2 = serde_json::from_str::<serde_json::Value>(&rec2).expect("record 2 JSON");
+        strip_timing(&mut v1);
+        strip_timing(&mut v2);
+        assert_eq!(v1, v2, "record must be reproducible (modulo timing_ms)");
     }
 
     #[test]

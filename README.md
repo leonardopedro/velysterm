@@ -45,7 +45,7 @@ printf '{"id":"1","op":"version","params":{}}\n' | cargo run -p kernel_client --
 ## Toolchain
 
 Single stable Rust toolchain across the project repos (velysterm, unfer,
-dynamic-arctic, australVM): **1.97.1**, pinned via `rust-toolchain.toml`
+dynamic-arctic, australVM): **1.99.0**, pinned via `rust-toolchain.toml`
 — no nightly anywhere. rustup honors the pin for every `cargo`/`rustfmt`
 invocation, so the editor, all builds, and CI run exactly this compiler.
 Formatting is default rustfmt style (no repo `rustfmt.toml`). Bump
@@ -73,45 +73,46 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 934 cargo (916 workspace incl. Bevy `mathed` + doc-tests under `nix develop` + 18 `mathed_skia` under `nix-shell -p freetype fontconfig`) | last_verified: 2026-10-08 -->
+<!-- status: verified | tests: 935 cargo (917 workspace incl. Bevy `mathed` + doc-tests + 18 `mathed_skia`, all under `nix develop`) | last_verified: 2026-10-08 -->
 
 Note: the workspace needs the flake devshell —
-`nix develop -c cargo test --workspace --exclude mathed_skia`. A bare
-`cargo test` fails in `libudev-sys`, which has no pkg-config outside it, so
-the flake is not optional; worth knowing before concluding the tree is
-broken. `mathed_skia` is the one crate the flake does not cover: it links
-`-lfreetype -lfontconfig`, so it is measured separately under
-`nix-shell -p freetype fontconfig`. Every figure above is measured from a
-run, not carried forward.
+`nix develop -c cargo test --workspace` is the one command for all **935**
+(the `libudev-sys` chain has no pkg-config outside it, and `mathed_skia`'s
+freetype/fontconfig/libstdcxx link paths come from the same shell since
+2026-10-08). A bare `cargo test` fails in `libudev-sys`; worth knowing before
+concluding the tree is broken. Every figure above is measured from a run,
+not carried forward.
 
 ## Verification
 
 ```sh
-nix develop -c cargo test --workspace --exclude mathed_skia        # 916 passed
-nix-shell -p freetype fontconfig --run 'cargo test -p mathed_skia' # 18 passed
+nix develop -c cargo test --workspace                              # 935 passed
 ```
 
-Measured 2026-10-08: mathed_core 278 / mathed_mini 250 / kernel_client 308 /
+Measured 2026-10-08: mathed_core 278 / mathed_mini 251 / kernel_client 308 /
 mathed 47 / mathed_biblio 13 / delta_algebra 13 / delta_sirk 2 /
-velyst_demo 5 — 916, plus 18 in mathed_skia, **934** in total, and the
-per-crate figures add up to the header. The 797 of 2026-10-05 sat above a
+velyst_demo 5 — 917, plus 18 in mathed_skia, **935** in total, and the
+per-crate figures add up to the header (24 suites, 0 failed, one command;
+recount-verified against this run's own log). The 797 of 2026-10-05 sat above a
 breakdown that summed to 711 (269/246/168/13/2/13); neither number was re-read
 against the other, so this entry restates both from a single log.
-`mathed_mini` 250 = 237 lib + 13 across `caret_geometry` (4) and
+`mathed_mini` 251 = 238 lib + 13 across `caret_geometry` (4) and
 `formal_layout` (9); `kernel_client` 308 = 160 lib + 146 in its `unfer_agent`
-bin + 2 in `snapshot_replay`. Eleven commits landed between the 2026-10-05
-measurement and this one (the D5/D.6/D.4 decide work, G1 DurableStore, G2 org
+bin + 2 in `snapshot_replay`. The +1 over 2026-10-08's earlier 934 is D.8's
+new `rules_failure_reasons_name_themselves` (the rules-seam failure-reason
+test). Eleven commits landed between the 2026-10-05
+measurement and the 916 baseline (the D5/D.6/D.4 decide work, G1 DurableStore, G2 org
 sessions, G3 escalate, G5 CRDT collisions, C1 `events_stream`, C2 bounded
 memory, plus a clippy fix and the X9 ledger row) and nearly all of the growth
 is `kernel_client`'s agent surface: 168 → 303. The `delta_*` figures are the
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
 
-**The Bevy `mathed` crate is now in the 916** (47 tests). It needs
+**The Bevy `mathed` crate is in the 917** (47 tests). It needs
 `pkg-config` plus the X/wayland client libraries, and the flake devshell
 supplies both — plus a generated `libudev.pc`, because modern nixpkgs no
 longer ships one while `libudev-sys` insists on finding it — so
-`nix develop -c cargo test --workspace --exclude mathed_skia` builds it cold.
+`nix develop -c cargo test --workspace` builds it cold.
 It was excluded from every earlier figure for the reason in the caveat below,
 and that reason still holds outside the shell: quoting a number that silently
 included a crate nobody ran is how this line read 658 when the real figure was

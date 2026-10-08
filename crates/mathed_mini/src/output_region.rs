@@ -461,7 +461,9 @@ mod tests {
         assert!(img.width > 0 && img.height > 0, "region has size");
         let painted = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(painted, "figure painted the png");
     }
@@ -490,7 +492,9 @@ mod tests {
         assert!(img.width > 0 && img.height > 0, "region has size");
         let painted = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0)
             .count();
         // The 16×16 figure scales up to the region width; the red

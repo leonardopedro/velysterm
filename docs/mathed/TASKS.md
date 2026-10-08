@@ -11,7 +11,7 @@ for a strong model. **Easy tasks (E-series)** below are self-contained
 specs: each can be implemented with only this file plus the named target
 file, and unit-tested without Bevy unless stated. Follow the existing
 code style (see `crates/mathed_core/src/*.rs`): default rustfmt style
-applies (no repo rustfmt.toml; single 1.97.1 toolchain, see
+applies (no repo rustfmt.toml; single 1.99.0 toolchain, see
 `rust-toolchain.toml`), comments only where the code can't say it.
 
 Read `docs/mathed/DESIGN.md` first for context.

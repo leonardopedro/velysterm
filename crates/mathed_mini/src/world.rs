@@ -401,7 +401,9 @@ mod tests {
         // The 1×1 png scaled to 40pt wide must paint actual pixels.
         let opaque = img
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[3] > 0 || p[0] > 0 || p[1] > 0 || p[2] > 0);
         assert!(opaque, "data-url image painted pixels");
     }

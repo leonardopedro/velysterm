@@ -50,8 +50,12 @@
 //!
 //! ## Build requirements (Linux)
 //!
-//! skia-safe's prebuilt Skia links `-lfreetype -lfontconfig`, which bare
-//! shells in this workspace do not carry. Build and test under:
+//! skia-safe's prebuilt Skia links `-lfreetype -lfontconfig` (and the C++
+//! runtime). **The flake devshell covers all of it since 2026-10-08** —
+//! `nix develop -c cargo test -p mathed_skia` just works, because the shell
+//! adds `freetype`/`fontconfig` to its packages and exports
+//! `RUSTFLAGS` with `-L` + `-Wl,-rpath` for both libdirs plus the shell's own
+//! `libstdc++`. In a bare shell (no flake), fall back to:
 //!
 //! ```sh
 //! nix-shell -p freetype fontconfig pkg-config --run '
@@ -491,7 +495,9 @@ impl SkiaSink {
             }
             // peniko: premultiplied RGB contributes to the mask value.
             let alpha: Vec<u8> = rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| {
                     let l = 0.2126 * f32::from(p[0])
                         + 0.7152 * f32::from(p[1])

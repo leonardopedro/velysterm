@@ -370,7 +370,14 @@ pub fn to_render_text_range(
     // caret/selection is elsewhere, shown as literal source text
     // the moment it touches the span — so the raw formula is
     // always directly editable, not just the typeset result.
-    let math_spans: Vec<Range<usize>> = toggles.chunks_exact(2).map(|c| c[0]..c[1]).collect();
+    // as_chunks (not chunks_exact): clippy's chunks_exact_to_as_chunks fires
+    // on the constant size; semantics are identical (exact pairs only).
+    let math_spans: Vec<Range<usize>> = toggles
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| c[0]..c[1])
+        .collect();
 
     // 3. Visual segment boundaries (clamped to `range`).
     let mut bounds: Vec<usize> = vec![range.start, range.end];

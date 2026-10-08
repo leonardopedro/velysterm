@@ -2,8 +2,9 @@
 #
 # The CI jobs use dtolnay/rust-toolchain@stable; rustup honors this file for
 # every cargo/rustfmt invocation, so the editor and all builds run exactly
-# this compiler. The `format` job runs the same 1.97.1 rustfmt — the whole
+# this compiler. The `format` job runs the same 1.99.0 rustfmt — the whole
 # project is on this single stable toolchain, no nightly anywhere. Bump
 # deliberately.
 [toolchain]
-channel = "1.97.1"
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

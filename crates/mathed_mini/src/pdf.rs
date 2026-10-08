@@ -18,7 +18,7 @@ use imaging::RgbaImage;
 fn rgb_flate(img: &RgbaImage) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let mut rgb = Vec::with_capacity((img.width * img.height * 3) as usize);
-    for px in img.data.chunks_exact(4) {
+    for px in img.data.as_chunks::<4>().0.iter() {
         let (r, g, b, a) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
         // out = src*a + white*(255-a), /255.
         rgb.push(((r * a + 255 * (255 - a)) / 255) as u8);

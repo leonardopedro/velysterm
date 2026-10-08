@@ -1,9 +1,10 @@
 //! Integration tests: the Skia sink rendered through the public `imaging`
 //! `Painter` API and read back pixel-by-pixel.
 //!
-//! skia-safe's prebuilt Skia links freetype/fontconfig, which bare shells in
-//! this workspace do not carry; run under the `nix-shell` documented in the
-//! crate docs (`cargo test -p mathed_skia` inside it).
+//! skia-safe's prebuilt Skia links freetype/fontconfig/libstdc++; the flake
+//! devshell provides the link paths (`nix develop -c cargo test -p
+//! mathed_skia`), and the crate docs ("Build requirements") carry the bare
+//! shell fallback.
 
 use imaging::kurbo::{Affine, BezPath, Rect, Stroke};
 use imaging::peniko::{

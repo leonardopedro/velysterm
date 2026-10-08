@@ -4,7 +4,10 @@
 # kernel_client, mathed_biblio, mathed_core, mathed_mini, typst_element,
 # typst_imaging) and the bevy GUI crate (mathed). The bevy crate pulls in
 # wayland/xkbcommon/X11 via winit, which requires system dev libraries plus
-# pkg-config to locate them (wayland-sys fails without them, e.g. on NixOS).
+# pkg-config to locate them (e.g. on NixOS), and the Skia imaging backend
+# (mathed_skia) links freetype + fontconfig — all covered here, so the whole
+# workspace including mathed_skia is ONE command: `nix develop -c cargo test
+# --workspace`.
 #
 # Use with:  nix develop
 # or:        nix-shell
@@ -12,7 +15,7 @@
 # velysterm is CPU-only.
 
 {
-  description = "velysterm workspace dev shell (bevy + wayland/xkb/X11 dev libs)";
+  description = "velysterm workspace dev shell (bevy + wayland/xkb/X11 + freetype/fontconfig)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -54,10 +57,26 @@
           mesa
           vulkan-validation-layers
           vulkan-tools
+          # mathed_skia: skia-safe's prebuilt Skia links -lfreetype
+          # -lfontconfig and (C++) libstdc++; with these in the shell the
+          # RUSTFLAGS hint below makes `cargo test -p mathed_skia` work from
+          # the flake alone (was: a second `nix-shell -p freetype fontconfig`
+          # just for it, which never covered libstdc++ either — its dir is
+          # resolved from the shell's own `cc` below, so no pinned attr name
+          # can rot).
+          freetype
+          fontconfig
           rustup
         ];
 
-        RUSTUP_TOOLCHAIN = "stable";
+        # NO RUSTUP_TOOLCHAIN here on purpose. It used to be set to "stable",
+        # which *overrides* rust-toolchain.toml (env var beats the toolchain
+        # file), so `nix develop` silently ran stable (1.98.x) while CI and
+        # bare-shell builds ran the pinned 1.99.0 — two compilers, two clippy
+        # lint sets: clippy under the shell failed on a lint CI never sees
+        # (chunks_exact_to_as_chunks in mathed_core/transform.rs). The
+        # toolchain file is the single source of truth ("Bump deliberately");
+        # rustup resolves it from the cwd like CI does.
 
         # Keep the pkg-config-generated LD_LIBRARY_PATH hints for the
         # vendored static libs winit/bevy link at runtime.
@@ -90,9 +109,23 @@ Cflags: -I${pkgs.udev.dev}/include
 EOF
           export PKG_CONFIG_PATH="$_UNFER_UDEV_PCDIR:$PKG_CONFIG_PATH"
 
+          # mathed_skia links against the system freetype + fontconfig that
+          # skia-safe's prebuilt Skia was built with (see
+          # crates/mathed_skia/src/lib.rs, "Build requirements"). Provide the
+          # two libdirs at link time and as rpath so the test binary also runs
+          # — exported shell-wide so ONE command covers the whole workspace:
+          #   nix develop -c cargo test --workspace
+          # (Appending, so a caller-supplied RUSTFLAGS survives entry.)
+          _FT="$(pkg-config --variable=libdir freetype2)"
+          _FC="$(pkg-config --variable=libdir fontconfig)"
+          # libstdc++.so.6: same directory the linker resolved -lstdc++ from.
+          _STDCXX="$(dirname "$(cc -print-file-name=libstdc++.so.6)")"
+          export RUSTFLAGS="''${RUSTFLAGS:+$RUSTFLAGS }-L$_FT -L$_FC -C link-arg=-Wl,-rpath,$_FT -C link-arg=-Wl,-rpath,$_FC -C link-arg=-Wl,-rpath,$_STDCXX"
+
           echo "[velysterm-shell] wayland/xkb/X11 dev libs + pkg-config on PATH"
           echo "[velysterm-shell] Vulkan ICD: RADV (AMD) + lavapipe via VK_DRIVER_FILES"
           echo "[velysterm-shell] generated libudev.pc -> $PKG_CONFIG_PATH"
+          echo "[velysterm-shell] freetype/fontconfig/libstdcxx rpath -> $_FT, $_FC, $_STDCXX (mathed_skia included)"
         '';
       };
 
