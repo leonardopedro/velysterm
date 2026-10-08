@@ -63,6 +63,12 @@ vello_svg = "0.9.0"
 imaging = { version = "0.0.1", default-features = false }
 svg_imaging = { version = "0.0.1", default-features = false }
 imaging_vello = { version = "0.0.2", default-features = false, features = ["vello-0-9"] }
+# Skia backend for the imaging command stream (B1, `mathed_skia`). On Linux
+# skia-safe's prebuilt Skia links against system freetype + fontconfig, which
+# bare shells here do not carry — build/test this crate under
+# `nix-shell -p freetype fontconfig pkg-config` with RUSTFLAGS `-L`+rpath to
+# those libdirs (see crates/mathed_skia/src/lib.rs, "Build requirements").
+skia-safe = "0.90"
 # Typst dependencies
 typst = "0.15"
 typst-library = "0.15"

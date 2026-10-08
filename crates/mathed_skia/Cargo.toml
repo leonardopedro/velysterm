@@ -1,0 +1,13 @@
+[package]
+name = "mathed_skia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Skia backend for the imaging command stream (B1): renders imaging::PaintSink ops to a skia-safe Surface, raster or caller-supplied GPU."
+
+[dependencies]
+imaging = { workspace = true, features = ["std"] }
+skia-safe = { workspace = true }
+
+[dev-dependencies]
+typst-assets = { workspace = true }

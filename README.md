@@ -73,7 +73,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 850 cargo (6 crates; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-07 -->
+<!-- status: verified | tests: 873 cargo (7 crates: 855 workspace incl. doc-tests + 18 `mathed_skia` under nix-shell; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-08 -->
 
 Note: the workspace needs the flake devshell (`nix develop -c cargo test
 --workspace`). A bare `cargo test` fails in `libudev-sys`, which has no pkg-config
