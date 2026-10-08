@@ -9,7 +9,7 @@
 //! {"id":"1","ok":true,"result":{"version":1},"timing_ms":0}
 //! ```
 //!
-//! Ops: the full 54-op registry lives in
+//! Ops: the full 60-op registry lives in
 //! `unfer_protocol::ops::AGENT_OPS`. Namespaces:
 //! - kernel session: `version`, `create_model`, `set_prior`,
 //!   `evolve`, `condition`, `probability`, `snapshot`,
