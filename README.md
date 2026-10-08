@@ -73,23 +73,28 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 873 cargo (7 crates: 855 workspace incl. doc-tests + 18 `mathed_skia` under nix-shell; Bevy `mathed` excluded, needs pkg-config) | last_verified: 2026-10-08 -->
+<!-- status: verified | tests: 929 cargo (911 workspace incl. Bevy `mathed` + doc-tests under `nix develop` + 18 `mathed_skia` under `nix-shell -p freetype fontconfig`) | last_verified: 2026-10-08 -->
 
-Note: the workspace needs the flake devshell (`nix develop -c cargo test
---workspace`). A bare `cargo test` fails in `libudev-sys`, which has no pkg-config
-outside it — worth knowing before concluding the tree is broken.
+Note: the workspace needs the flake devshell —
+`nix develop -c cargo test --workspace --exclude mathed_skia`. A bare
+`cargo test` fails in `libudev-sys`, which has no pkg-config outside it, so
+the flake is not optional; worth knowing before concluding the tree is
+broken. `mathed_skia` is the one crate the flake does not cover: it links
+`-lfreetype -lfontconfig`, so it is measured separately under
+`nix-shell -p freetype fontconfig`. Every figure above is measured from a
+run, not carried forward.
 
 ## Verification
 
 ```sh
-export PKG_CONFIG_PATH=/tmp/emthin-work/pc:$PKG_CONFIG_PATH   # or your own
-cargo test -p mathed_core -p mathed_mini -p kernel_client \
-         -p delta_algebra -p delta_sirk -p mathed_biblio    # 850 passed
+nix develop -c cargo test --workspace --exclude mathed_skia        # 911 passed
+nix-shell -p freetype fontconfig --run 'cargo test -p mathed_skia' # 18 passed
 ```
 
-Measured 2026-10-07: mathed_core 270 / mathed_mini 249 / kernel_client 303 /
-delta_algebra 13 / delta_sirk 2 / mathed_biblio 13 — 850, and the per-crate
-figures add up to the header this time. The 797 of 2026-10-05 sat above a
+Measured 2026-10-08: mathed_core 278 / mathed_mini 250 / kernel_client 303 /
+mathed 47 / mathed_biblio 13 / delta_algebra 13 / delta_sirk 2 /
+velyst_demo 5 — 911, plus 18 in mathed_skia, **929** in total, and the
+per-crate figures add up to the header. The 797 of 2026-10-05 sat above a
 breakdown that summed to 711 (269/246/168/13/2/13); neither number was re-read
 against the other, so this entry restates both from a single log.
 `mathed_mini` 249 = 236 lib + 13 across `caret_geometry` (4) and
@@ -102,20 +107,26 @@ is `kernel_client`'s agent surface: 168 → 303. The `delta_*` figures are the
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
 
-**The Bevy `mathed` crate is not in the 850.** It needs `pkg-config` plus the
-X/wayland client libraries, so it does not build in a bare shell; CI installs
-them and runs it there. Quoting a number that silently included a crate nobody
-ran is how this line read 658 when the real figure was 609.
+**The Bevy `mathed` crate is now in the 911** (47 tests). It needs
+`pkg-config` plus the X/wayland client libraries, and the flake devshell
+supplies both — plus a generated `libudev.pc`, because modern nixpkgs no
+longer ships one while `libudev-sys` insists on finding it — so
+`nix develop -c cargo test --workspace --exclude mathed_skia` builds it cold.
+It was excluded from every earlier figure for the reason in the caveat below,
+and that reason still holds outside the shell: quoting a number that silently
+included a crate nobody ran is how this line read 658 when the real figure was
+609.
 
 `mathed_core` and `mathed_mini` are the crates `emthin` path-depends on, so a
 change to the document model is verified in both workspaces.
 
 Two caveats, because a green number here can mislead:
 
-- `mathed` (the Bevy bridge) needs system `libudev` and `pkg-config`, which the
-  build environment does not provide by default:
-  `nix-shell -p systemd pkgconf --run "cargo test -p mathed"`. It is excluded
-  from the count above for that reason, not because it fails — see the feature
+- `mathed` (the Bevy bridge) needs system `libudev` and `pkg-config`, which a
+  bare shell does not provide: run it under the flake
+  (`nix develop -c cargo test -p mathed`). It **is** in the count above — it
+  was left out of earlier ones because it could not be built here, not because
+  it fails. See the feature
   note in `Cargo.toml` for why `bevy_gilrs` arrives anyway despite
   `default-features = false`.
 - `kernel_client`'s stdio test skips itself when `python3` is absent rather than

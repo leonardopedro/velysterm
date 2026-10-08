@@ -28,6 +28,12 @@
         # wayland/X11/xkb client libraries + GL/EGL + ALSA (bevy audio) +
         # the Vulkan loader (winit's GL backend selection).
         #
+        # The X11 libs are named at the top level (`libx11`, `libxcursor`,
+        # `libxi`, `libxrandr`) rather than through `xorg.*`: nixpkgs
+        # deprecated the `xorg` package set and warns on every reference
+        # ("'xorg.libX11' has been renamed to 'libx11'"). Same derivations,
+        # no `xorg` attr in sight, so the evaluation is quiet.
+        #
         # `mesa` provides the actual Vulkan ICD drivers (RADV for AMD, lavapipe
         # software fallback); the loader alone finds no physical device, which
         # makes winit panic at runtime ("no Vulkan ICD"). `vulkan-validation-layers`
@@ -38,10 +44,10 @@
           wayland-protocols
           libxkbcommon
           libGL
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
+          libx11
+          libxcursor
+          libxi
+          libxrandr
           alsa-lib
           udev
           vulkan-loader
