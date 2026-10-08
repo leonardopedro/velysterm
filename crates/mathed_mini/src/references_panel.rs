@@ -77,7 +77,7 @@ pub fn open_references_panel(
     segments: &[Segment],
     cursor_byte: usize,
 ) -> ReferencesPanelData {
-    let entries =
+    let mut entries: Vec<ReferencesPanelEntry> =
         mathed_core::markers::references_for_cursor_segments(doc_text, segments, cursor_byte)
             .into_iter()
             .map(|core| ReferencesPanelEntry {
@@ -85,10 +85,67 @@ pub fn open_references_panel(
                 body_image: None,
             })
             .collect();
+    rank_panel_entries(doc_text, &mut entries, mathed_core::ranking_enabled());
     ReferencesPanelData {
         cursor_byte,
         entries,
     }
+}
+
+/// Reorder `entries` with D10's advisory ranking (D-C4).
+///
+/// The set is structurally unchanged: the order comes from
+/// [`mathed_core::rank_rows`], which returns a permutation of the indices, and
+/// this function re-validates that before moving any entry — so a panel can
+/// lose an item only by a bug in this file, never by ranking. Cached body
+/// images travel with their entry, so reordering costs no re-render.
+///
+/// `rank` is the config toggle passed explicitly so the behaviour is testable
+/// without mutating process-global environment state; with it `false` this is
+/// a no-op and the panel keeps the order `references_for_cursor` returns
+/// (outermost first).
+pub fn rank_panel_entries(doc_text: &str, entries: &mut Vec<ReferencesPanelEntry>, rank: bool) {
+    let n = entries.len();
+    if !rank || n < 2 {
+        return;
+    }
+    let labels: Vec<&str> = entries.iter().map(|e| e.core.tag.as_str()).collect();
+    let bodies: Vec<String> = entries
+        .iter()
+        .map(|e| doc_text[e.core.segment_range.clone()].trim().to_string())
+        .collect();
+    let details: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    // Focus = the outermost entry, which is the one `references_for_cursor`
+    // puts first and the one the panel is nominally about.
+    let order = mathed_core::rank_rows(&labels, &details, 0);
+
+    // Prove the order is a permutation before anything is moved out of
+    // `entries`: after this loop every index below is claimed exactly once.
+    if order.len() != n {
+        return;
+    }
+    let mut seen = vec![false; n];
+    for &i in &order {
+        if i >= n || std::mem::replace(&mut seen[i], true) {
+            return;
+        }
+    }
+
+    let mut slots: Vec<Option<ReferencesPanelEntry>> =
+        std::mem::take(entries).into_iter().map(Some).collect();
+    let mut rebuilt: Vec<ReferencesPanelEntry> = Vec::with_capacity(n);
+    for i in order {
+        if let Some(e) = slots[i].take() {
+            rebuilt.push(e);
+        }
+    }
+    debug_assert_eq!(
+        rebuilt.len(),
+        n,
+        "rank_panel_entries proved the permutation above; a short rebuild \
+         would drop a rendered row"
+    );
+    *entries = rebuilt;
 }
 
 /// Update the entries for a new cursor position over the caller's
@@ -130,6 +187,7 @@ pub fn update_references_panel(
         .collect();
     panel.entries = entries;
     panel.cursor_byte = cursor_byte;
+    rank_panel_entries(doc_text, &mut panel.entries, mathed_core::ranking_enabled());
 }
 
 /// Render the body of a single entry at `width_pt`. Returns
@@ -448,6 +506,50 @@ mod tests {
     /// re-scanning, mirroring the app's F1 path.
     fn segs(doc: &str) -> Vec<Segment> {
         mathed_core::markers::resolve_segments(&mathed_core::markers::scan(doc))
+    }
+
+    fn keys(entries: &[ReferencesPanelEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| format!("{}@{:?}", e.core.tag, e.core.segment_range))
+            .collect()
+    }
+
+    /// D10: same entry set, possibly a different order — and with the toggle
+    /// off, no movement at all.
+    #[test]
+    fn ranking_reorders_panel_entries_without_dropping_any() {
+        // Both segments contain byte 8, so the caret is inside the outer
+        // \italic(#1,#3) *and* the inner \bold(#2,#3): two entries.
+        let doc = "#1 a #2 b #3 \\bold(#2,#3) \\italic(#1,#3)";
+        let mut panel = open_references_panel(doc, &segs(doc), 8);
+        assert_eq!(
+            panel.entries.len(),
+            2,
+            "fixture must actually nest two segments at the caret"
+        );
+
+        let original = keys(&panel.entries);
+        rank_panel_entries(doc, &mut panel.entries, false);
+        assert_eq!(
+            keys(&panel.entries),
+            original,
+            "toggle off must leave the panel order untouched"
+        );
+
+        rank_panel_entries(doc, &mut panel.entries, true);
+        let mut sorted: Vec<String> = keys(&panel.entries);
+        sorted.sort();
+        let mut want = original.clone();
+        want.sort();
+        assert_eq!(
+            sorted, want,
+            "ranking changed the SET of rendered entries, not just the order"
+        );
+        assert_eq!(panel.entries.len(), 2);
+        // Cached body images travel with their entry: reordering must never
+        // manufacture or lose one.
+        assert!(panel.entries.iter().all(|e| e.body_image.is_none()));
     }
 
     #[test]

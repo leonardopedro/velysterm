@@ -14,6 +14,12 @@ thiserror = { workspace = true }
 typst = { workspace = true }
 unicode-math-class = { workspace = true }
 unicode-segmentation = "1"
+# D-C4 / D10: the advisory ranking in `rank`. Both frontends already reach
+# `decide_core` through `kernel_client`, so this adds no edge to either binary
+# — it only lets the shared list-ordering live in the one crate both frontends
+# share instead of being written twice.
+decide_core = { path = "../../../unfer/decide_core" }
+nalgebra = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

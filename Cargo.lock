@@ -6102,7 +6102,9 @@ dependencies = [
 name = "mathed_core"
 version = "0.1.0"
 dependencies = [
+ "decide_core",
  "loro",
+ "nalgebra",
  "proptest",
  "serde",
  "serde_json",

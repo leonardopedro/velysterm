@@ -18,6 +18,7 @@ use mathed_core::markers::{
 
 use crate::GlyphIndex;
 use crate::blocks_view::Blocks;
+use mathed_core::rank::ranking_enabled;
 
 /// Stack of open cite numbers (`[N]`), earliest-pushed first.
 /// Driven by `Ctrl+<digit>`; `ESC` clears it.
@@ -34,7 +35,7 @@ pub struct ReferencesPanelOpen(pub bool);
 pub struct CiteRefsRoot;
 
 /// One rendered row in a cite popup box.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CiteRow {
     pub label: String,
     pub detail: String,
@@ -42,7 +43,27 @@ pub struct CiteRow {
 
 /// Build the rows for an open cite popup stack from the document
 /// text. Returns `None` when the stack is empty or no cite resolves.
+///
+/// Order follows [`ranking_enabled`]: the config's default leaves the
+/// press order untouched, and opting in reorders (advisorily) without ever
+/// changing which rows are present. See [`mathed_core::rank`].
 pub fn cite_popup_rows(doc_text: &str, stack: &[u32]) -> Option<Vec<CiteRow>> {
+    cite_popup_rows_ranked(doc_text, stack, ranking_enabled())
+}
+
+/// [`cite_popup_rows`] with the D10 ranking toggle passed explicitly, so the
+/// golden "same set, different order" property is testable without mutating
+/// process-global environment state.
+///
+/// `focus` is the most recently pushed cite — the one the user just asked
+/// about — so the related entries come to it rather than the other way round.
+pub fn cite_popup_rows_ranked(doc_text: &str, stack: &[u32], rank: bool) -> Option<Vec<CiteRow>> {
+    let rows = cite_popup_rows_unordered(doc_text, stack)?;
+    Some(rank_rows_of(&rows, rows.len().checked_sub(1)?, rank))
+}
+
+/// The un-ordered row build, shared by both entry points above.
+fn cite_popup_rows_unordered(doc_text: &str, stack: &[u32]) -> Option<Vec<CiteRow>> {
     if stack.is_empty() {
         return None;
     }
@@ -53,6 +74,23 @@ pub fn cite_popup_rows(doc_text: &str, stack: &[u32]) -> Option<Vec<CiteRow>> {
         rows.push(cite_row_for(entry, doc_text));
     }
     Some(rows)
+}
+
+/// Reorder `rows` around `focus`, **leaving the set untouched**.
+///
+/// The set-unchanged guarantee is structural rather than asserted: the
+/// indices come from [`mathed_core::rank::rank_rows`], which returns a
+/// permutation or the identity, so this can only ever move rows around.
+fn rank_rows_of(rows: &[CiteRow], focus: usize, rank: bool) -> Vec<CiteRow> {
+    if !rank {
+        return rows.to_vec();
+    }
+    let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+    let details: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
+    mathed_core::rank::rank_rows(&labels, &details, focus)
+        .into_iter()
+        .map(|i| rows[i].clone())
+        .collect()
 }
 
 fn cite_row_for(entry: &ReferenceEntry, doc_text: &str) -> CiteRow {
@@ -77,7 +115,22 @@ fn cite_row_for(entry: &ReferenceEntry, doc_text: &str) -> CiteRow {
 /// Build the rows for the references panel from the document text and
 /// the caret byte. Returns `None` when the panel is closed or no
 /// references are at the cursor.
+///
+/// Order follows [`ranking_enabled`] exactly as the cite popup does; see
+/// [`references_panel_rows_ranked`] for the toggle-exposed form.
 pub fn references_panel_rows(doc_text: &str, cursor: usize) -> Option<Vec<CiteRow>> {
+    references_panel_rows_ranked(doc_text, cursor, ranking_enabled())
+}
+
+/// [`references_panel_rows`] with the D10 ranking toggle passed explicitly.
+/// `focus` is the first entry at the caret: when the caret sits in several
+/// segments at once, the outer/first one is the one the panel is nominally
+/// about, and the rest order by how close they come to it.
+pub fn references_panel_rows_ranked(
+    doc_text: &str,
+    cursor: usize,
+    rank: bool,
+) -> Option<Vec<CiteRow>> {
     let scan = scan(doc_text);
     let entries: Vec<ReferencesEntry> = references_for_cursor(doc_text, &scan, cursor);
     if entries.is_empty() {
@@ -91,7 +144,7 @@ pub fn references_panel_rows(doc_text: &str, cursor: usize) -> Option<Vec<CiteRo
             detail: body,
         });
     }
-    Some(rows)
+    Some(rank_rows_of(&rows, 0, rank))
 }
 
 /// Spawn/despawn the cite popup + references panel UI from their
@@ -300,5 +353,93 @@ mod tests {
         let doc = "#1 hello #2 world";
         // Caret past the end of the only segment's body range.
         assert!(references_panel_rows(doc, doc.len()).is_none());
+    }
+
+    // ── D10: advisory ranking ────────────────────────────────────────────
+
+    fn rows() -> Vec<CiteRow> {
+        vec![
+            CiteRow {
+                label: "[1]".into(),
+                detail: "gauge field strength on the link".into(),
+            },
+            CiteRow {
+                label: "[2]".into(),
+                detail: "renormalization group flow of the coupling".into(),
+            },
+            CiteRow {
+                label: "[3]".into(),
+                detail: "lattice spacing and discretization error".into(),
+            },
+        ]
+    }
+
+    fn sorted_keys(rs: &[CiteRow]) -> Vec<String> {
+        let mut k: Vec<String> = rs
+            .iter()
+            .map(|r| format!("{}\u{241F}{}", r.label, r.detail))
+            .collect();
+        k.sort();
+        k
+    }
+
+    /// D10's acceptance criterion, at the level the UI actually consumes:
+    /// the rendered *set* is provably identical and only the order moves.
+    #[test]
+    fn ranking_reorders_the_rendered_rows_without_changing_the_set() {
+        let original = rows();
+        let ordered = rank_rows_of(&original, 2, true);
+        assert_eq!(
+            sorted_keys(&ordered),
+            sorted_keys(&original),
+            "ranking changed the SET, not just the order"
+        );
+        assert_eq!(ordered.len(), original.len());
+        assert_eq!(
+            ordered[0], original[2],
+            "the focus row must lead the order it defines"
+        );
+        // A reordering is the whole point; a no-op would make D10 theatre.
+        assert_ne!(ordered, original, "ranking did not reorder anything");
+    }
+
+    /// The config default: with `MATHED_RANK` absent (which is what it is in
+    /// this repository's test runs), both public builders must return exactly
+    /// the order they had before D10 existed.
+    #[test]
+    fn ranking_off_leaves_the_popular_builders_byte_identical() {
+        // Guard rather than assert: a developer who exports MATHED_RANK=1 in
+        // their shell has opted in, and that is not a test failure.
+        if std::env::var(mathed_core::RANK_ENV).is_err() {
+            assert!(
+                !mathed_core::ranking_enabled(),
+                "the toggle defaults to off, so nothing reorders unless asked"
+            );
+            let doc = "#1 hello #2 \\bold(#1,#2) world";
+            let (a, b) = (
+                references_panel_rows(doc, 7),
+                references_panel_rows_ranked(doc, 7, false),
+            );
+            assert_eq!(a, b, "default-off must equal the explicitly-off build");
+            let bib = "\\cite(alpha2020) and \\cite(beta2021)";
+            let (c, d) = (
+                cite_popup_rows(bib, &[1]),
+                cite_popup_rows_ranked(bib, &[1], false),
+            );
+            assert_eq!(c, d);
+        }
+    }
+
+    /// End-to-end through the real document parser: two bib cites in the
+    /// stack, ranked — same two rows, possibly a different order.
+    #[test]
+    fn ranking_a_real_cite_stack_keeps_every_row() {
+        let doc = "\\cite(alpha2020) and \\cite(beta2021)";
+        let plain =
+            cite_popup_rows_ranked(doc, &[1, 2], false).expect("two cites in the stack resolve");
+        assert_eq!(plain.len(), 2, "fixture must actually have two rows");
+        let ranked = cite_popup_rows_ranked(doc, &[1, 2], true).expect("ranking never drops a row");
+        assert_eq!(sorted_keys(&ranked), sorted_keys(&plain));
+        assert_eq!(ranked.len(), plain.len());
     }
 }

@@ -26,6 +26,7 @@ pub mod formalize;
 pub mod format;
 pub mod glyphs;
 pub mod markers;
+pub mod rank;
 pub mod rfc1751;
 pub mod search;
 pub mod semantics;
@@ -49,6 +50,7 @@ pub use markers::{
     next_marker_id, references_for_cursor, references_for_cursor_segments, resolve_segments, scan,
     scan_references,
 };
+pub use rank::{RANK_ENV, embed, rank_rows, ranking_enabled};
 pub use semantics::{
     ContextAnnotation, ContextBlock, ContextDef, ContextModel, ContextReference, ContextStatement,
     Definition, DocumentContext, KernelStatement, Occurrence, SemanticIndex, TranslatorDef,
