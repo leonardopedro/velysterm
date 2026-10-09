@@ -82,9 +82,16 @@ codes, typed repair hints.
 
 ## Verify
 
-- `cargo test -p mathed_core -p mathed_mini -p mathed -p mathed_biblio` (CPU,
-  fast; excludes GPU experiments and kernel_client which needs unfer path-dep).
-- `printf '{"id":"1","op":"version","params":{}}\n' | cargo run -p kernel_client
-  --bin unfer_agent` → `{"id":"1","ok":true,...}`.
-- `cargo build -p mathed_mini --features gui` (winit + softbuffer link check).
-- `cargo build -p mathed` (heavy — Bevy).
+Every command runs through the flake devshell — a bare shell has no
+`pkg-config`/`libudev`, so `cargo test` dies at `libudev-sys` (the
+`mathed_skia` freetype/fontconfig link paths come from the same shell):
+
+```bash
+nix develop -c cargo test -p mathed_core -p mathed_mini -p mathed -p mathed_biblio
+#   (CPU, fast; excludes GPU experiments and kernel_client, which needs the unfer path-dep)
+printf '{"id":"1","op":"version","params":{}}\n' | nix develop -c cargo run -p kernel_client --bin unfer_agent
+#   -> {"id":"1","ok":true,...}
+nix develop -c cargo build -p mathed_mini --features gui   # winit + softbuffer link check
+nix develop -c cargo build -p mathed                       # heavy — Bevy
+nix-shell -p python3 --run "python3 scripts/check-links"   # relative-link gate (CI: linkcheck.yml)
+```

@@ -1,3 +1,9 @@
+> **Replayed upstream document.** A second, shorter copy of upstream
+> `voxell-tech/velyst`'s README, kept under the `README_UPSTREAM*` convention
+> so it can never be mistaken for this fork's own text. The fuller copy (with
+> badges and the tutorial) is [`README_UPSTREAM.md`](README_UPSTREAM.md);
+> fork instructions live in [`README.md`](README.md).
+
 # Velyst
 
 Interactive [Typst](https://typst.app) content creator using [Vello](https://github.com/linebender/vello) and [Bevy](https://bevyengine.org).
