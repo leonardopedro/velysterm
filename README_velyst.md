@@ -4,7 +4,7 @@ Interactive [Typst](https://typst.app) content creator using [Vello](https://git
 
 ![hello world](./.github/assets/hello_world.gif)
 
-*Associated example [here](./examples/hello_world.rs)!*
+*Associated example [here](./examples/velyst_demo/assets/typst/hello_world.typ)!*
 
 ## Quickstart
 
@@ -67,7 +67,7 @@ typst_func!(
 );
 ```
 
-*Associated example [here](./examples/center_box.rs)!*
+*Associated example [here](./examples/velyst_demo/assets/typst/box.typ)!*
 
 ## Interactions
 
@@ -75,7 +75,7 @@ Velyst is also compatible with `bevy_ui` interactions.
 
 ![game ui](./.github/assets/game_ui.png)
 
-*Associated example [here](./examples/game_ui.rs)!*
+*Associated example [here](./examples/velyst_demo/assets/typst/game_ui.typ)!*
 
 ## Join the community!
 

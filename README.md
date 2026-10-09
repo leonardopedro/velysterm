@@ -134,6 +134,16 @@ Two caveats, because a green number here can mislead:
   failing on a missing interpreter.
 
 
+---
+
+### Upstream velyst README (reproduced below)
+
+> The section that follows is upstream `voxell-tech/velyst`'s README, kept for
+> the Typst-function reference. Its badges, links and "Associated example"
+> pointers describe *upstream's* tree: this fork has no top-level
+> `examples/*.rs`, so those three pointers have been repointed at the demo
+> assets that actually ship here (`examples/velyst_demo/assets/typst/`).
+
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](https://github.com/voxell-tech/velyst#license)
 [![Crates.io](https://img.shields.io/crates/v/velyst.svg)](https://crates.io/crates/velyst)
 [![Downloads](https://img.shields.io/crates/d/velyst.svg)](https://crates.io/crates/velyst)
@@ -145,7 +155,7 @@ Interactive [Typst](https://typst.app) content creator using [Vello](https://git
 
 ![hello world](./.github/assets/hello_world.gif)
 
-*Associated example [here](./examples/hello_world.rs)!*
+*Associated example [here](./examples/velyst_demo/assets/typst/hello_world.typ)!*
 
 ## Quickstart
 
@@ -199,7 +209,7 @@ typst_func!(
 );
 ```
 
-*Associated example [here](./examples/center_box.rs)!*
+*Associated example [here](./examples/velyst_demo/assets/typst/box.typ)!*
 
 ## Interactions
 
@@ -207,7 +217,7 @@ Velyst is also compatible with `bevy_ui` interactions.
 
 ![game ui](./.github/assets/game_ui.png)
 
-*Associated example [here](./examples/game_ui.rs)!*
+*Associated example [here](./examples/velyst_demo/assets/typst/game_ui.typ)!*
 
 ## Tutorial: testing the mathed editor (Bevy-free)
 
