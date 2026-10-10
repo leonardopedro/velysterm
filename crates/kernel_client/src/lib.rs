@@ -1,6 +1,7 @@
 pub mod bench;
 pub mod checkpoint;
 pub mod coop_loop;
+pub mod exec;
 pub mod jupyter_stdio;
 pub mod org_runner;
 pub mod runner;

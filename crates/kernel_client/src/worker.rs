@@ -1,3 +1,4 @@
+use crate::exec::capture_tail;
 use crate::{BlockId, KernelOutput, KernelRequest};
 use crossbeam_channel::{Receiver, Sender};
 use prob_kernel::Session;
@@ -34,26 +35,11 @@ pub struct ExecAuditEntry {
     pub outcome: &'static str,
 }
 
-/// N4: the v1 grant vocabularies — data, not code. `readonly` is safe
-/// builtins only (and args may not carry shell metacharacters: the
-/// worker never runs through a shell, and `readonly` additionally
-/// refuses metacharacter args outright); `compute` is hosted numerical
-/// tools. The worker's *allowlist* (which grants are enabled) is
-/// configured separately and defaults to empty = deny everything.
-pub const EXEC_GRANT_VOCABULARIES: &[(&str, &[&str])] = &[
-    (
-        "readonly",
-        &[
-            "echo", "cat", "head", "tail", "wc", "grep", "ls", "pwd", "printf", "true", "false",
-            "sleep",
-        ],
-    ),
-    ("compute", &["bc"]),
-    // N7: `data` — text/JSON processing over pipes (the bash-role
-    // filter stage); `jq` for JSON, `awk` for text. Still no shell:
-    // one command + literal args under the grant gate.
-    ("data", &["jq", "awk"]),
-];
+// N4: the v1 grant vocabularies, the capture/sanitize helpers and the
+// execution loop live in `crate::exec` — one engine shared with the agent
+// binary's `exec` op, so the grant gate cannot drift between the two
+// surfaces. Re-exported here so the `worker::` paths keep working.
+pub use crate::exec::EXEC_GRANT_VOCABULARIES;
 
 pub struct KernelWorker {
     sessions: HashMap<BlockId, Session>,
@@ -399,6 +385,13 @@ impl KernelWorker {
     /// output cap, and every attempt is audited. All failures answer a
     /// UK-49xx `Error`; exit 0 answers [`BlockResponse::Exec`] with
     /// stdout.
+    ///
+    /// The execution itself is [`crate::exec::run_segment`] — the one
+    /// engine shared with the agent binary's `exec` op, so the grant gate,
+    /// the vocabularies, the timeout/cap discipline and the output
+    /// sanitization cannot drift between the two surfaces. This method
+    /// owns only the front-end: audit the attempt, then map each typed
+    /// outcome to its worker response.
     #[allow(clippy::too_many_arguments)] // the request's fields, one per param
     fn handle_exec(
         &mut self,
@@ -410,46 +403,44 @@ impl KernelWorker {
         cap_bytes: usize,
         stdin: String,
     ) {
-        // 1. Grant check: the first requested grant present in the
-        // configured allowlist wins; none configured = deny everything.
-        let Some(grant_ref) = grants
-            .iter()
-            .find(|g| self.exec_grants.iter().any(|a| a == *g))
-        else {
-            self.audit_exec(grants.first().cloned(), &command, "grant-denied");
-            let _ = self.tx.send(BlockResponse::Error(
+        let params = crate::exec::ExecParams {
+            command: command.clone(),
+            args,
+            grants,
+            timeout_ms,
+            cap_bytes,
+            stdin,
+        };
+        let (audit_grant, outcome) = crate::exec::run_segment(&params, &self.exec_grants);
+        self.audit_exec(audit_grant, &command, outcome.audit_outcome());
+
+        use crate::exec::ExecOutcome;
+        use unfer_protocol::{HintKind, RepairHint};
+        let response = match outcome {
+            ExecOutcome::Ok(out) => BlockResponse::Exec(block_id, out.stdout),
+            ExecOutcome::GrantDenied { requested } => BlockResponse::Error(
                 block_id,
                 Diagnostic::new(
                     Code::EXEC_GRANT_DENIED,
                     format!(
-                        "exec grant denied: the segment asked for {grants:?} but the \
+                        "exec grant denied: the segment asked for {requested:?} but the \
                          worker allowlist is deny-by-default; grant the segment \
                          (MATHED_EXEC_GRANTS) or remove it"
                     ),
                     Severity::Error,
                 )
-                .with_hint(unfer_protocol::RepairHint::new(
-                    unfer_protocol::HintKind::SetParam,
+                .with_hint(RepairHint::new(
+                    HintKind::SetParam,
                     "exec.grants",
                     "add the requested grant to the worker allowlist \
                      (MATHED_EXEC_GRANTS) or remove the segment",
                 )),
-            ));
-            return;
-        };
-        let grant: &str = grant_ref.as_str();
-
-        // 2. Vocabulary check: the command must be in the grant's
-        // allowed list (fixed data, not code).
-        let allowed = EXEC_GRANT_VOCABULARIES
-            .iter()
-            .find(|(name, _)| *name == grant)
-            .map(|(_, cmds)| *cmds)
-            .unwrap_or(&[]);
-        let basename = command.rsplit('/').next().unwrap_or(command.as_str());
-        if !allowed.contains(&basename) {
-            self.audit_exec(Some(grant.to_string()), &command, "command-denied");
-            let _ = self.tx.send(BlockResponse::Error(
+            ),
+            ExecOutcome::CommandDenied {
+                basename,
+                grant,
+                allowed,
+            } => BlockResponse::Error(
                 block_id,
                 Diagnostic::new(
                     Code::EXEC_COMMAND_DENIED,
@@ -460,19 +451,8 @@ impl KernelWorker {
                     ),
                     Severity::Error,
                 ),
-            ));
-            return;
-        }
-
-        // 3. `readonly` refuses shell-shaped args (metacharacters):
-        // the grant is for safe builtins with literal arguments only.
-        if grant == "readonly"
-            && args
-                .iter()
-                .any(|a| a.chars().any(|c| "|&;<>$`\\()*?[]{}#~!".contains(c)))
-        {
-            self.audit_exec(Some(grant.to_string()), &command, "command-denied");
-            let _ = self.tx.send(BlockResponse::Error(
+            ),
+            ExecOutcome::MetacharDenied => BlockResponse::Error(
                 block_id,
                 Diagnostic::new(
                     Code::EXEC_COMMAND_DENIED,
@@ -481,155 +461,74 @@ impl KernelWorker {
                         .to_string(),
                     Severity::Error,
                 ),
-            ));
-            return;
-        }
-
-        // 3b. N7: the pipe seam — stdin is bounded by the same
-        // output cap, so an oversized pipe fails closed instead of
-        // filling a pipe.
-        if !stdin.is_empty() && stdin.len() > cap_bytes {
-            self.audit_exec(Some(grant.to_string()), &command, "failed");
-            let _ = self.tx.send(BlockResponse::Error(
+            ),
+            ExecOutcome::StdinOverCap { len, cap } => BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec failed: stdin is {len} bytes, over the {cap} byte cap"),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::LaunchFailed { detail } => BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec launch failed: {detail}"),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::WaitFailed { detail } => BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec wait failed: {detail}"),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::TimedOut {
+                timeout_ms,
+                captured,
+            } => BlockResponse::Error(
                 block_id,
                 Diagnostic::new(
                     Code::EXEC_FAILED,
                     format!(
-                        "exec failed: stdin is {} bytes, over the {} byte cap",
-                        stdin.len(),
-                        cap_bytes
+                        "exec timed out after {timeout_ms}ms{}",
+                        if captured.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (captured: {})", captured.trim())
+                        }
                     ),
                     Severity::Error,
                 ),
-            ));
-            return;
-        }
-
-        // 4. Run under timeout + cap. The child is polled so a
-        // non-exiting process is killed at the deadline; pipes are
-        // drained only after exit, so draining cannot hang. A
-        // non-empty `stdin` is piped (written on a thread so a
-        // child that never reads it cannot deadlock the worker).
-        let started = Instant::now();
-        let mut cmd = Command::new(&command);
-        cmd.args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if stdin.is_empty() {
-            cmd.stdin(Stdio::null());
-        } else {
-            cmd.stdin(Stdio::piped());
-        }
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                self.audit_exec(Some(grant.to_string()), &command, "failed");
-                let _ = self.tx.send(BlockResponse::Error(
-                    block_id,
-                    Diagnostic::new(
-                        Code::EXEC_FAILED,
-                        format!("exec launch failed: {e}"),
-                        Severity::Error,
+            ),
+            ExecOutcome::Exit { code, stderr_tail } => BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!(
+                        "exec failed (exit {code}): {}",
+                        if stderr_tail.trim().is_empty() {
+                            "(no stderr)".to_string()
+                        } else {
+                            stderr_tail.trim().to_string()
+                        }
                     ),
-                ));
-                return;
-            }
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::OutputReadFailed { detail } => BlockResponse::Error(
+                block_id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec output read failed: {detail}"),
+                    Severity::Error,
+                ),
+            ),
         };
-        if !stdin.is_empty() {
-            let child_stdin = child.stdin.take();
-            let data = stdin.clone();
-            std::thread::spawn(move || {
-                if let Some(mut s) = child_stdin {
-                    use std::io::Write as _;
-                    let _ = s.write_all(data.as_bytes());
-                }
-            });
-        }
-        let deadline = started + Duration::from_millis(timeout_ms.max(1));
-        let timed_out = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break false,
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        break true;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => {
-                    self.audit_exec(Some(grant.to_string()), &command, "failed");
-                    let _ = self.tx.send(BlockResponse::Error(
-                        block_id,
-                        Diagnostic::new(
-                            Code::EXEC_FAILED,
-                            format!("exec wait failed: {e}"),
-                            Severity::Error,
-                        ),
-                    ));
-                    return;
-                }
-            }
-        };
-        // The child has exited (or was killed): draining the pipes now
-        // cannot hang.
-        let output = child.wait_with_output();
-        match output {
-            Ok(out) if timed_out => {
-                let captured = capture_tail(&out.stdout, cap_bytes);
-                self.audit_exec(Some(grant.to_string()), &command, "timed-out");
-                let _ = self.tx.send(BlockResponse::Error(
-                    block_id,
-                    Diagnostic::new(
-                        Code::EXEC_FAILED,
-                        format!(
-                            "exec timed out after {timeout_ms}ms{}",
-                            if captured.trim().is_empty() {
-                                String::new()
-                            } else {
-                                format!(" (captured: {})", captured.trim())
-                            }
-                        ),
-                        Severity::Error,
-                    ),
-                ));
-            }
-            Ok(out) if out.status.success() => {
-                let stdout = capture(&out.stdout, cap_bytes);
-                self.audit_exec(Some(grant.to_string()), &command, "ok");
-                let _ = self.tx.send(BlockResponse::Exec(block_id, stdout));
-            }
-            Ok(out) => {
-                let code = out.status.code().unwrap_or(-1);
-                let stderr = capture_tail(&out.stderr, cap_bytes);
-                self.audit_exec(Some(grant.to_string()), &command, "failed");
-                let _ = self.tx.send(BlockResponse::Error(
-                    block_id,
-                    Diagnostic::new(
-                        Code::EXEC_FAILED,
-                        format!(
-                            "exec failed (exit {code}): {}",
-                            if stderr.trim().is_empty() {
-                                "(no stderr)".to_string()
-                            } else {
-                                stderr.trim().to_string()
-                            }
-                        ),
-                        Severity::Error,
-                    ),
-                ));
-            }
-            Err(e) => {
-                self.audit_exec(Some(grant.to_string()), &command, "failed");
-                let _ = self.tx.send(BlockResponse::Error(
-                    block_id,
-                    Diagnostic::new(
-                        Code::EXEC_FAILED,
-                        format!("exec output read failed: {e}"),
-                        Severity::Error,
-                    ),
-                ));
-            }
-        }
+        let _ = self.tx.send(response);
     }
 
     /// N11: run one granted `\kernel` segment through the configured
@@ -970,78 +869,6 @@ impl KernelWorker {
     }
 }
 
-/// Make captured output safe to put in a diagnostic or on a terminal.
-///
-/// `String::from_utf8_lossy` only repairs *invalid* bytes; it hands ESC
-/// sequences, NULs and BEL straight through into a `Diagnostic` string that a
-/// TUI then draws, where an embedded `\x1b]0;…` rewrites the window title and
-/// a NUL truncates somebody's `printf`. Every character that is a control
-/// character *other than* the three that mean something in text — `\n`, `\t`,
-/// `\r` — becomes U+FFFD. The idea is adapted from `loop`'s
-/// `sanitize_binary_output`; the implementation is ours.
-fn sanitize(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .map(|c| match c {
-            '\n' | '\t' | '\r' => c,
-            _ if c.is_control() => '\u{FFFD}',
-            _ => c,
-        })
-        .collect()
-}
-
-/// Truncate `s` to at most `cap` bytes at a char boundary, appending a
-/// marker when anything was cut.
-fn truncate(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut t = s[..end].to_string();
-    t.push_str("…(truncated)");
-    t
-}
-
-/// The mirror image: keep the **tail** of `s` inside `cap` bytes.
-///
-/// For a *diagnostic* the decisive line is the last one — the compiler error,
-/// the failing assertion, the `Permission denied` — and a head-keeping cut
-/// throws precisely that away while preserving the banner above it. The
-/// marker goes in front, so a reader can tell the head is gone rather than
-/// mistaking a surviving tail for the whole message. UTF-8 safety is the same
-/// char-boundary walk as [`truncate`].
-///
-/// The tail rule is adapted from `loop`'s `truncate_tail`, which uses the
-/// tail for *all* shell output; we keep the head for output that is *read*
-/// top-down (a successful command's stdout) and the tail for output that is
-/// *diagnosed* bottom-up.
-fn truncate_tail(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut start = s.len() - cap;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    let mut t = String::with_capacity(s.len() - start + 14);
-    t.push_str("…(truncated)\n");
-    t.push_str(&s[start..]);
-    t
-}
-
-/// Sanitize then keep the head — the read-top-down case.
-fn capture(bytes: &[u8], cap: usize) -> String {
-    truncate(&sanitize(bytes), cap)
-}
-
-/// Sanitize then keep the tail — the diagnosed-bottom-up case.
-fn capture_tail(bytes: &[u8], cap: usize) -> String {
-    truncate_tail(&sanitize(bytes), cap)
-}
-
 impl KernelWorker {
     /// Remove a session by model_id (the key that the worker uses).
     pub fn close_model_by_id(&mut self, model_id: BlockId) -> bool {
@@ -1052,6 +879,7 @@ impl KernelWorker {
 mod tests {
     use super::*;
     use crate::KernelRequest;
+    use crate::exec::{capture, sanitize, truncate, truncate_tail};
     use crossbeam_channel::unbounded;
     use unfer_protocol::ModelSpec;
 

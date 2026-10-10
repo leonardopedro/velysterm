@@ -422,9 +422,17 @@ struct AgentState {
     /// a second entry — the dedup rule `agent_escalate` and `agent_nudge`
     /// already follow: a lane that fills with retries is a lane nobody reads.
     sync_conflicts: std::collections::BTreeMap<String, u64>,
+    /// N4: the bounded exec audit trail — same row shape and cap as the
+    /// worker's ([`kernel_client::worker::ExecAuditEntry`]); every `exec`
+    /// attempt, denied or not, lands here (docs/PROTOCOL.md §`exec`).
+    exec_audit: VecDeque<kernel_client::worker::ExecAuditEntry>,
 }
 
 impl AgentState {
+    /// How many exec attempts the audit trail keeps (the worker's bounded
+    /// queue convention, same cap).
+    const MAX_EXEC_AUDIT: usize = 64;
+
     fn new() -> Self {
         // Durability follows the kernel's H4 environment: `UNFER_DURABLE_DIR`
         // (optional; in-memory when unset) and `UNFER_DURABLE_BACKEND`
@@ -515,6 +523,7 @@ impl AgentState {
             nudges_sent: std::collections::HashSet::new(),
             sync_docs: std::collections::BTreeMap::new(),
             sync_conflicts: std::collections::BTreeMap::new(),
+            exec_audit: VecDeque::new(),
             decide: None,
         }
     }
@@ -2797,7 +2806,11 @@ impl AgentState {
             "decide_answer" => self.decide_answer(req),
             "decide_state" => self.decide_state(req),
             "decide_recalibrate" => self.decide_recalibrate(req),
-            "exec" | "kernel_exec" => AgentResponse::err(&req.id, unimplemented_op_diag(&req.op)),
+            "exec" => self.exec_segment(req),
+            // N11 `kernel_exec` is still a work order, not an arm: the
+            // Jupyter-wire kernel path needs the MATHED_KERNEL_BIN module
+            // plumbing first (docs/PROTOCOL.md keeps it specified).
+            "kernel_exec" => AgentResponse::err(&req.id, unimplemented_op_diag(&req.op)),
             _ => AgentResponse::err(&req.id, unknown_op_diag(&req.op)),
         }
     }
@@ -3360,14 +3373,241 @@ impl AgentState {
     }
 }
 
+// ── N4/N7: the `exec` op (granted scripted segments) ────────────────────
+
+impl AgentState {
+    /// Bounded exec audit trail (docs/PROTOCOL.md §`exec`: "every
+    /// invocation is audited"). Same row shape and cap as the worker's.
+    fn audit_exec(&mut self, grant: Option<String>, command: &str, outcome: &'static str) {
+        self.exec_audit
+            .push_back(kernel_client::worker::ExecAuditEntry {
+                grant,
+                command: command.to_string(),
+                outcome,
+            });
+        if self.exec_audit.len() > Self::MAX_EXEC_AUDIT {
+            self.exec_audit.pop_front();
+        }
+    }
+
+    /// `exec` — run one granted scripted segment (`\exec`).
+    ///
+    /// The execution is [`kernel_client::exec::run_segment`] — the one
+    /// engine the worker's `KernelRequest::Exec` also uses (no shell,
+    /// deny-by-default `MATHED_EXEC_GRANTS` allowlist, per-grant v1
+    /// vocabularies, timeout + output cap, sanitized output; adapted from
+    /// claurst's bash-tool discipline). This arm parses the wire shape,
+    /// audits the attempt in the bounded trail, and maps each typed
+    /// outcome to its UK code: 4908 grant not configured, 4909 outside
+    /// the vocabulary, 4910 launch/exit/timeout/pipe failure.
+    fn exec_segment(&mut self, req: &AgentRequest) -> AgentResponse {
+        use kernel_client::exec::{ExecOutcome, ExecParams};
+        use unfer_protocol::{HintKind, RepairHint};
+
+        let params: ExecParams = match parse_exec_params(&req.params) {
+            Ok(p) => p,
+            Err(diag) => return AgentResponse::err(&req.id, diag),
+        };
+        let allowlist: Vec<String> = std::env::var("MATHED_EXEC_GRANTS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let command = params.command.clone();
+        let (audit_grant, outcome) = kernel_client::exec::run_segment(&params, &allowlist);
+        self.audit_exec(audit_grant, &command, outcome.audit_outcome());
+
+        match outcome {
+            ExecOutcome::Ok(out) => AgentResponse::ok(
+                &req.id,
+                serde_json::json!({
+                    "stdout": out.stdout,
+                    "stderr": out.stderr,
+                    "exit_code": 0,
+                    "timing_ms": out.timing_ms,
+                }),
+            ),
+            ExecOutcome::GrantDenied { requested } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_GRANT_DENIED,
+                    format!(
+                        "exec grant denied: the segment asked for {requested:?} but the \
+                         allowlist is deny-by-default; grant the segment \
+                         (MATHED_EXEC_GRANTS) or remove it"
+                    ),
+                    Severity::Error,
+                )
+                .with_hint(RepairHint::new(
+                    HintKind::SetParam,
+                    "exec.grants",
+                    "add the requested grant to the allowlist \
+                     (MATHED_EXEC_GRANTS) or remove the segment",
+                )),
+            ),
+            ExecOutcome::CommandDenied {
+                basename,
+                grant,
+                allowed,
+            } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_COMMAND_DENIED,
+                    format!(
+                        "exec command denied: {basename:?} is not in the {grant:?} \
+                         vocabulary {allowed:?}; use an allowed command or request a \
+                         broader grant"
+                    ),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::MetacharDenied => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_COMMAND_DENIED,
+                    "exec command denied: readonly args may not contain shell \
+                     metacharacters (| & ; < > $ ` \\ ( ) * ? [ ] { } # ~ !)"
+                        .to_string(),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::StdinOverCap { len, cap } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec failed: stdin is {len} bytes, over the {cap} byte cap"),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::LaunchFailed { detail } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec launch failed: {detail}"),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::WaitFailed { detail } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec wait failed: {detail}"),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::TimedOut {
+                timeout_ms,
+                captured,
+            } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!(
+                        "exec timed out after {timeout_ms}ms{}",
+                        if captured.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (captured: {})", captured.trim())
+                        }
+                    ),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::Exit { code, stderr_tail } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!(
+                        "exec failed (exit {code}): {}",
+                        if stderr_tail.trim().is_empty() {
+                            "(no stderr)".to_string()
+                        } else {
+                            stderr_tail.trim().to_string()
+                        }
+                    ),
+                    Severity::Error,
+                ),
+            ),
+            ExecOutcome::OutputReadFailed { detail } => AgentResponse::err(
+                &req.id,
+                Diagnostic::new(
+                    Code::EXEC_FAILED,
+                    format!("exec output read failed: {detail}"),
+                    Severity::Error,
+                ),
+            ),
+        }
+    }
+}
+
+/// Parse the `exec` request shape (docs/PROTOCOL.md §`exec`); the defaults
+/// are the documented ones (5s timeout, 64 KiB cap, empty stdin).
+fn parse_exec_params(
+    params: &serde_json::Value,
+) -> Result<kernel_client::exec::ExecParams, Diagnostic> {
+    use kernel_client::exec::{DEFAULT_CAP_BYTES, DEFAULT_TIMEOUT_MS, ExecParams};
+
+    let string_list = |field: &str| -> Result<Vec<String>, Diagnostic> {
+        match params.get(field) {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(v) => v
+                .as_array()
+                .ok_or_else(|| bad_json_diag(&format!("'{field}' must be an array of strings")))?
+                .iter()
+                .map(|a| {
+                    a.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| bad_json_diag(&format!("'{field}' entries must be strings")))
+                })
+                .collect(),
+        }
+    };
+
+    let command = required_str(params, "command")?;
+    let args = string_list("args")?;
+    let grants = string_list("grants")?;
+    let timeout_ms = match params.get("timeout_ms") {
+        None | Some(serde_json::Value::Null) => DEFAULT_TIMEOUT_MS,
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| bad_json_diag("'timeout_ms' must be a non-negative integer"))?,
+    };
+    let cap_bytes = match params.get("cap_bytes") {
+        None | Some(serde_json::Value::Null) => DEFAULT_CAP_BYTES,
+        Some(v) => usize::try_from(
+            v.as_u64()
+                .ok_or_else(|| bad_json_diag("'cap_bytes' must be a non-negative integer"))?,
+        )
+        .map_err(|_| bad_json_diag("'cap_bytes' out of range"))?,
+    };
+    let stdin = match params.get("stdin") {
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(v) => v
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| bad_json_diag("'stdin' must be a string"))?,
+    };
+
+    Ok(ExecParams {
+        command,
+        args,
+        grants,
+        timeout_ms,
+        cap_bytes,
+        stdin,
+    })
+}
+
 /// A registered-but-unimplemented op, distinguished from a typo.
 ///
 /// The distinction matters to a caller: `unknown_op_diag` means "you spelled it
 /// wrong, here is the list of things you could have meant", and `ReplaceValue`
-/// listing `exec` in that list invites the caller to retry something that cannot
-/// work. This one says the op exists in the registry, is specified in
-/// `docs/PROTOCOL.md`, and has no implementation — and does not offer a retry
-/// hint, because retrying is exactly the wrong move.
+/// listing `kernel_exec` in that list invites the caller to retry something
+/// that cannot work. This one says the op exists in the registry, is specified
+/// in `docs/PROTOCOL.md`, and has no implementation — and does not offer a
+/// retry hint, because retrying is exactly the wrong move.
 fn unimplemented_op_diag(op: &str) -> Diagnostic {
     Diagnostic::new(
         Code::BAD_JSON,
@@ -5013,24 +5253,127 @@ mod tests {
 
     #[test]
     fn registered_but_unimplemented_ops_say_so_instead_of_claiming_to_be_unknown() {
-        // `exec` and `kernel_exec` are in the registry the agent advertises, so
-        // answering UK-1001 "Unknown op" is wrong twice: the op is known, and the
-        // code catches callers on the wrong branch.
+        // `kernel_exec` is in the registry the agent advertises, so answering
+        // UK-1001 "Unknown op" is wrong twice: the op is known, and the code
+        // catches callers on the wrong branch. (`exec` used to sit here too;
+        // it is implemented now — the exec tests below cover it.)
         let mut state = AgentState::new();
-        for op in ["exec", "kernel_exec"] {
-            let resp = state.handle(&AgentRequest::new("c1-unimpl", op, serde_json::json!({})));
-            assert!(!resp.ok, "{op} must not report success");
-            let diag = resp.error.unwrap();
-            assert!(
-                diag.message.contains("not implemented"),
-                "{op}: {:?}",
-                diag.message
-            );
-            assert!(
-                !diag.message.contains("Unknown op"),
-                "{op} must not be reported as a typo: {:?}",
-                diag.message
-            );
+        let op = "kernel_exec";
+        let resp = state.handle(&AgentRequest::new("c1-unimpl", op, serde_json::json!({})));
+        assert!(!resp.ok, "{op} must not report success");
+        let diag = resp.error.unwrap();
+        assert!(
+            diag.message.contains("not implemented"),
+            "{op}: {:?}",
+            diag.message
+        );
+        assert!(
+            !diag.message.contains("Unknown op"),
+            "{op} must not be reported as a typo: {:?}",
+            diag.message
+        );
+    }
+
+    // ── N4/N7: the `exec` op ───────────────────────────────────────────────
+
+    /// Serializes the only tests that touch the process-global
+    /// `MATHED_EXEC_GRANTS` (edition 2024: `set_var` is unsafe, and the env
+    /// is shared across the parallel harness).
+    static EXEC_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn exec_denies_by_default_and_says_which_grant_is_missing() {
+        let _g = EXEC_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by EXEC_ENV_LOCK; only the exec tests touch this
+        // variable, and it is restored before the lock is released.
+        unsafe { std::env::remove_var("MATHED_EXEC_GRANTS") };
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e-deny",
+            "exec",
+            serde_json::json!({"command": "echo", "args": ["hi"], "grants": ["readonly"]}),
+        ));
+        assert!(!resp.ok);
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::EXEC_GRANT_DENIED, "{:?}", diag.message);
+        assert!(
+            diag.message.contains("MATHED_EXEC_GRANTS"),
+            "{:?}",
+            diag.message
+        );
+        assert!(!diag.hints.is_empty(), "a deny carries a repair hint");
+    }
+
+    #[test]
+    fn exec_runs_a_granted_segment_and_reports_the_result_shape() {
+        let _g = EXEC_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by EXEC_ENV_LOCK; only the exec tests touch this
+        // variable, and it is restored before the lock is released.
+        unsafe { std::env::set_var("MATHED_EXEC_GRANTS", "readonly") };
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e-ok",
+            "exec",
+            serde_json::json!({"command": "echo", "args": ["hi"], "grants": ["readonly"]}),
+        ));
+        assert!(resp.ok, "{:?}", resp.error);
+        let result = resp.result.unwrap();
+        assert_eq!(result["stdout"], "hi\n");
+        assert_eq!(result["exit_code"], 0);
+        assert!(result["timing_ms"].as_u64().is_some(), "{result}");
+        unsafe { std::env::remove_var("MATHED_EXEC_GRANTS") };
+    }
+
+    #[test]
+    fn exec_refuses_a_command_outside_the_grant_vocabulary() {
+        let _g = EXEC_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by EXEC_ENV_LOCK; only the exec tests touch this
+        // variable, and it is restored before the lock is released.
+        unsafe { std::env::set_var("MATHED_EXEC_GRANTS", "readonly") };
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e-vocab",
+            "exec",
+            serde_json::json!({"command": "sh", "args": ["-c", "true"], "grants": ["readonly"]}),
+        ));
+        assert!(!resp.ok);
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::EXEC_COMMAND_DENIED, "{:?}", diag.message);
+        assert!(diag.message.contains("vocabulary"), "{:?}", diag.message);
+        unsafe { std::env::remove_var("MATHED_EXEC_GRANTS") };
+    }
+
+    #[test]
+    fn exec_failure_carries_exit_code_and_stderr_in_the_4910_message() {
+        let _g = EXEC_ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by EXEC_ENV_LOCK; only the exec tests touch this
+        // variable, and it is restored before the lock is released.
+        unsafe { std::env::set_var("MATHED_EXEC_GRANTS", "readonly") };
+        let mut state = AgentState::new();
+        let resp = state.handle(&AgentRequest::new(
+            "e-fail",
+            "exec",
+            serde_json::json!({"command": "grep", "args": ["nomatch", "Cargo.toml"], "grants": ["readonly"]}),
+        ));
+        assert!(!resp.ok);
+        let diag = resp.error.unwrap();
+        assert_eq!(diag.code, Code::EXEC_FAILED, "{:?}", diag.message);
+        assert!(diag.message.contains("(exit 1)"), "{:?}", diag.message);
+        unsafe { std::env::remove_var("MATHED_EXEC_GRANTS") };
+    }
+
+    #[test]
+    fn exec_rejects_a_malformed_request_shape() {
+        let mut state = AgentState::new();
+        for params in [
+            serde_json::json!({"grants": ["readonly"]}), // no command
+            serde_json::json!({"command": "echo", "args": "not-an-array"}),
+            serde_json::json!({"command": "echo", "timeout_ms": "soon"}),
+            serde_json::json!({"command": "echo", "stdin": 7}),
+        ] {
+            let resp = state.handle(&AgentRequest::new("e-shape", "exec", params));
+            assert!(!resp.ok);
+            assert_eq!(resp.error.unwrap().code, Code::BAD_JSON);
         }
     }
 
@@ -5056,7 +5399,7 @@ mod tests {
         // strays answered UK-1001. This walks `VALID_OPS` and asserts each one
         // reaches a real arm.
         let mut state = AgentState::new();
-        let unimplemented = ["exec", "kernel_exec"];
+        let unimplemented = ["kernel_exec"];
         for op in VALID_OPS {
             let resp = state.handle(&AgentRequest::new(
                 "c1-census",
@@ -6157,7 +6500,7 @@ mod tests {
         // Re-run the G1 census: adding six ops must not reintroduce the
         // advertised-but-unwired drift.
         let mut state = AgentState::new();
-        let unimplemented = ["exec", "kernel_exec"];
+        let unimplemented = ["kernel_exec"];
         for op in VALID_OPS {
             let resp = state.handle(&AgentRequest::new(
                 "g3-census",
@@ -6509,7 +6852,7 @@ mod tests {
     #[test]
     fn the_census_still_holds_with_the_gate_ops_added() {
         let mut state = AgentState::new();
-        let unimplemented = ["exec", "kernel_exec"];
+        let unimplemented = ["kernel_exec"];
         for op in VALID_OPS {
             let resp = state.handle(&AgentRequest::new(
                 "g4-census",
@@ -6714,7 +7057,7 @@ mod tests {
     #[test]
     fn the_census_still_holds_with_the_nudge_op_added() {
         let mut state = AgentState::new();
-        let unimplemented = ["exec", "kernel_exec"];
+        let unimplemented = ["kernel_exec"];
         for op in VALID_OPS {
             let resp = state.handle(&AgentRequest::new(
                 "g9-census",
