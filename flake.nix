@@ -67,6 +67,12 @@
           freetype
           fontconfig
           rustup
+          # python3 for this repo's own gates (`scripts/check-links`, and the
+          # python gates inside `scripts/verify-invariants`): the devshell is
+          # the one toolchain source, so the documented commands run inside
+          # `nix develop` instead of a second `nix-shell -p python3` wrapper
+          # (CI's ubuntu runners ship python3 either way).
+          python3
         ];
 
         # NO RUSTUP_TOOLCHAIN here on purpose. It used to be set to "stable",

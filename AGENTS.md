@@ -93,5 +93,5 @@ printf '{"id":"1","op":"version","params":{}}\n' | nix develop -c cargo run -p k
 #   -> {"id":"1","ok":true,...}
 nix develop -c cargo build -p mathed_mini --features gui   # winit + softbuffer link check
 nix develop -c cargo build -p mathed                       # heavy — Bevy
-nix-shell -p python3 --run "python3 scripts/check-links"   # relative-link gate (CI: linkcheck.yml)
+nix develop -c python3 scripts/check-links                  # relative-link gate (CI: linkcheck.yml)
 ```
