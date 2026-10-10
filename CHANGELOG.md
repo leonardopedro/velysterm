@@ -6,6 +6,26 @@ declaration in `Cargo.toml`.
 
 ## Unreleased
 
+### Changed — `bench_runner` and `org_runner` reject unknown or malformed
+options instead of ignoring them, and their machine output is one compact
+JSON object per line
+
+A typo (`--jsn`, `--budget90m`, `--workers abc`) used to be dropped with a
+stderr warning, and the run then reported default-configuration numbers as
+if they were the requested ones — worst in `org_runner`, where a malformed
+`--budget` silently meant *unlimited*. Both runners now treat an unknown
+argument, a malformed value, a missing value (including a flag where a
+value belongs), and an unknown `--task` id as usage errors: message + usage
+on stderr, exit 2 (the code `bench_runner` already used for "no tasks
+selected", so callers only need "2 = the run never happened"). `--help`
+prints usage to stdout wherever it appears, unknown task ids are reported
+by name next to the available ids, and `--json`/`--report` print the report
+as a single compact JSON line on stdout with all human notes on stderr —
+the celld CLI contracts (unknown option → usage + exit 2; `--json` → one
+structured object per line). Fixing the stale `bench_runner --report`
+module-doc example fell out of this: that flag never existed on
+`bench_runner`, and the old warn-and-ignore behaviour hid it.
+
 ### Added — the result overlay summarizes long kernel text through
 `uk_summarize` before displaying it
 (`mathed_mini::kernel_bridge`, D.6 / C6)

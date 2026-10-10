@@ -16,7 +16,40 @@
 use kernel_client::coop_loop::RetryPolicy;
 use kernel_client::org_runner::{OrgHost, SpawnRefusal};
 
+const USAGE: &str = "usage: org_runner [--workers N] [--budget N] [--model SPEC] \
+                      [--for-tick N] [--session-dir DIR] [--report]";
+
+/// Usage errors print the usage line to stderr and exit 2: an unknown
+/// argument or a malformed value ends the run instead of silently falling
+/// back to a default (a typo'd `--budget` used to mean "unlimited").
+fn usage_error(msg: impl AsRef<str>) -> ! {
+    eprintln!("org_runner: {}", msg.as_ref());
+    eprintln!("{USAGE}");
+    std::process::exit(2);
+}
+
+/// The value for `flag`; a missing value, or one that looks like another
+/// option, is a usage error.
+fn value_of(args: &mut impl Iterator<Item = String>, flag: &str) -> String {
+    match args.next() {
+        None => usage_error(format!("{flag} requires a value")),
+        Some(v) if v.starts_with('-') => usage_error(format!("{flag} requires a value, got {v:?}")),
+        Some(v) => v,
+    }
+}
+
+fn parse_or<T: std::str::FromStr>(flag: &str, raw: &str, expect: &str) -> T {
+    raw.parse()
+        .unwrap_or_else(|_| usage_error(format!("{flag} expects {expect}, got {raw:?}")))
+}
+
 fn main() {
+    // `--help` wins wherever it appears, before any other argument is judged.
+    if std::env::args().skip(1).any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return;
+    }
+
     let mut workers: usize = 2;
     let mut budget: Option<usize> = None;
     let mut model: Option<String> = None;
@@ -27,20 +60,27 @@ fn main() {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--workers" => workers = args.next().and_then(|v| v.parse().ok()).unwrap_or(workers),
-            "--budget" => budget = args.next().and_then(|v| v.parse().ok()),
-            "--model" => model = args.next(),
-            "--for-tick" => for_tick = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
-            "--session-dir" => session_dir = args.next(),
-            "--report" => report = true,
-            "--help" | "-h" => {
-                eprintln!(
-                    "usage: org_runner [--workers N] [--budget N] [--model SPEC] \
-                     [--for-tick N] [--session-dir DIR] [--report]"
-                );
-                std::process::exit(0);
+            "--workers" => {
+                workers = parse_or("--workers", &value_of(&mut args, "--workers"), "an integer")
             }
-            other => eprintln!("org_runner: ignoring unknown argument {other:?}"),
+            "--budget" => {
+                budget = Some(parse_or(
+                    "--budget",
+                    &value_of(&mut args, "--budget"),
+                    "an integer",
+                ))
+            }
+            "--model" => model = Some(value_of(&mut args, "--model")),
+            "--for-tick" => {
+                for_tick = parse_or(
+                    "--for-tick",
+                    &value_of(&mut args, "--for-tick"),
+                    "an integer",
+                )
+            }
+            "--session-dir" => session_dir = Some(value_of(&mut args, "--session-dir")),
+            "--report" => report = true,
+            other => usage_error(format!("unknown argument {other:?}")),
         }
     }
 
@@ -93,9 +133,11 @@ fn main() {
     }
 
     if report {
+        // One compact object per line (celld's `--json` contract); human
+        // notes stay on stderr.
         println!(
             "{}",
-            serde_json::to_string_pretty(&host.report()).unwrap_or_default()
+            serde_json::to_string(&host.report()).unwrap_or_default()
         );
     }
 

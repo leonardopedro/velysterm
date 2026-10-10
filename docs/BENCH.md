@@ -31,6 +31,14 @@ cargo run -p kernel_client --bin bench_runner -- --workers 1,2,4 --json
 Options: `--task IDS`, `--workers 1,2,4,8`, `--budget SECS` (per trial),
 `--repeats N`, `--offline`, `--json`.
 
+The CLI is strict (adapted from celld): an unknown argument, a malformed or
+missing value, or an unknown `--task` id is a usage error — message + usage on
+stderr, exit 2 — never a silently ignored typo, because a dropped flag would
+make the report speak for the *default* configuration while reading like the
+requested one. Exit 1 means the run happened but nothing was measured. With
+`--json` the report is one compact JSON object on stdout and every human note
+stays on stderr, so stdout is machine-clean.
+
 ## Read `measured N%` first
 
 That is the share of trials that **actually ran**, and it is the denominator the
