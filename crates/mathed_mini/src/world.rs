@@ -58,6 +58,13 @@ pub(crate) fn decode_data_url(s: &str) -> Option<Bytes> {
 /// base64 `//` would be collapsed to `/` by `VirtualPath`), so it
 /// becomes `%2F` — every other base64 character is path-safe. The
 /// inverse is [`decode_data_url`].
+///
+/// The two halves of this pair belong together, so the helper is compiled in
+/// every configuration: the tests below exercise encode → URL → decode in all
+/// of them. Only the `kernel` feature's modules call it outside tests
+/// (`output_region`, `media_menu`, `export`), so a `--no-default-features`
+/// build would otherwise warn that it is dead.
+#[cfg_attr(not(feature = "kernel"), allow(dead_code))]
 pub(crate) fn data_url_encode_payload(data: &str) -> String {
     data.replace('/', "%2F")
 }

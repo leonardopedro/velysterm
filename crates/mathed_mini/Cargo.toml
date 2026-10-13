@@ -13,7 +13,10 @@ typst_imaging = { workspace = true }
 
 # Kernel contract types: the translator pipeline parses translator output
 # into TermSpec/ModelSpec (P3 #10). Serde types only — no Bevy, no solver.
-unfer_protocol = { path = "../../../unfer/unfer_protocol" }
+# Optional because the `kernel` feature owns every module that reads them;
+# when it is off the types are still a *dev*-dependency (below), which is
+# what the translate/output_region contract tests need.
+unfer_protocol = { path = "../../../unfer/unfer_protocol", optional = true }
 serde_json = "1.0"
 # Data-URL image payloads (`#image("data:image/png;base64,…")`)
 # resolved by the minimal world — already in the lockfile.
@@ -28,12 +31,16 @@ flate2 = "1.1"
 
 # The probability kernel client (worker thread + Session). Pulls prob_kernel
 # (P3 #11: wire kernel_client into mathed_mini) so a \prob computes a real
-# number off the render thread.
-kernel_client = { path = "../kernel_client" }
+# number off the render thread. Behind the `kernel` feature: prob_kernel's
+# dependency tree reaches quantrs2 -> scirs2-core, which has no SIMD path for
+# the `x86_64-linux-android` target and therefore does not compile there. A
+# frontend for such a platform takes `--no-default-features`, keeping the
+# render core (this crate's whole point) and dropping the kernel integration.
+kernel_client = { path = "../kernel_client", optional = true }
 # H4 durable-store status dashboard: the TUI consults the unfer kernel's
 # store read-only (backend, persist counter, stream lengths, corrupt-
 # snapshot recovery report). unfer_ffi is rlib-compatible.
-unfer_ffi = { path = "../../../unfer/unfer_ffi" }
+unfer_ffi = { path = "../../../unfer/unfer_ffi", optional = true }
 
 typst = { workspace = true }
 typst-library = { workspace = true }
@@ -58,9 +65,28 @@ accesskit_winit = { version = "0.29", optional = true }
 # already pulls; optional so the headless render core stays dependency-free.
 arboard = { version = "3.6.1", optional = true }
 
+[dev-dependencies]
+# The compile-time contract tests in `translate` / `output_region` assert the
+# builtin translator's JSON against the kernel's real serde schema. They run on
+# every target, including builds that take `--no-default-features` and so have
+# no `kernel` feature — hence the duplicate, non-optional dev entry.
+unfer_protocol = { path = "../../../unfer/unfer_protocol" }
+
 [features]
 default = ["gui"]
-gui = ["dep:winit", "dep:softbuffer", "dep:accesskit", "dep:accesskit_winit", "dep:arboard"]
+gui = [
+    "dep:winit",
+    "dep:softbuffer",
+    "dep:accesskit",
+    "dep:accesskit_winit",
+    "dep:arboard",
+    "kernel",
+]
+# The unfer probability kernel integration: the KernelBridge, the dispatcher,
+# the export/screenshot paths, the kernel menu and the durable dashboard. On
+# by default — every existing frontend wants it. Off only where the kernel's
+# own dependency tree cannot be built (see `kernel_client` above).
+kernel = ["dep:kernel_client", "dep:unfer_ffi", "dep:unfer_protocol"]
 
 [[bin]]
 name = "mathed_mini"

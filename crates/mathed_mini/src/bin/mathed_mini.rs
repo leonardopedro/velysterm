@@ -21,6 +21,12 @@
 //! Ctrl+1..3 to expand)   mathed_mini --dashboard-typst <f>
 //! Headless: consult the store and                                   
 //! write the dashboard document
+//!
+//! Agent debug loop (semantic tier):
+//!   mathed_mini --layout-json <doc> [--out <f.json>]
+//!     Paged layout with no raster: every \app figure's declared
+//!     size, binding id, launch, caption, source line and placed
+//!     rect, plus structural diagnostics. Prints JSON to stdout.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -240,6 +246,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => {
                         print!("{out}");
                     }
+                }
+                return Ok(());
+            }
+            // Headless figure geometry — the semantic tier of the
+            // agent debug loop (`docs/AGENT_LOOP.md` in emthin): lay
+            // out through Typst's paged model with no raster at all
+            // and report every `\app` figure's declared size,
+            // binding, launch, caption, line, and placed rect, plus
+            // structural diagnostics (dangling statements, page
+            // overflow). Compile errors surface as errors, so a bad
+            // edit reads as "broke the compile", not "deleted the
+            // figures".
+            "--layout-json" => {
+                let path = rest
+                    .first()
+                    .ok_or("--layout-json requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let geom = mathed_mini::inspect::doc_geometry(&doc)
+                    .map_err(|e| std::io::Error::other(format!("layout failed: {e:?}")))?;
+                let json = geom.to_json();
+                match rest.get(1) {
+                    Some(flag) if flag == "--out" => {
+                        let out = rest.get(2).ok_or("--layout-json --out requires a path")?;
+                        std::fs::write(out, format!("{json}\n"))?;
+                        eprintln!("Wrote layout geometry -> {out}");
+                    }
+                    Some(other) => {
+                        return Err(format!("unexpected --layout-json argument `{other}`").into());
+                    }
+                    None => println!("{json}"),
                 }
                 return Ok(());
             }

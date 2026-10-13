@@ -6163,6 +6163,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mathed_snapshot_scratch"
+version = "0.0.0"
+dependencies = [
+ "mathed_core",
+]
+
+[[package]]
 name = "mathhook"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

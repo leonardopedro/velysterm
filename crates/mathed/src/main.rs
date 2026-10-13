@@ -27,13 +27,18 @@ mod popup;
 mod presence_net;
 mod scheduler;
 mod search_sys;
+mod slint_blocks;
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::path::PathBuf;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_vello::prelude::*;
 use keymap::{EditorCmd, Mods, Motion};
@@ -206,6 +211,8 @@ fn main() {
         .init_resource::<CaretBlink>()
         .init_resource::<SemanticIndexWrapper>()
         .init_resource::<Searching>()
+        .init_resource::<slint_blocks::SlintBrowserHandle>()
+        .init_resource::<SlintFocus>()
         .init_resource::<LastChange>()
         .init_resource::<kernel_sys::KernelBridge>()
         .init_resource::<durable_sys::DurableStatusResource>()
@@ -213,6 +220,11 @@ fn main() {
         .init_resource::<cite_refs::CitePopupStack>()
         .init_resource::<cite_refs::ReferencesPanelOpen>()
         .init_resource::<ImePreedit>()
+        // Popup (rename/completion) state: `handle_keyboard` and
+        // `sync_popup_ui` both take `ResMut<PopupState>`, so it must exist
+        // before either runs — without this registration the first
+        // keyboard event panics with "Resource does not exist".
+        .init_resource::<popup::PopupState>()
         .add_systems(Startup, (setup, durable_sys::spawn_durable_panel))
         .add_systems(PreUpdate, (handle_keyboard, handle_mouse, handle_ime))
         .add_systems(
@@ -239,6 +251,15 @@ fn main() {
             ),
         )
         .add_systems(Update, autosave)
+        // `\slint` widgets: rasterise first so a block's browser instance
+        // exists, then forward input into it. Both run after `sync_blocks` so
+        // freshly spawned block entities are visible on the first pass.
+        .add_systems(
+            Update,
+            (render_slint_blocks, handle_slint_input)
+                .chain()
+                .after(sync_blocks),
+        )
         .add_systems(Update, (toggle_presence_overlay, sync_presence).chain())
         .add_systems(Update, sync_presence_overlay.after(sync_presence))
         .add_systems(
@@ -1231,7 +1252,29 @@ fn sync_blocks(
             .map(|b| (b.id, b.range.clone()))
             .collect();
 
-        for (id, _range) in to_spawn {
+        for (id, range) in to_spawn {
+            // `\slint` blocks are GUI widgets, not Typst: they carry an image
+            // node that `render_slint_blocks` fills from the Slint browser
+            // instead of a `VelystContent` vello scene. Skipping the
+            // `BlockView` spawn also takes them out of the Typst transform
+            // loop below, whose query no longer matches.
+            if let Some(spec) = slint_blocks::slint_block(&text_content[range]) {
+                let entity = commands
+                    .spawn((
+                        slint_blocks::SlintBlock::new(id, spec.width, spec.height),
+                        ImageNode::default(),
+                        // Matches the frame size, so the blit is 1:1.
+                        Node {
+                            width: Val::Px(spec.width as f32),
+                            height: Val::Px(spec.height as f32),
+                            ..default()
+                        },
+                    ))
+                    .id();
+                blocks.entities.insert(id, entity);
+                continue;
+            }
+
             let source = Source::new(
                 FileId::new(RootedPath::new(
                     VirtualRoot::Project,
@@ -1365,6 +1408,301 @@ fn sync_blocks(
     }
 
     reveal.key = new_key;
+}
+
+/// Compile and rasterise every `\slint` block whose DSL or size changed,
+/// publishing the pixels as a Bevy `Image` on the block's [`ImageNode`].
+///
+/// Ordered after [`sync_blocks`] so freshly spawned block entities exist on the
+/// first pass, and before [`handle_slint_input`] so a widget has a live browser
+/// instance by the time input arrives. Slint itself runs in the
+/// `mathed_slint_browser` helper process — see the `slint_blocks` module for why
+/// that boundary is deliberate.
+fn render_slint_blocks(
+    editor: Res<EditorDoc>,
+    blocks: Res<Blocks>,
+    mut browser: ResMut<slint_blocks::SlintBrowserHandle>,
+    mut query: Query<(Entity, &mut slint_blocks::SlintBlock, &mut ImageNode)>,
+    mut images: ResMut<Assets<Image>>,
+    mut known_count: Local<usize>,
+) {
+    let text = editor.doc.text();
+    let mut live: HashSet<u64> = HashSet::new();
+    let mut created = false;
+
+    for block in blocks.index.blocks.iter() {
+        let Some(&entity) = blocks.entities.get(&block.id) else {
+            continue;
+        };
+        // Blocks that are not `\slint` blocks have no `SlintBlock`, so the
+        // query misses and they are skipped for free.
+        let Ok((_, mut slint_block, mut node)) = query.get_mut(entity) else {
+            continue;
+        };
+        let Some(spec) = slint_blocks::slint_block(&text[block.range.clone()]) else {
+            continue;
+        };
+        live.insert(slint_block.id.0);
+        if slint_block.is_synced(&spec) {
+            continue;
+        }
+        let Some(client) = browser.get() else {
+            continue;
+        };
+        // Mark *before* the round trip so a block whose DSL does not compile is
+        // retried only when its text changes, not on every frame.
+        slint_block.mark_synced(&spec);
+        // A bare `\slint` marker with no body has nothing to draw. Creating
+        // nothing is deliberate: the placeholder stays blank.
+        if spec.source.is_empty() {
+            continue;
+        }
+        // `CREATE` replaces any instance already holding this id, so a source
+        // or size change needs no explicit destroy.
+        if let Some(frame) = client.create(slint_block.id.0, &spec) {
+            slint_block.mark_instantiated();
+            node.image = images.add(image_from_frame(frame));
+        }
+        created = true;
+    }
+
+    // A block that left the document would otherwise leave its widget alive in
+    // the browser for the life of the session. Only worth a round trip when the
+    // block set can actually have changed.
+    if created || *known_count != blocks.index.blocks.len() {
+        *known_count = blocks.index.blocks.len();
+        if let Some(client) = browser.get() {
+            for id in client.instances() {
+                if !live.contains(&id) {
+                    client.destroy(id);
+                }
+            }
+        }
+    }
+}
+
+/// Upload a browser frame as a Bevy texture.
+fn image_from_frame(frame: slint_blocks::Frame) -> Image {
+    Image::new(
+        Extent3d {
+            width: frame.width,
+            height: frame.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        frame.rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        // MAIN_WORLD as well as RENDER_WORLD: `bevy_ui`'s image measure reads
+        // the asset to size the node.
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// Which `\slint` widget has keyboard focus — the last one the user clicked.
+#[derive(Resource, Default)]
+struct SlintFocus(Option<Entity>);
+
+/// Pointer bookkeeping for routing events to the widget under the cursor.
+#[derive(Default)]
+struct SlintPointer {
+    hovered: Option<Entity>,
+    last_pos: Option<(f32, f32)>,
+}
+
+/// Forward mouse and keyboard input into the `\slint` widget under the cursor
+/// (pointer) or the last one clicked (keyboard), then refresh its texture from
+/// the redrawn frame the browser returns.
+///
+/// mathed has no caret inside a widget, so focus is click-to-focus. Coordinates
+/// are translated into the widget's own space, because Slint positions events
+/// relative to its window — which here is exactly the block.
+fn handle_slint_input(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<Key>>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut key_events: MessageReader<KeyboardInput>,
+    window_query: Query<&Window>,
+    mut browser: ResMut<slint_blocks::SlintBrowserHandle>,
+    mut focus: ResMut<SlintFocus>,
+    mut pointer: Local<SlintPointer>,
+    mut query: Query<(
+        Entity,
+        &slint_blocks::SlintBlock,
+        &mut ImageNode,
+        &ComputedNode,
+        &GlobalTransform,
+    )>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Ok(window) = window_query.single() else {
+        return;
+    };
+
+    // Which widget is under the pointer, and where within it.
+    let mut hover: Option<(Entity, f32, f32)> = None;
+    if let Some(cursor) = window.cursor_position() {
+        for (entity, _block, _node, computed, transform) in &query {
+            let origin = node_origin(transform, computed);
+            let local = cursor - origin;
+            if local.x >= 0.0
+                && local.y >= 0.0
+                && local.x <= computed.size.x
+                && local.y <= computed.size.y
+            {
+                hover = Some((entity, local.x, local.y));
+                break;
+            }
+        }
+    }
+
+    let hover_entity = hover.map(|(entity, _, _)| entity);
+    let mut outgoing: Vec<(Entity, slint_blocks::Event)> = Vec::new();
+
+    // Leaving a widget must tell it, or its hover and pressed states stick.
+    if pointer.hovered != hover_entity {
+        if let Some(previous) = pointer.hovered {
+            outgoing.push((previous, slint_blocks::Event::PointerExited));
+        }
+        pointer.hovered = hover_entity;
+        // Re-entering needs a fresh move even if the local coordinates match.
+        pointer.last_pos = None;
+    }
+
+    if let Some((entity, x, y)) = hover {
+        if pointer.last_pos != Some((x, y)) {
+            pointer.last_pos = Some((x, y));
+            outgoing.push((entity, slint_blocks::Event::PointerMoved { x, y }));
+        }
+        for button in mouse.get_just_pressed() {
+            if let Some(button) = slint_button(*button) {
+                outgoing.push((entity, slint_blocks::Event::PointerPressed { x, y, button }));
+            }
+        }
+        for button in mouse.get_just_released() {
+            if let Some(button) = slint_button(*button) {
+                outgoing.push((
+                    entity,
+                    slint_blocks::Event::PointerReleased { x, y, button },
+                ));
+            }
+        }
+        for scrolled in wheel.read() {
+            let (delta_x, delta_y) = scroll_delta(scrolled);
+            outgoing.push((
+                entity,
+                slint_blocks::Event::PointerScrolled {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                },
+            ));
+        }
+        // Click-to-focus: mathed's caret model does not reach inside a widget.
+        if mouse.just_pressed(MouseButton::Left) {
+            focus.0 = Some(entity);
+        }
+    }
+
+    // Keyboard goes to the focused widget, if it is still around.
+    if let Some(target) = focus.0 {
+        for event in key_events.read() {
+            let Some(text) = slint_key_text(&event.logical_key) else {
+                continue;
+            };
+            let event = match event.state {
+                ButtonState::Pressed => slint_blocks::Event::KeyPressed { text },
+                ButtonState::Released => slint_blocks::Event::KeyReleased { text },
+            };
+            outgoing.push((target, event));
+        }
+        for key in keys.get_just_pressed() {
+            let Some(text) = slint_key_text(key) else {
+                continue;
+            };
+            outgoing.push((target, slint_blocks::Event::KeyPressed { text }));
+        }
+    }
+
+    if outgoing.is_empty() {
+        return;
+    }
+    let Some(client) = browser.get() else {
+        return;
+    };
+
+    for (entity, event) in outgoing {
+        let Ok((_, block, mut node, _, _)) = query.get_mut(entity) else {
+            // The widget was despawned between hover and dispatch.
+            if focus.0 == Some(entity) {
+                focus.0 = None;
+            }
+            continue;
+        };
+        // Events need a live instance. `render_slint_blocks` runs first in
+        // this chain, so this only bites for an empty or broken body.
+        if !block.is_instantiated() {
+            continue;
+        }
+        if let Some(frame) = client.event(block.id.0, &event) {
+            // Reassigning drops the previous handle, and `Assets` removes an
+            // asset once its last strong handle goes — so re-renders do not
+            // accumulate textures.
+            node.image = images.add(image_from_frame(frame));
+        }
+    }
+}
+
+fn slint_button(button: MouseButton) -> Option<slint_blocks::Button> {
+    Some(match button {
+        MouseButton::Left => slint_blocks::Button::Left,
+        MouseButton::Right => slint_blocks::Button::Right,
+        MouseButton::Middle => slint_blocks::Button::Middle,
+        _ => slint_blocks::Button::Other,
+    })
+}
+
+/// Line deltas are far too coarse for a widget's scrollbar; treat a line as a
+/// conventional ~20px and pass pixel deltas through unchanged.
+fn scroll_delta(scrolled: &MouseWheel) -> (f32, f32) {
+    match scrolled.unit {
+        MouseScrollUnit::Line => (scrolled.x * 20.0, scrolled.y * 20.0),
+        MouseScrollUnit::Pixel => (scrolled.x, scrolled.y),
+    }
+}
+
+/// Translate a Bevy key into the wire form Slint expects: either a literal
+/// character, or `@name` for a named key, which the browser resolves to Slint's
+/// own key codes. That keeps Slint's private codepoint table inside the crate
+/// that already depends on Slint.
+fn slint_key_text(key: &Key) -> Option<String> {
+    let name = match key {
+        Key::Character(text) => return Some(text.to_string()),
+        Key::ArrowUp => "up",
+        Key::ArrowDown => "down",
+        Key::ArrowLeft => "left",
+        Key::ArrowRight => "right",
+        Key::Enter => "return",
+        Key::Escape => "escape",
+        Key::Backspace => "backspace",
+        Key::Delete => "delete",
+        Key::Tab => "tab",
+        Key::Space => "space",
+        Key::Home => "home",
+        Key::End => "end",
+        Key::PageUp => "pageup",
+        Key::PageDown => "pagedown",
+        Key::Insert => "insert",
+        Key::Shift => "shift",
+        Key::Control => "control",
+        Key::Alt => "alt",
+        Key::AltGraph => "altgr",
+        Key::CapsLock => "capslock",
+        Key::ScrollLock => "scrolllock",
+        Key::ContextMenu => "menu",
+        _ => return None,
+    };
+    Some(slint_blocks::named_key(name))
 }
 
 fn handle_mouse(

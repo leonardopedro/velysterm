@@ -1,0 +1,63 @@
+= mathed + Slint
+
+A block that starts with `\slint` is not typeset by Typst. Its body — everything
+after the marker — is [Slint](https://slint.dev) DSL, compiled and rasterised by
+the `mathed_slint_browser` helper process, and shown inline as a live widget.
+
+The widgets below are **interactive**: click one to give it keyboard focus, then
+type into it. Click elsewhere in the document to hand focus back.
+
+\slint 480x200
+import { VerticalBox, LineEdit, Button } from "std-widgets.slint";
+
+export component Demo inherits Window {
+    background: #203040;
+    VerticalBox {
+        padding: 16px;
+        spacing: 10px;
+        // `Text` is a Slint builtin, not a std-widget — do not import it.
+        Text { text: "rendered by the Slint mini-browser"; color: #e0e8f0; }
+        LineEdit { text: "hello slint"; }
+        Button { text: "click me"; }
+    }
+}
+
+The marker may carry a size, `\slint WIDTHxHEIGHT`, as above. It defaults to
+480x240 and is clamped to 4096 so a typo cannot ask for a 100000-pixel buffer.
+A widget is a normal Slint component, so state survives between frames — this
+counter keeps your clicks:
+
+\slint 260x110
+import { Button, VerticalBox } from "std-widgets.slint";
+
+export component Counter inherits Window {
+    background: #16202c;
+    in-out property <int> clicks: 0;
+    // Behind everything, so a click anywhere in the widget counts. The button
+    // declared after it still wins where the two overlap.
+    TouchArea {
+        clicked => { root.clicks += 1; }
+    }
+    VerticalBox {
+        padding: 10px;
+        spacing: 6px;
+        Text {
+            text: "clicks: " + root.clicks;
+            color: #e0e8f0;
+            font-size: 20px;
+            horizontal-alignment: center;
+        }
+        Button {
+            text: "increment";
+            clicked => { root.clicks += 1; }
+        }
+    }
+}
+
+Everything after a blank line is ordinary Typst again — headings, math and hidden
+markers all keep working around a widget:
+
+$ \int_0^1 x^2 \,dx = \tfrac{1}{3} $
+
+The block scanner keeps a `\slint` block whole across the blank lines inside its
+component, so the DSL does not need to be written on a single line.

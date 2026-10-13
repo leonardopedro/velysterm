@@ -128,10 +128,14 @@ EOF
           _STDCXX="$(dirname "$(cc -print-file-name=libstdc++.so.6)")"
           export RUSTFLAGS="''${RUSTFLAGS:+$RUSTFLAGS }-L$_FT -L$_FC -C link-arg=-Wl,-rpath,$_FT -C link-arg=-Wl,-rpath,$_FC -C link-arg=-Wl,-rpath,$_STDCXX"
 
-          echo "[velysterm-shell] wayland/xkb/X11 dev libs + pkg-config on PATH"
-          echo "[velysterm-shell] Vulkan ICD: RADV (AMD) + lavapipe via VK_DRIVER_FILES"
-          echo "[velysterm-shell] generated libudev.pc -> $PKG_CONFIG_PATH"
-          echo "[velysterm-shell] freetype/fontconfig/libstdcxx rpath -> $_FT, $_FC, $_STDCXX (mathed_skia included)"
+          # stderr, not stdout: `mathed_mini --layout-json` (and anything
+          # else piping this shell's stdout as a data contract — emthin's
+          # scripts/agent/preview.sh prints ONE compact JSON line) would
+          # otherwise be polluted by these banners.
+          echo "[velysterm-shell] wayland/xkb/X11 dev libs + pkg-config on PATH" >&2
+          echo "[velysterm-shell] Vulkan ICD: RADV (AMD) + lavapipe via VK_DRIVER_FILES" >&2
+          echo "[velysterm-shell] generated libudev.pc -> $PKG_CONFIG_PATH" >&2
+          echo "[velysterm-shell] freetype/fontconfig/libstdcxx rpath -> $_FT, $_FC, $_STDCXX (mathed_skia included)" >&2
         '';
       };
 

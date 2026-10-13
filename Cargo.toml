@@ -3,6 +3,24 @@ resolver = "2"
 members = ["crates/*", "examples/*"]
 exclude = [
     "/.github/",
+    # Standalone workspace on purpose: `mathed_slint_browser` runs the Slint
+    # runtime that renders mathed's inline `\slint` blocks. Slint's dependency
+    # graph resolves an *optional* Skia renderer (skia-safe 0.153), and Cargo
+    # resolves optional deps into the lockfile even when no feature enables
+    # them — so sharing this workspace would collide with `mathed_skia`'s
+    # skia-safe 0.90 (both declare `links = "skia"`, and only one version of a
+    # `links` package may exist per resolve). It is also a process boundary
+    # for Slint's thread-local, `!Send` platform context.
+    "crates/mathed_slint_browser",
+    # Standalone workspace on purpose: `mathed_android` is the document engine
+    # as an Android app — a `cdylib` that links `libandroid`/`liblog` and
+    # exports `android_main`. Android-only FFI must not reach the host gates,
+    # so it is its own workspace (with its own lockfile) and the root
+    # `cargo test --workspace` never sees it. Everything but `src/android.rs`
+    # is target-independent, so its engine and debug protocol are still tested
+    # on the host by `cargo test --manifest-path crates/mathed_android/Cargo.toml`.
+    # The APK is built by `scripts/build-android.sh`.
+    "crates/mathed_android",
 ]
 
 [workspace.package]

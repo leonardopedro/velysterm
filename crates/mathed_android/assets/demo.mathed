@@ -1,0 +1,27 @@
+= mathed on Android
+
+This page is laid out by the same document engine the desktop frontends use:
+mathed markers through the transform, Typst's own pagination, and the CPU
+rasterizer — drawn straight into an `ANativeWindow` with no GPU and no web
+view in the loop.
+
+The shell is a document. An `\app` statement reserves a slot in the page flow,
+exactly as it does in emthin, and the slot is drawn where the page flow put it:
+
+#1 Terminal #2 \app(#1, #2, 320, 180, "foot", launch: "foot")
+
+#3 Chat #4 \app(#3, #4, 320, 180, "chat")
+
+There is no live client to composite on Android, so a slot renders as reserved
+space with its caption — the document half of emthin's model, which is the half
+that is the layout authority anyway.
+
+Math still typesets around all of it:
+
+$ x^2 + y^2 = z^2 $
+
+$ sum_(k=0)^n k = (n (n+1)) / 2 $
+
+Tap anywhere to put the caret under your finger; type to edit the text. Every
+edit reflows the page, and the caret follows the glyph index back to the byte
+offset it came from — the same index the desktop editor uses for cursor motion.

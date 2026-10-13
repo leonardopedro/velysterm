@@ -26,6 +26,7 @@ document (Loro CRDT)
 | `mathed_mini` | Bevy-free CPU frontend (winit + softbuffer). Full editor with caret, kernel bridge, translator pipeline. |
 | `mathed` | Bevy editor — thin wrapper over `mathed_mini::KernelBridge`. |
 | `mathed_biblio` | Hayagriva citation backend. |
+| `mathed_slint_browser` | Headless Slint runtime — renders mathed's inline `\slint` blocks. **Its own workspace** (Slint resolves an optional `skia-safe 0.153`, which cannot share a Cargo resolve with `mathed_skia`'s 0.90: both declare `links = "skia"`). Build it with `--manifest-path`; it is not in `--workspace`. Try `demo-slint.mathed`. |
 | `kernel_client` | Worker-thread client over `prob_kernel::Session`. `unfer_agent` NDJSON binary (AI-agent interface). |
 | `delta_algebra` / `delta_sirk` | Orphaned GPU (wgpu) experiments — archived. |
 
@@ -76,7 +77,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 935 cargo (917 workspace incl. Bevy `mathed` + doc-tests + 18 `mathed_skia`, all under `nix develop`) | last_verified: 2026-10-08 -->
+<!-- status: verified | tests: 976 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-13 -->
 
 Note: the workspace needs the flake devshell —
 `nix develop -c cargo test --workspace` is the one command for all **935**

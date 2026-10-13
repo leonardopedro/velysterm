@@ -1,0 +1,28 @@
+[package]
+name = "mathed_slint_browser"
+description = "Headless Slint renderer for mathed's inline `\\slint` blocks. Deliberately its own workspace — see the root Cargo.toml `exclude` note."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Detached from the `velysterm` workspace. Slint's dependency graph resolves an
+# *optional* Skia renderer (`skia-safe 0.153`), and Cargo resolves optional
+# dependencies into the lockfile even when no feature enables them. Sharing a
+# resolve with `mathed_skia`'s `skia-safe 0.90` is impossible: both declare
+# `links = "skia"`, and only one version of a `links` package may exist per
+# resolve.
+[workspace]
+
+[dependencies]
+# Headless on purpose: `default-features = false` drops Slint's winit/Qt
+# windowing backends, the accessibility bridge and every GPU renderer. We drive
+# a `MinimalSoftwareWindow` through the CPU software renderer, so Slint never
+# opens a window and never starts an event loop. `compat-1-18` pins the DSL
+# language level so a document keeps compiling after a Slint upgrade.
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-18", "renderer-software"] }
+slint-interpreter = { version = "1.18", default-features = false, features = ["std", "compat-1-18", "renderer-software"] }
+# `Compiler::build_from_source` is `async` only to accommodate a custom file
+# loader. We install no loader, so `spin_on` drives it to completion on the
+# calling thread.
+spin_on = "0.1"

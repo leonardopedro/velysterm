@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  mathed on Android.
+
+  `android:hasCode="false"` is the load-bearing attribute: this app has no Java
+  at all. `android.app.NativeActivity` is a framework class, the launcher
+  starts it directly, and it loads the library named by `android.app.lib_name`
+  and calls the `android_main` symbol this crate exports. That is why there is
+  no Gradle project, no dex and no build system beyond `aapt2` + `zipalign` +
+  `apksigner` (see scripts/build-android.sh) — the entire app is the cdylib.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.velyst.mathed">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <!--
+      The debug protocol listens on TCP so the agent loop can drive and observe
+      the app from outside the container. Without it the GUI on a phone is a
+      black box: no terminal, no stderr, no layout dump to a file.
+      (Note for later edits: XML comments may not contain a double hyphen, so
+      command line flags cannot be quoted verbatim in here.)
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="mathed"
+        android:hasCode="false"
+        android:extractNativeLibs="true"
+        android:debuggable="true">
+
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="mathed"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|density|uiMode"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
+
+            <!-- The name of the shared library in lib/<abi>/, minus the `lib`
+                 prefix and `.so` suffix. -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="mathed_android" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

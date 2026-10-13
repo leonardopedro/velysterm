@@ -1,0 +1,67 @@
+# `mathed_android` — the mathed document engine as an Android app.
+#
+# Its own workspace (hence the empty `[workspace]` below, and the matching
+# entry in the root manifest's `exclude`), for the same reason
+# `mathed_slint_browser` is one: this crate only makes sense for one target.
+# `cargo build`/`cargo test --workspace` at the repo root must stay a plain
+# host build, and a crate whose library is a `cdylib` that links `libandroid`
+# and exports `ANativeActivity_onCreate` cannot be a workspace member without
+# dragging Android-only FFI into every host gate.
+#
+# Everything except `src/android.rs` is target-independent on purpose, so the
+# engine, the debug protocol and the probe artefacts can be driven and tested
+# on the host — that is what makes the GUI debuggable autonomously rather than
+# by looking at a phone.
+#
+# Build it in place:
+#
+#     cargo test --manifest-path crates/mathed_android/Cargo.toml
+#     bash scripts/build-android.sh          # the APK
+[workspace]
+
+[package]
+name = "mathed_android"
+description = "The mathed document engine as an Android app: Typst paged layout on the CPU, blitted to an ANativeWindow, with the agent-loop debug protocol."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/voxell-tech/velyst"
+publish = false
+
+[lib]
+# The Android loader dlopens `lib<android.app.lib_name>.so`, which the manifest
+# sets to this name.
+name = "mathed_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mathed_core = { path = "../mathed_core" }
+# `default-features = false` drops both `gui` and `kernel`: this frontend owns
+# its own window and talks to the NDK directly, and the unfer kernel's
+# dependency tree (quantrs2 -> scirs2-core) does not build for Android. What is
+# left is the document engine, which is all an Android frontend can use anyway.
+mathed_mini = { path = "../mathed_mini", default-features = false }
+
+# PNG encoding for the visual tier of the debug loop (`shot`).
+png = "0.18"
+# The debug protocol is JSON: serde for the event/state types, serde_json for
+# the envelope, base64 for carrying a screenshot inside one line.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# The Android app lifecycle (NativeActivity glue, window, input queue). Without
+# `native-activity` this crate would have to hand-roll the `ANativeActivity`
+# struct layout, which android-activity already gets right.
+# The APK ships this library, so size is user-visible: an unstripped release
+# build of the Typst + engine tree is ~60 MB, and the debug info in it is worth
+# nothing on a device that has no debugger attached.
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", default-features = false, features = [
+    "native-activity",
+] }

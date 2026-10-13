@@ -4,6 +4,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use imaging::RgbaImage;
+use imaging::peniko::kurbo::Affine;
+use imaging::record::Scene;
 use imaging_vello_cpu::VelloCpuRenderer;
 use mathed_core::figures::FigureRect;
 use mathed_core::glyphs::{GlyphIndex, build_glyph_index};
@@ -162,20 +164,60 @@ fn layout_world(world: &MiniWorld, width_pt: f64) -> Result<Frame, RenderError> 
     world.layout(&content, region).ok_or(RenderError::Layout)
 }
 
-/// Rasterize a laid-out [`Frame`] to an RGBA8 image on the CPU.
+/// Rasterize a laid-out [`Frame`] to an RGBA8 image on the CPU, at the
+/// workspace's uniform scale (1 px per point).
 fn rasterize(frame: &Frame) -> Result<RgbaImage, RenderError> {
+    rasterize_at(frame, 1.0)
+}
+
+/// Rasterize a laid-out [`Frame`] at `scale` pixels per point.
+///
+/// At `1.0` this is the direct path: the frame's own point coordinates are the
+/// target's pixel coordinates. Above `1.0` the frame is recorded into an
+/// [`imaging::Scene`] and the scale is baked into that command stream before
+/// rasterizing, so glyphs are **drawn** at the higher resolution rather than
+/// the finished raster being resampled afterwards. That distinction is the
+/// whole point on a dense display: a resampled 1× raster is a blur no amount
+/// of interpolation removes, while a 2× draw is a genuinely larger outline.
+///
+/// Geometry is deliberately unaffected: [`GlyphIndex`](mathed_core::glyphs::GlyphIndex),
+/// [`FigureRect`](mathed_core::figures::FigureRect) and
+/// [`PageLayout::width`]/[`height`](PageLayout) stay in points — the space
+/// every caller already works in. Only the returned raster is bigger, so a
+/// frontend that needs to map a caret or a figure rect *into* the image (to
+/// draw an overlay, or to hit-test a tap) multiplies by the scale it asked
+/// for. `mathed_android`'s engine does exactly that.
+///
+/// A non-finite or non-positive `scale` is treated as `1.0`: a bad device
+/// density should not take the layout down with it.
+pub fn rasterize_at(frame: &Frame, scale: f32) -> Result<RgbaImage, RenderError> {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
     let size = frame.size();
-    let w = size.x.to_pt().ceil().max(1.0);
-    let h = size.y.to_pt().ceil().max(1.0);
+    let w = (size.x.to_pt() * f64::from(scale)).ceil().max(1.0);
+    let h = (size.y.to_pt() * f64::from(scale)).ceil().max(1.0);
     if w > f64::from(u16::MAX) || h > f64::from(u16::MAX) {
         return Err(RenderError::TooLarge);
     }
+    let (w, h) = (w as u16, h as u16);
 
     // CPU (software) rasterizer — no GPU, runs on constrained
     // hardware.
-    let mut renderer = VelloCpuRenderer::new(w as u16, h as u16);
-    typst_imaging::render_frame(frame, &mut renderer);
-    renderer.finish().map_err(|_| RenderError::Raster)
+    let mut renderer = VelloCpuRenderer::new(w, h);
+    if scale == 1.0 {
+        typst_imaging::render_frame(frame, &mut renderer);
+        return renderer.finish().map_err(|_| RenderError::Raster);
+    }
+    let mut recorded = Scene::new();
+    typst_imaging::render_frame(frame, &mut recorded);
+    let mut scaled = Scene::new();
+    scaled.append_transformed(&recorded, Affine::scale(f64::from(scale)));
+    renderer
+        .render_scene(&scaled, w, h)
+        .map_err(|_| RenderError::Raster)
 }
 
 /// Lay out and rasterize the world's current document to an RGBA8
@@ -188,6 +230,8 @@ pub fn render_world(world: &MiniWorld, width_pt: f64) -> Result<RgbaImage, Rende
 /// Rasterize an already-laid-out [`Frame`] — the shared rasterizer,
 /// exposed so the paged export can rasterize each paginated page
 /// frame individually (1 px/pt, the workspace's uniform scale).
+///
+/// [`rasterize_at`] is the same rasterizer at an explicit device scale.
 pub fn rasterize_frame(frame: &Frame) -> Result<RgbaImage, RenderError> {
     rasterize(frame)
 }
@@ -225,6 +269,35 @@ pub fn layout_doc_paged(
     doc_text: &str,
     opts: &TransformOptions,
 ) -> Result<Vec<PageLayout>, RenderError> {
+    layout_doc_paged_scaled(doc_text, opts, 1.0)
+}
+
+/// Like [`layout_doc_paged`], but rasterize every page at `scale` pixels per
+/// point — the device-density knob a frontend on a dense display needs.
+///
+/// The layout itself does not change with the scale (Typst lays the page out
+/// in points; paging, glyph positions and figure rects are identical), so this
+/// is free of surprises for anything that consumed [`layout_doc_paged`]
+/// geometry: only [`PageLayout::image`] is bigger. Multiply the scale in when
+/// mapping point-space geometry into that image.
+///
+/// Cost scales with area, and every page is rasterized, so a frontend that
+/// follows a device density should pass what it actually displays: 2× on a
+/// 600×840 pt page is 4× the pixels of 1×.
+pub fn layout_doc_paged_scaled(
+    doc_text: &str,
+    opts: &TransformOptions,
+    scale: f32,
+) -> Result<Vec<PageLayout>, RenderError> {
+    layout_doc_paged_inner(doc_text, opts, scale)
+}
+
+/// The paged pipeline, with the scale threaded through.
+fn layout_doc_paged_inner(
+    doc_text: &str,
+    opts: &TransformOptions,
+    scale: f32,
+) -> Result<Vec<PageLayout>, RenderError> {
     COMPILE_PASSES.fetch_add(1, Ordering::Relaxed);
     let render = doc_to_render_with(doc_text, opts);
     let markup = format!("{THEME_PRELUDE}{}", render.text);
@@ -241,7 +314,7 @@ pub fn layout_doc_paged(
                 THEME_PRELUDE.len(),
             );
             let figures = mathed_core::figures::figures_in_frame(&page.frame);
-            let image = rasterize(&page.frame)?;
+            let image = rasterize_at(&page.frame, scale)?;
             let (width, height) = (image.width, image.height);
             Ok(PageLayout {
                 image,
@@ -354,7 +427,7 @@ pub fn layout_doc_with(
 /// font is the fix that actually matches that design, not just a
 /// per-glyph patch: every character (not just same-glyph pairs) gets
 /// the same advance.
-const THEME_PRELUDE: &str = "#set text(fill: white, size: 17pt, \
+pub(crate) const THEME_PRELUDE: &str = "#set text(fill: white, size: 17pt, \
     font: \"DejaVu Sans Mono\", kerning: false, \
     bottom-edge: \"descender\", ligatures: false)\n";
 
@@ -521,6 +594,65 @@ pub fn render_block_range(
 mod tests {
     #![allow(clippy::single_range_in_vec_init)]
     use super::*;
+
+    // ── device scale ─────────────────────────────────────────────────────
+
+    /// Pixels something was drawn into. The page is white text on
+    /// transparent, so any non-zero alpha is ink.
+    fn ink(image: &RgbaImage) -> usize {
+        image
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count()
+    }
+
+    #[test]
+    fn a_scaled_raster_draws_the_page_bigger_instead_of_blowing_up_pixels() {
+        // The claim the whole device-density path rests on: at 2×, Typst's
+        // glyphs are *drawn* larger, not resampled afterwards. Ink coverage is
+        // how that is visible from outside — a 1× raster in a 2× buffer would
+        // leave the count unchanged, and a blur would leave it at ~1× too.
+        let doc = "= Scale\n\nSome text with $ x^2 $ and enough words to make ink.\n";
+        let one = layout_doc_paged(doc, &TransformOptions::default()).expect("1x lays out");
+        let two =
+            layout_doc_paged_scaled(doc, &TransformOptions::default(), 2.0).expect("2x lays out");
+
+        assert_eq!(one.len(), two.len(), "paging does not depend on the scale");
+        let (a, b) = (&one[0], &two[0]);
+        assert!(
+            (b.width as f32 - 2.0 * a.width as f32).abs() <= 2.0,
+            "the 2x raster is twice as wide: {} vs {}",
+            a.width,
+            b.width
+        );
+        // Geometry stays in points — the contract every caller relies on.
+        assert_eq!(a.glyphs.entries.len(), b.glyphs.entries.len());
+        assert_eq!(a.figures.len(), b.figures.len());
+
+        let (ink1, ink2) = (ink(&a.image), ink(&b.image));
+        assert!(ink1 > 0, "the 1x page has ink to compare against");
+        let ratio = ink2 as f32 / ink1 as f32;
+        assert!(
+            (3.0..=5.0).contains(&ratio),
+            "2x should cover ~4x the pixels: {ink1} → {ink2} ({ratio:.2}x)"
+        );
+    }
+
+    #[test]
+    fn a_nonsense_scale_falls_back_to_one_rather_than_failing_the_layout() {
+        let nominal = layout_doc_paged("hi", &TransformOptions::default()).expect("1x");
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let pages = layout_doc_paged_scaled("hi", &TransformOptions::default(), bad)
+                .unwrap_or_else(|e| panic!("scale {bad} must fall back, got {e:?}"));
+            assert_eq!(
+                pages[0].width, nominal[0].width,
+                "scale {bad} means 1.0, not a broken page"
+            );
+        }
+    }
 
     // ── app figures ───────────────────────────────────────────────────
 

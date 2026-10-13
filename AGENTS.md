@@ -17,10 +17,11 @@ codes, typed repair hints.
     Model/event specs arrive as JSON and are parsed with
     `serde_json::from_str::<ModelSpec>` / `EventPredicate` from
     `unfer_protocol`; parse errors carry UK-1002/1003 with `ReplaceValue`
-    hints. Ops come from `unfer_protocol::ops::AGENT_OPS` (36 ops across the
-    session / did / content / consensus / cert / auction / logos-ode / export
-    namespaces). Every failure carries a `Diagnostic` with hints; unknown op
-    → UK-1001 + `ReplaceValue` listing valid ops.
+    hints. Ops come from `unfer_protocol::ops::AGENT_OPS` — the count lives in
+    the generated `docs/AGENT_OP_CATALOG.md`, never in prose (`check-op-catalog`
+    fails a hand-written `N ops` that disagrees with the registry; unfer's H1
+    doctrine applied to this surface). Every failure carries a `Diagnostic`
+    with hints; unknown op → UK-1001 + `ReplaceValue` listing valid ops.
 - `crates/mathed_core/` — Loro doc model. `markers.rs` has the `PropKind` enum
   (`Model, Prior, Solver, Event, Prob` are kernel-bearing; `Bibliography, Cite`
   are biblio-bearing); `semantics.rs build_index` collects `KernelStatement`s
@@ -41,8 +42,63 @@ codes, typed repair hints.
   recomputed only on edit/resize, caret moves re-blit). Caret navigation:
   Left/Right/Home/End/Backspace/Delete/Up/Down. See
   `docs/mathed/MINI_FRONTEND_PLAN.md`.
+  `inspect` (`doc_geometry` → `--layout-json`) is the layout-only geometry
+  path: Typst paged layout, no raster, per-`\app`-figure rects + structural
+  diagnostics as one compact JSON line — the semantic tier of emthin's
+  agent loop (`emthin/docs/AGENT_LOOP.md`).
 - `crates/mathed_biblio/` — hayagriva citation backend. Resolves `\cite` keys
   from bibliography sources and populates `SemanticIndex.biblio_statements`.
+- `crates/mathed_android/` — **its own workspace** (see the `exclude` entry in
+  the root `Cargo.toml`): the same document engine behind an `ANativeWindow`
+  blit, with no GPU, no EGL and no Gradle — `scripts/build-android.sh` is the
+  whole build system (NDK cross-compile + `aapt2` + `apksigner`). The engine
+  is platform-free by design (`engine.rs` runs identically on the host), and
+  the app serves a debug socket (`src/ipc.rs`) for its whole life, which is
+  what makes a phone frontend loopable:
+  `scripts/android-agent.sh` (semantic + visual verbs) and
+  `scripts/android-e2e.sh` (30 checks against the running app on Waydroid).
+  `mathed_probe --local` drives the same `App` in-process with no device — the
+  semantic tier. See `docs/AGENT_LOOP.md`, including what a green e2e run does
+  **not** cover (the physical input path and the blit itself are not asserted).
+  The compliance gates (`cargo fmt`/`test`/`clippy`) do not reach this crate:
+  `cargo test --manifest-path crates/mathed_android/Cargo.toml` (29 tests).
+  Measured loop finding worth knowing before changing `engine.rs`: a
+  `set_window` that dirties on *every* call turns the render loop into a 60 fps
+  spin with nothing changing on screen; only the `frames`/`layouts` counters
+  can show that.
+- `crates/mathed_slint_browser/` — **its own workspace** (see the `exclude`
+  entry in the root `Cargo.toml`): the headless Slint runtime behind mathed's
+  inline `\slint` blocks. A block whose text starts with `\slint` is not
+  typeset by Typst — its body is Slint DSL, compiled and CPU-rasterised by this
+  helper, and shown in the document as a Bevy `ImageNode`
+  (`crates/mathed/src/slint_blocks.rs`). The unit of work is a stateful
+  **instance** (a `LineEdit` remembers what you typed), not a frame:
+  `CREATE` compiles and keeps one alive keyed by block id, `EVENT` feeds it
+  input and returns the redrawn frame, `DESTROY` drops it, `LIST` lets the
+  client GC instances whose block left the document. mathed forwards pointer
+  and keyboard input into the widget under the cursor, with click-to-focus for
+  the keyboard. A `\slint` block may declare its size as `\slint WxH`
+  (default 480x240, clamped to 4096).
+  The process boundary is deliberate, twice over: Slint's dependency graph
+  resolves an *optional* Skia renderer (`skia-safe 0.153`) and Cargo resolves
+  optional deps into the lockfile even when no feature enables them, which
+  collides with `mathed_skia`'s `skia-safe 0.90` (both declare
+  `links = "skia"`, one version per resolve); and
+  `slint::platform::set_platform` is thread-local with a `!Send` runtime,
+  which fights Bevy's task pool. Wire protocol is length-prefixed
+  `CREATE`/`EVENT`/`DESTROY`/`LIST` over stdin/stdout — see the module docs of
+  both crates.
+  Build it separately (it is *not* in `--workspace`):
+  `nix develop -c cargo build --release --manifest-path crates/mathed_slint_browser/Cargo.toml`.
+  mathed locates it by walking up from its own executable, or honours
+  `$MATHED_SLINT_BROWSER`; when it is missing the editor still runs and
+  `\slint` blocks stay blank. Demo document: `demo-slint.mathed`.
+  Measured on this machine (`tests/latency.rs`, 480x240, 12-element form):
+  `CREATE` (compile + first raster) p50 **30 ms**, `EVENT` (re-raster) p50
+  **0.7 ms**, scaling linearly with frame area. That is the evidence for the
+  two client knobs: the 10 s watchdog only guards a wedged helper, and hashing
+  the spec so an unchanged block never recompiles is what keeps editing
+  responsive (a recompile is ~44x an input round trip).
 - `crates/delta_algebra/` / `crates/delta_sirk/` — GPU (wgpu) Hermite-
   recursion engine for Fock spaces, revived as workspace members (wgpu is
   already in the build graph via the Bevy `mathed` crate). The engine is
@@ -72,7 +128,17 @@ codes, typed repair hints.
   builds the headless render core. **The GUI cannot be run in a headless
   environment** (no display) — the Bevy-free frontend is verified by compile +
   link + unit-tested render path only. Do not record a GUI behaviour as verified
-  on the basis of a headless run.
+  on the basis of a headless run. The same limit applies to `\slint` blocks:
+  the whole pipeline up to a rasterised `Image` is covered by tests (including
+  one that renders `demo-slint.mathed` through the real helper), but *displaying*
+  that image in a Bevy window is not something a headless run can show.
+- `mathed_core::blocks::split_blocks` keeps a `\slint` block whole across the
+  blank lines inside its component — brace-balanced, `import { … }` lines
+  excluded from the count, string literals and `//` comments skipped. Keep it
+  in step with `slint_blocks::marker_rest` (the token-boundary rule for
+  `\slint`) — they must agree on what counts as a Slint block. The demo
+  document's `\slint` blocks are parsed by a test in both crates, so the
+  scanner, the spec parser and the real renderer cannot drift apart.
 - `crates/velyst`, `crates/typst_imaging` and `crates/kanva` were **never
   modified in place** while they were vendored, and are now gone entirely
   (2026-09-30): `velyst` and `typst_imaging` are upstream git dependencies at
@@ -93,5 +159,28 @@ printf '{"id":"1","op":"version","params":{}}\n' | nix develop -c cargo run -p k
 #   -> {"id":"1","ok":true,...}
 nix develop -c cargo build -p mathed_mini --features gui   # winit + softbuffer link check
 nix develop -c cargo build -p mathed                       # heavy — Bevy
+# The Slint helper is outside the workspace, so build it explicitly *before*
+# `cargo test -p mathed` — the two slint_blocks tests that drive the real
+# helper skip themselves when it is absent, rather than failing.
+nix develop -c cargo build --release --manifest-path crates/mathed_slint_browser/Cargo.toml
+nix develop -c cargo test  --manifest-path crates/mathed_slint_browser/Cargo.toml
 nix develop -c python3 scripts/check-links                  # relative-link gate (CI: linkcheck.yml)
+nix develop -c python3 scripts/check-op-catalog             # AGENT_OPS ↔ dispatch ↔ docs/AGENT_OP_CATALOG.md
+                                                            # (--write regenerates the catalog after adding an op)
 ```
+
+`CHANGELOG.md` in this repo is **hand-curated** (1200+ lines of scoped
+entries) and stays the single source of truth — deliberately *not*
+git-cliff-generated like emthin/unfer/australVM, because two competing
+changelogs are worse than one manual one. Extend it in the same change
+as the feature it records.
+
+## Session hygiene
+
+A dirty tree at session end needs either a commit or a note in the
+session record saying what the edits are and why they are parked —
+unrecorded in-flight work across 20+ files has already made one review
+pass unable to tell deliberate state from accident. Related: the
+top-five file sizes that make this repo hard to review are tracked in
+`docs/MEGAFILE_DECOMPOSITION.md`; touch those files by following its
+extraction rules, not by growing them.
