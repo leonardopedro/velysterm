@@ -11,8 +11,14 @@ mathed_core = { workspace = true }
 kernel_client = { path = "../kernel_client" }
 # The translator pipeline + kernel bridge (P3 #10/#11). `default-features =
 # false` drops the winit/softbuffer `gui` frontend; we only use the headless
-# KernelBridge (translator → dispatcher → worker).
-mathed_mini = { path = "../mathed_mini", default-features = false }
+# KernelBridge (translator → dispatcher → worker), so the `kernel` feature
+# must be requested explicitly — without it `mathed_mini` compiles with
+# `KernelBridge`/`KernelResult` cfg'd out and `kernel_sys` cannot import
+# them (visible only in isolated `cargo check -p mathed`; a whole-workspace
+# build masks it via feature unification with mathed_mini's own defaults).
+# Safe unconditionally: `mathed` already depends on `kernel_client` and
+# `unfer_ffi` directly, so no dependency edge is added.
+mathed_mini = { path = "../mathed_mini", default-features = false, features = ["kernel"] }
 velyst = { workspace = true }
 bevy = { workspace = true }
 bevy_vello = { workspace = true }
