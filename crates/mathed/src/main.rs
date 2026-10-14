@@ -279,23 +279,40 @@ pub(crate) struct SemanticIndexWrapper(SemanticIndex);
 struct EditorDoc {
     doc: MathDoc,
     path: PathBuf,
+    /// Fingerprint of the file as last loaded or saved (P3): the
+    /// guard side of `format::save_snapshot_guarded`. `None` when the
+    /// file could not be read or parsed at load — in that case the
+    /// guarded save refuses to clobber whatever is on disk (the file
+    /// must be saved with explicit force, never silently overwritten).
+    stamp: Option<mathed_core::format::FileStamp>,
+    /// Set when a save was refused because the file changed on disk
+    /// (reject-and-notify). The next explicit save overwrites — the
+    /// notified "save again" is the explicit force.
+    save_conflict: bool,
 }
 
 impl EditorDoc {
     fn open_or_default(file: Option<PathBuf>) -> Self {
         let path = file.unwrap_or_else(|| PathBuf::from("untitled.mathed"));
-        let doc = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| MathDoc::from_snapshot(&bytes).ok())
-            .unwrap_or_else(|| {
-                MathDoc::with_text(
+        match mathed_core::format::load_with_stamp(&path) {
+            Ok((doc, stamp)) => Self {
+                doc,
+                path,
+                stamp: Some(stamp),
+                save_conflict: false,
+            },
+            Err(_) => Self {
+                doc: MathDoc::with_text(
                     "= mathed\n\nMarkers attach semantics: \
                      #1 $f(x)$ #2 \\function(#1,#2) names a function \
                      segment. Press Ctrl+Shift to inspect hidden \
                      markers, Ctrl+B to bold a selection.\n",
-                )
-            });
-        Self { doc, path }
+                ),
+                path,
+                stamp: None,
+                save_conflict: false,
+            },
+        }
     }
 }
 
@@ -836,7 +853,7 @@ fn handle_keyboard(
                     last_change.0 = Some(now);
                 }
             }
-            EditorCmd::Save => save(&mut editor),
+            EditorCmd::Save => save(&mut editor, &mut last_change, true),
             EditorCmd::ExportTyp => {
                 let text = editor.doc.text();
                 let s = scan(text);
@@ -1158,7 +1175,15 @@ fn notify_doc_changed(scheduler: &mut Scheduler, now: f64) {
 
 /// Persist segment properties as loro rich-text marks, then snapshot
 /// to disk.
-fn save(editor: &mut EditorDoc) {
+///
+/// P3 (reject-and-notify, doctrine adapted from pattern's
+/// `loro_sync::SyncedDoc` — see `ATTRIBUTION.md`): if the file changed
+/// on disk since load, the save is refused and the refusal is
+/// reported; a following explicit save overwrites (`save_conflict` is
+/// the armed force). Autosave never forces — only an explicit save
+/// does. `last` is the autosave dirty timer: cleared on every save
+/// attempt so a burst of edits autosaves once, not once per frame.
+fn save(editor: &mut EditorDoc, last: &mut LastChange, explicit: bool) {
     let text = editor.doc.text().to_owned();
     let s = scan(&text);
     for seg in resolve_segments(&s) {
@@ -1171,9 +1196,33 @@ fn save(editor: &mut EditorDoc) {
         }
     }
     editor.doc.commit();
-    match mathed_core::format::save_snapshot(&editor.doc, &editor.path) {
-        Ok(()) => info!("saved {}", editor.path.display()),
-        Err(e) => error!("save failed: {e}"),
+    let force = explicit && editor.save_conflict;
+    match mathed_core::format::save_snapshot_guarded(
+        &editor.doc,
+        &editor.path,
+        editor.stamp.as_ref(),
+        force,
+    ) {
+        Ok(stamp) => {
+            editor.stamp = Some(stamp);
+            editor.save_conflict = false;
+            last.0 = None;
+            info!("saved {}", editor.path.display());
+        }
+        Err(e @ mathed_core::format::SaveError::ExternalModification { .. }) => {
+            // Arm the notified force: the next explicit save overwrites.
+            editor.save_conflict = true;
+            last.0 = None;
+            if explicit {
+                error!("{e}");
+            } else {
+                warn!("autosave: {e}");
+            }
+        }
+        Err(e) => {
+            last.0 = None;
+            error!("save failed: {e}");
+        }
     }
 }
 
@@ -2061,11 +2110,13 @@ fn caret_blink(
     }
 }
 
-/// Autosave: if 2s have passed since the last change, save.
+/// Autosave: if 2s have passed since the last change, save once.
+/// `save` clears the timer, so an idle document is written a single
+/// time per edit burst (not once per frame).
 fn autosave(
     time: Res<Time>,
     mut editor: ResMut<EditorDoc>,
-    last: ResMut<LastChange>,
+    mut last: ResMut<LastChange>,
     searching: Res<Searching>,
     popup_state: Res<popup::PopupState>,
 ) {
@@ -2074,7 +2125,7 @@ fn autosave(
     };
     let now = time.elapsed_secs_f64();
     if now - t > 2.0 && !searching.active && popup_state.kind.is_none() {
-        save(&mut editor);
+        save(&mut editor, &mut last, false);
     }
 }
 
@@ -2104,5 +2155,62 @@ mod tests {
     fn scroll_degenerate_margin() {
         let r = scroll_adjust(50.0, 10.0, 0.0, 10.0, 30.0);
         assert!(r >= 0.0);
+    }
+
+    /// End-to-end save conflict, driven through `save()` exactly as the
+    /// keymap dispatches it (P3 / D3): create → external edit behind
+    /// the editor's back → explicit save refused → autosave still
+    /// refuses (never forces) → second explicit save overwrites (the
+    /// notified force). Recorded as scenario rows D1/D2 in
+    /// `scripts/SCENARIOS.md`, verified by `scripts/save-conflict-e2e.sh`.
+    #[test]
+    fn save_conflict_end_to_end() {
+        let path = std::env::temp_dir().join(format!(
+            "mathed_save_conflict_{}.mathed",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut editor = EditorDoc::open_or_default(Some(path.clone()));
+        let mut last = LastChange(None);
+
+        // 1. Clean create: file appears, no conflict, dirty timer cleared.
+        save(&mut editor, &mut last, true);
+        assert!(path.exists(), "first save must create the file");
+        assert!(!editor.save_conflict);
+        assert!(last.0.is_none(), "a save attempt clears the autosave timer");
+
+        // 2. Someone else rewrites the file behind the editor.
+        std::fs::write(&path, b"external content").unwrap();
+
+        // 3. Explicit Ctrl+S refuses (force requires an *armed* conflict),
+        //    leaves the external bytes intact, and arms the notified force.
+        save(&mut editor, &mut last, true);
+        assert!(editor.save_conflict, "refusal arms the explicit force");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"external content",
+            "a refused save must not clobber the external modification"
+        );
+
+        // 4. Autosave in the same state still refuses — it never forces,
+        //    even with the conflict armed.
+        save(&mut editor, &mut last, false);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"external content",
+            "autosave must never overwrite an external modification"
+        );
+        assert!(editor.save_conflict);
+
+        // 5. The second explicit save is the notified overwrite and
+        //    writes our snapshot (MAGIC header), resetting the state.
+        save(&mut editor, &mut last, true);
+        assert!(!editor.save_conflict, "successful save clears the conflict");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            bytes.starts_with(mathed_core::format::MAGIC),
+            "forced save writes the native snapshot"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
