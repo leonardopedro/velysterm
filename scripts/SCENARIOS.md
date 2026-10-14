@@ -39,8 +39,8 @@ behaviour of the `mathed` binary's real `save()` function (P3 of
 
 | id | scenario | expected | status |
 |---|---|---|---|
-| D1 | external modification is never clobbered: the file is rewritten behind the editor's back, then Ctrl+S | the save is refused (conflict armed), the external bytes are intact on disk, and autosave in the same state still refuses — it never forces | verified by `scripts/save-conflict-e2e.sh` (unit tier) |
-| D2 | the notified force overwrites: a second Ctrl+S after the refusal | the native snapshot lands (MAGIC header), the conflict flag clears, the autosave timer is cleared on every save attempt | verified by `scripts/save-conflict-e2e.sh` (unit tier) |
+| D1 | external modification is never clobbered: the file is rewritten behind the editor's back, then Ctrl+S | the save is refused (conflict armed), the external bytes are intact on disk, and autosave in the same state still refuses — it never forces | verified by `scripts/save-conflict-e2e.sh` (unit tier) + `scripts/save-conflict-session.sh` (real-session tier) |
+| D2 | the notified force overwrites: a second Ctrl+S after the refusal | the native snapshot lands (MAGIC header), the conflict flag clears, the autosave timer is cleared on every save attempt | verified by `scripts/save-conflict-e2e.sh` (unit tier) + `scripts/save-conflict-session.sh` (real-session tier) |
 
 ## Obligation closure (REA reconstruction-ledger discipline)
 
@@ -63,8 +63,8 @@ supersede.
 | A6 | harness | `bash scripts/android-e2e.sh` | positive | closed |
 | A7 | harness | `bash scripts/android-e2e.sh` | positive | closed |
 | A8 | harness | `bash scripts/android-e2e.sh` | positive | closed |
-| D1 | unit | `bash scripts/save-conflict-e2e.sh` | positive, negative | closed |
-| D2 | unit | `bash scripts/save-conflict-e2e.sh` | positive, teardown | closed |
+| D1 | real-session | `bash scripts/save-conflict-session.sh` | positive, negative | closed |
+| D2 | real-session | `bash scripts/save-conflict-session.sh` | positive, teardown | closed |
 
 Coverage limits of the closing authority (stated, not implied): even a green
 A1–A8 run does **not** cover the physical input path or the blit itself
@@ -73,12 +73,20 @@ non-BOOT re-run can only claim `skipped` for A1 — never `passed`. A1 stays
 `gated` until the Waydroid container is up and `scripts/build-android.sh` has
 produced the APK.
 
-D1/D2 close at `unit` authority: the verifier drives the binary's own
-`save()` — the exact function the keymap dispatches — against a real file
-on disk, but it is an in-process test, not a GUI session. The rows would
-only upgrade to a higher tier with a display plus an external editor
-forcing the conflict live; that arrangement is recorded in
-`PLAN_S4_BACKLOG_2026-10-14.md`, not claimed here.
+D1/D2 close at `real-session` authority as of 2026-10-14: the recorded
+run of `scripts/save-conflict-session.sh` drives the *running GUI binary*
+on a live compositor (nested sway + Xwayland) with xdotool XTEST key
+injection — key events traverse the compositor's real keymap into the
+binary's own `keymap()` → `save()` path — and asserts refusal, autosave
+refusal, and the notified force from on-disk bytes plus the app's log.
+The unit-tier verifier (`scripts/save-conflict-e2e.sh`) stays as the
+fast in-process regression for the same rows. Honest coverage limits of
+the closing run (stated, not implied): the compositor is nested inside
+the dev session rather than a bare-metal boot, and the driver is
+scripted (no human at the keyboard); the full environment inventory —
+lazy Xwayland, runtime display detection, reactive-frame poking for
+autosave — and the recorded 10/10 run are in
+`PLAN_S4_BACKLOG_2026-10-14.md` §3.
 
 ## Change rule
 
