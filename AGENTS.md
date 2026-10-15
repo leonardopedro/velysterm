@@ -45,7 +45,14 @@ codes, typed repair hints.
   `inspect` (`doc_geometry` → `--layout-json`) is the layout-only geometry
   path: Typst paged layout, no raster, per-`\app`-figure rects + structural
   diagnostics as one compact JSON line — the semantic tier of emthin's
-  agent loop (`emthin/docs/AGENT_LOOP.md`).
+  agent loop (`emthin/docs/AGENT_LOOP.md`). Its tier 1b
+  (`semantic_facts` → `--semantic-json`) is the document's *meaning* as one
+  line — defs with use counts + source lines, free identifiers, models,
+  statement counts, translators, templates — no Typst compile at all (it
+  reports `$foo$` even though Typst eval rejects it), and `docs_diff` →
+  `--diff <before> <after>` is the snapshot delta between two documents
+  (figures added/removed/rekeyed/changed, page + diagnostic + semantic
+  deltas), the observation half of emthin's replay loop.
 - `crates/mathed_biblio/` — hayagriva citation backend. Resolves `\cite` keys
   from bibliography sources and populates `SemanticIndex.biblio_statements`.
 - `crates/mathed_android/` — **its own workspace** (see the `exclude` entry in

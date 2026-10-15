@@ -27,6 +27,15 @@
 //!     Paged layout with no raster: every \app figure's declared
 //!     size, binding id, launch, caption, source line and placed
 //!     rect, plus structural diagnostics. Prints JSON to stdout.
+//!   mathed_mini --semantic-json <doc> [--out <f.json>]
+//!     Tier 1b (inspect::semantic_facts): the document's meaning as
+//!     one compact line — definitions with use counts and source
+//!     lines, free (dangling) identifiers, models, statement counts
+//!     by kind, translators, templates.
+//!   mathed_mini --diff <before.typ> <after.typ> [--out <f.json>]
+//!     Snapshot/diff: what one edit changed — figures added/removed/
+//!     moved/resized, page-count and diagnostic deltas, semantic
+//!     deltas — as one compact JSON line for an agent to read.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -274,6 +283,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Some(other) => {
                         return Err(format!("unexpected --layout-json argument `{other}`").into());
+                    }
+                    None => println!("{json}"),
+                }
+                return Ok(());
+            }
+            // Tier 1b — the document's meaning as one compact line:
+            // definitions + use counts, free identifiers, models,
+            // statement counts, translators, templates. Same
+            // contract as --layout-json: JSON on stdout, errors are
+            // errors (never an empty report).
+            "--semantic-json" => {
+                let path = rest
+                    .first()
+                    .ok_or("--semantic-json requires a doc file path")?;
+                let doc = std::fs::read_to_string(path)?;
+                let facts = mathed_mini::inspect::semantic_facts(&doc);
+                let json = facts.to_json();
+                match rest.get(1) {
+                    Some(flag) if flag == "--out" => {
+                        let out = rest.get(2).ok_or("--semantic-json --out requires a path")?;
+                        std::fs::write(out, format!("{json}\n"))?;
+                        eprintln!("Wrote semantic facts -> {out}");
+                    }
+                    Some(other) => {
+                        return Err(format!("unexpected --semantic-json argument `{other}`").into());
+                    }
+                    None => println!("{json}"),
+                }
+                return Ok(());
+            }
+            // Snapshot/diff — what one edit changed, in one line:
+            // figures, pages, diagnostics and the semantic half,
+            // before/after. The observation half of the replay loop
+            // (emthin scripts/agent/replay.sh drives it).
+            "--diff" => {
+                let before = rest
+                    .first()
+                    .ok_or("--diff requires a before-doc file path")?;
+                let after = rest
+                    .get(1)
+                    .ok_or("--diff requires an after-doc file path")?;
+                let before_doc = std::fs::read_to_string(before)?;
+                let after_doc = std::fs::read_to_string(after)?;
+                let delta = mathed_mini::inspect::docs_diff(&before_doc, &after_doc)
+                    .map_err(std::io::Error::other)?;
+                let json = delta.to_json();
+                match rest.get(2) {
+                    Some(flag) if flag == "--out" => {
+                        let out = rest.get(3).ok_or("--diff --out requires a path")?;
+                        std::fs::write(out, format!("{json}\n"))?;
+                        eprintln!("Wrote doc diff -> {out}");
+                    }
+                    Some(other) => {
+                        return Err(format!("unexpected --diff argument `{other}`").into());
                     }
                     None => println!("{json}"),
                 }
