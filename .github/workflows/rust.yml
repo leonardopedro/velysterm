@@ -144,6 +144,25 @@ jobs:
       # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo test --workspace --all-features --all-targets
 
+      # F2 (round 3): the status block's 986 is recounted from the run CI
+      # already performs — but the block's scope is plain `cargo test
+      # --workspace` (lib+integration+doctests; see the separate doctest job),
+      # so this step mirrors the registered command exactly (minus the nix
+      # devshell: the apt deps above stand in for it) and hands the log to
+      # the canonical gate in the unfer sibling. pipefail matters: without it
+      # a failing suite would exit 0 through tee. A failed suite stops before
+      # the recount — a broken run cannot evidence a count.
+      #
+      # If this ever goes red while the suites are green, the honest fix is
+      # scoping the block ("986 under nix develop; CI lane counts N"), not
+      # deleting the gate: an environment-count delta is exactly the drift
+      # this lane exists to make visible.
+      - name: recount the status-block count (F2)
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee /tmp/velysterm_tests.log
+          bash ../unfer/scripts/check-status --recount velysterm=/tmp/velysterm_tests.log
+
   # Note: cargo test --all-targets disables doc tests, so we have to add this to test docs
   doctest:
     runs-on: ubuntu-latest
