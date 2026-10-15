@@ -77,7 +77,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 976 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-13 -->
+<!-- status: verified | tests: 986 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-15 -->
 
 Note: the workspace needs the flake devshell —
 `nix develop -c cargo test --workspace` is the one command for all **935**
@@ -90,21 +90,21 @@ not carried forward.
 ## Verification
 
 ```sh
-nix develop -c cargo test --workspace                              # 935 passed
+nix develop -c cargo test --workspace                              # 986 passed
 ```
 
-Measured 2026-10-08: mathed_core 278 / mathed_mini 251 / kernel_client 308 /
-mathed 47 / mathed_biblio 13 / delta_algebra 13 / delta_sirk 2 /
-velyst_demo 5 — 917, plus 18 in mathed_skia, **935** in total, and the
-per-crate figures add up to the header (24 suites, 0 failed, one command;
-recount-verified against this run's own log). The 797 of 2026-10-05 sat above a
-breakdown that summed to 711 (269/246/168/13/2/13); neither number was re-read
-against the other, so this entry restates both from a single log.
-`mathed_mini` 251 = 238 lib + 13 across `caret_geometry` (4) and
-`formal_layout` (9); `kernel_client` 308 = 160 lib + 146 in its `unfer_agent`
-bin + 2 in `snapshot_replay`. The +1 over 2026-10-08's earlier 934 is D.8's
-new `rules_failure_reasons_name_themselves` (the rules-seam failure-reason
-test). Eleven commits landed between the 2026-10-05
+Measured 2026-10-15: mathed_core 293 / mathed_mini 258 / kernel_client 326 /
+mathed 58 / mathed_biblio 13 / delta_algebra 13 / delta_sirk 2 /
+velyst_demo 5 — 968, plus 18 in mathed_skia, **986** in total, and the
+per-crate figures add up to the header (25 suites, 0 failed, one command;
+recount-verified against this run's own log). The +51 over 2026-10-08's 935
+is the D1/D2 save-stamp and scenario-verifier work (`ac43b70`, `77aefbe`,
+`48c1faa`): `kernel_client` +18, `mathed_core` +15, `mathed` +11,
+`mathed_mini` +7. Per-crate figures attributed by target name from the
+2026-10-15 log; the 2026-10-08 entry (935) broke down as mathed_core 278 /
+mathed_mini 251 / kernel_client 308 / mathed 47, and the 797 of 2026-10-05
+sat above a breakdown that summed to 711 (269/246/168/13/2/13); neither
+older number was re-read against its breakdown. Eleven commits landed between the 2026-10-05
 measurement and the 916 baseline (the D5/D.6/D.4 decide work, G1 DurableStore, G2 org
 sessions, G3 escalate, G5 CRDT collisions, C1 `events_stream`, C2 bounded
 memory, plus a clippy fix and the X9 ledger row) and nearly all of the growth
@@ -112,7 +112,7 @@ is `kernel_client`'s agent surface: 168 → 303. The `delta_*` figures are the
 CPU differential tests; their GPU paths skip without an adapter, so a green run
 here is differential-testing-the-reference-oracle, not GPU coverage.
 
-**The Bevy `mathed` crate is in the 917** (47 tests). It needs
+**The Bevy `mathed` crate is in the 968** (58 tests). It needs
 `pkg-config` plus the X/wayland client libraries, and the flake devshell
 supplies both — plus a generated `libudev.pc`, because modern nixpkgs no
 longer ships one while `libudev-sys` insists on finding it — so

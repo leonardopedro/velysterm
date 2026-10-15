@@ -1,0 +1,12 @@
+[package]
+name = "mathed_snapshot_scratch"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mathed_core = { path = "../mathed_core" }
+
+[[bin]]
+name = "mathed_snapshot_scratch"
+path = "src/main.rs"

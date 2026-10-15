@@ -106,6 +106,17 @@ codes, typed repair hints.
   (`crates/delta_algebra/src/reference.rs`); without a GPU adapter the GPU
   tests SKIP gracefully (the Cadabra2 skip pattern). Run them on a GPU box:
   `scripts/test-delta-gpu.sh`.
+- `crates/mathed_snapshot_scratch/` — **scratch binary; no consumer, no
+  doc, no tests of its own** (measured 2026-10-15: one `main.rs`,
+  `cargo test -p mathed_snapshot_scratch` = 0 tests). It converts a plain-text
+  `.mathed` into the serialized Loro snapshot `open_or_default` loads, and
+  existed to produce a loadable document for the real-display verification
+  run. Nothing path-depends on it; the workspace gates reach it only as a
+  member. Round-3 plan P5 disposition: **documented, not deleted** — it is
+  ~30 lines that still build against the current `MathDoc` API (the workspace
+  build is its regression test), and deleting a verification-run helper is
+  the owner's call, not the reviewer's. If it ever stops building, that is
+  the signal to delete rather than fix.
 
 ## Conventions
 
