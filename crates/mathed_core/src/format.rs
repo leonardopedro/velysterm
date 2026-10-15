@@ -93,9 +93,7 @@ impl FileStamp {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        let mtime = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
         Ok(Some(Self::of_bytes(&bytes, mtime)))
     }
 }
@@ -133,15 +131,13 @@ pub fn save_snapshot_guarded(
             _ => {
                 return Err(SaveError::ExternalModification {
                     path: path.to_path_buf(),
-                })
+                });
             }
         }
     }
     let bytes = file_bytes(doc);
     write_atomic(&bytes, path)?;
-    let mtime = std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok());
+    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     Ok(FileStamp::of_bytes(&bytes, mtime))
 }
 
@@ -149,9 +145,7 @@ pub fn save_snapshot_guarded(
 /// the `expected` side of [`save_snapshot_guarded`].
 pub fn load_with_stamp(path: &Path) -> Result<(MathDoc, FileStamp), LoadError> {
     let bytes = std::fs::read(path)?;
-    let mtime = std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok());
+    let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     let stamp = FileStamp::of_bytes(&bytes, mtime);
     if bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC {
         return Err(LoadError::BadMagic);
