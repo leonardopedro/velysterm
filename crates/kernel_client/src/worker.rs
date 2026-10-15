@@ -667,9 +667,42 @@ impl KernelWorker {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
+        // ETXTBSY ("Text file busy") at execve is transient by
+        // construction: some other process holds the module file open
+        // for writing — measured cause on this host, an unrelated
+        // fork() that inherited the write fd during the file's
+        // create window and is still pre-exec (A/B probe: 0/8000
+        // launches without concurrent forks, 110–132/8000 with).
+        // The holder closes the fd at its own exec, so a short
+        // bounded retry converts a spurious launch failure into a
+        // normal launch. Any other error, or the retry budget
+        // running out, fails exactly as before.
+        const LAUNCH_RETRIES: u32 = 10;
+        const LAUNCH_RETRY_BACKOFF: Duration = Duration::from_millis(25);
+        let mut child = None;
+        let mut launch_err: Option<std::io::Error> = None;
+        for attempt in 0..LAUNCH_RETRIES {
+            match cmd.spawn() {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && attempt + 1 < LAUNCH_RETRIES =>
+                {
+                    std::thread::sleep(LAUNCH_RETRY_BACKOFF);
+                }
+                Err(e) => {
+                    launch_err = Some(e);
+                    break;
+                }
+            }
+        }
+        let mut child = match child {
+            Some(c) => c,
+            None => {
+                let e = launch_err.expect("spawn either succeeds or fails with an error");
                 self.audit_exec(
                     grants.first().cloned(),
                     &format!("kernel:{language}"),

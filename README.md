@@ -77,10 +77,10 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 995 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-15 -->
+<!-- status: verified | tests: 996 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-15 -->
 
 Note: the workspace needs the flake devshell —
-`nix develop -c cargo test --workspace` is the one command for all **995**
+`nix develop -c cargo test --workspace` is the one command for all **996**
 (the `libudev-sys` chain has no pkg-config outside it, and `mathed_skia`'s
 freetype/fontconfig/libstdcxx link paths come from the same shell since
 2026-10-08). A bare `cargo test` fails in `libudev-sys`; worth knowing before
@@ -90,12 +90,12 @@ not carried forward.
 ## Verification
 
 ```sh
-nix develop -c cargo test --workspace                              # 995 passed
+nix develop -c cargo test --workspace                              # 996 passed
 ```
 
-Measured 2026-10-15: mathed_core 293 / mathed_mini 267 / kernel_client 326 /
+Measured 2026-10-15: mathed_core 293 / mathed_mini 268 / kernel_client 326 /
 mathed 58 / mathed_biblio 13 / delta_algebra 13 / delta_sirk 2 /
-velyst_demo 5 — 977, plus 18 in mathed_skia, **995** in total, and the
+velyst_demo 5 — 978, plus 18 in mathed_skia, **996** in total, and the
 per-crate figures add up to the header (25 suites, 0 failed, one command;
 recount-verified against this run's own log). The +9 over the morning's 986
 is the §9 debug surface in `mathed_mini::inspect` (tier-1b

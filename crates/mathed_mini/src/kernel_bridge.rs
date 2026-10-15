@@ -1213,6 +1213,15 @@ impl KernelBridge {
         &self.run_log
     }
 
+    /// Test-only: the in-flight request keys, sorted — a wait that
+    /// gives up can name exactly which statement never answered.
+    #[cfg(test)]
+    pub(crate) fn pending_keys(&self) -> Vec<usize> {
+        let mut keys: Vec<usize> = self.pending.keys().copied().collect();
+        keys.sort_unstable();
+        keys
+    }
+
     /// N5: clear displayed outputs (region only) — the notebook
     /// "clear outputs" affordance. The doc text and the run log (the
     /// reproducibility record) are untouched. Because the dispatch
@@ -3832,11 +3841,21 @@ mod tests {
     /// A stub kernel module binary: reads `{module, language, code}`
     /// JSON on stdin and answers `{outputs: [...]}` JSON that depends
     /// on the code, so one binary exercises every output shape.
-    /// Created exclusively with a nonce (rules-stub precedent):
-    /// parallel tests can never overwrite each other's stub.
+    ///
+    /// Created **exclusively** (`create_new` + attempt suffix, the
+    /// `export::stub_rules_bin` rules-stub precedent). The name still
+    /// carries pid + content-hash + nanosecond nonce, but the nonce
+    /// alone is not a uniqueness guarantee: measured on this host, the
+    /// clock's minimum gap is 30 ns and 1M concurrent name builds
+    /// produced 3752 identical paths. Two parallel tests in one
+    /// process could therefore pick the same path, and the old
+    /// truncate-on-open `File::create` then rewrote a sibling's stub
+    /// while its child was exec-ing it — `ETXTBSY` ("Text file busy")
+    /// surfaced as a load-sensitive `KernelFailed` flake. Exclusive
+    /// creation makes the collision lose the race instead of corrupt
+    /// the winner's file.
     fn stub_kernel_module() -> std::path::PathBuf {
         use std::hash::{Hash as _, Hasher as _};
-        use std::io::Write as _;
         const BASE: &str = r#"#!/bin/sh
 read -r line
 case "$line" in
@@ -3861,16 +3880,97 @@ esac
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!(
+        let base = std::env::temp_dir().join(format!(
             "mathed_kernel_stub_{}_{:x}_{nonce:x}.sh",
             std::process::id(),
             h.finish()
         ));
-        let mut f = std::fs::File::create(&path).expect("create stub");
-        f.write_all(script.as_bytes()).expect("write stub");
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        path
+        create_stub_file(&base, &script)
+    }
+
+    /// Write `script` to a *fresh* path derived from `base` — `base`
+    /// itself, then `_1.sh` … `_15.sh` — using `create_new`, so
+    /// concurrent callers that computed the same base name (same pid,
+    /// content hash and nanosecond nonce) each land on their own
+    /// file. The base name is only a hint; exclusivity is what
+    /// guarantees uniqueness (`export::stub_rules_bin` precedent).
+    fn create_stub_file(base: &std::path::Path, script: &str) -> std::path::PathBuf {
+        use std::io::Write as _;
+        let dir = base.parent().expect("stub base has a parent");
+        for attempt in 0..16 {
+            let path = if attempt == 0 {
+                base.to_path_buf()
+            } else {
+                dir.join(format!(
+                    "{}_{}.sh",
+                    base.file_name().unwrap().to_string_lossy(),
+                    attempt
+                ))
+            };
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                f.write_all(script.as_bytes()).expect("write stub");
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+                return path;
+            }
+        }
+        panic!("could not create a unique stub kernel module");
+    }
+
+    #[test]
+    fn stub_paths_stay_unique_under_concurrent_creation() {
+        // Regression net for the ETXTBSY flake. The stub's name is
+        // pid + content-hash + nanosecond nonce, and the nanosecond
+        // part collides under parallel tests (measured on this host:
+        // 3752 identical names in 1M concurrent builds; 30 ns clock
+        // gap), so two tests could compute the same path — and the
+        // old truncate-on-open `File::create` then rewrote a sibling's
+        // stub while its child exec-ed it ("kernel launch failed:
+        // Text file busy"). The guard is exclusive creation, so the
+        // test *forces* the collision: every caller gets the same
+        // base name, which is deterministic. A truncate-on-open
+        // implementation returns that one path to all of them and
+        // fails here on every run; `create_new` advances the suffix.
+        let base = std::env::temp_dir().join(format!(
+            "mathed_kernel_stub_uniquetest_{}_{}.sh",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let script = "#!/bin/sh\nprintf '%s' ok\n";
+        let mut paths: Vec<std::path::PathBuf> = (0..8)
+            .map(|_| {
+                let base = base.clone();
+                std::thread::spawn(move || create_stub_file(&base, script))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().expect("stub thread"))
+            .collect();
+        // One more caller on the main thread: sequential callers
+        // must not share a path with the concurrent ones either.
+        paths.push(create_stub_file(&base, script));
+        let unique = paths.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "every stub gets its own path: {paths:?}"
+        );
+        for p in &paths {
+            assert!(
+                p.metadata().expect("stub exists").len() > 0,
+                "no truncated stub: {p:?}"
+            );
+        }
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
@@ -3984,7 +4084,16 @@ esac
         let thumb = ann
             .values()
             .find(|m| m.contains("#image(\"data:image/png;base64,"))
-            .unwrap_or_else(|| panic!("no thumbnail annotation: {ann:?}"));
+            .unwrap_or_else(|| {
+                // The markup alone drops the diagnostic half of a
+                // KernelResult::Error (the message): a failed stub run
+                // reads as "KernelFailed" with no cause. Carry the raw
+                // results so a load-sensitive failure names itself.
+                panic!(
+                    "no thumbnail annotation: {ann:?}; kernel results: {:?}",
+                    bridge.results()
+                )
+            });
         assert!(thumb.contains("height: 16pt"), "compact thumb: {thumb}");
         assert!(thumb.contains("alt: \"image/png\""), "a11y alt: {thumb}");
         assert!(!thumb.contains("iVBORw0KGgo\n"), "no raw dump in text");

@@ -2363,7 +2363,17 @@ mod tests {
         while !bridge.is_idle() {
             bridge.poll();
             if std::time::Instant::now() > deadline {
-                break;
+                // Never fail silently here: a swallowed deadline
+                // surfaces downstream as a misleading template error
+                // ("dictionary does not contain key \"kernel\"") with
+                // the real cause — which request never answered —
+                // hidden. Name the in-flight requests instead.
+                panic!(
+                    "kernel results never arrived within 15s; still pending: {:?}; \
+                     results: {:?}",
+                    bridge.pending_keys(),
+                    bridge.results()
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -2382,6 +2392,18 @@ mod tests {
                 r.end,
                 format!("// ---- block {bi} output region ----\n{markup}\n"),
             );
+        }
+        // A settled-but-failed kernel run would drop `ctx.kernel`
+        // (the ctx builder skips run-log entries with no outputs) and
+        // surface only as the template's misleading "dictionary does
+        // not contain key \"kernel\"". Name the real error here.
+        let failed: Vec<(&usize, &crate::kernel_bridge::KernelResult)> = bridge
+            .results()
+            .iter()
+            .filter(|(_, r)| matches!(r, crate::kernel_bridge::KernelResult::Error { .. }))
+            .collect();
+        if !failed.is_empty() {
+            panic!("kernel run failed before export: {failed:?}");
         }
         render_doc(doc_text, None, block_splices, bridge.run_log())
     }
@@ -2463,7 +2485,17 @@ esac
         while !bridge.is_idle() {
             bridge.poll();
             if std::time::Instant::now() > deadline {
-                break;
+                // Never fail silently here: a swallowed deadline
+                // surfaces downstream as a misleading template error
+                // ("dictionary does not contain key \"kernel\"") with
+                // the real cause — which request never answered —
+                // hidden. Name the in-flight requests instead.
+                panic!(
+                    "kernel results never arrived within 15s; still pending: {:?}; \
+                     results: {:?}",
+                    bridge.pending_keys(),
+                    bridge.results()
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -2509,7 +2541,17 @@ esac
         while !bridge.is_idle() {
             bridge.poll();
             if std::time::Instant::now() > deadline {
-                break;
+                // Never fail silently here: a swallowed deadline
+                // surfaces downstream as a misleading template error
+                // ("dictionary does not contain key \"kernel\"") with
+                // the real cause — which request never answered —
+                // hidden. Name the in-flight requests instead.
+                panic!(
+                    "kernel results never arrived within 15s; still pending: {:?}; \
+                     results: {:?}",
+                    bridge.pending_keys(),
+                    bridge.results()
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
