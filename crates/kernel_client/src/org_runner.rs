@@ -14,7 +14,7 @@
 //! that costs is that *somebody* has to hold the state that makes self-assignment
 //! work — and that is this module, and it is deliberately dumb:
 //!
-//! - one [`Board`] and one [`ClaimLedger`], so "does anyone already hold this
+//! - one [`Board`] and one `ClaimLedger`, so "does anyone already hold this
 //!   scope" has a single answer;
 //! - one delivery queue per worker, so a message for a worker reaches it;
 //! - a spawn budget, so N is a decision rather than an accident.

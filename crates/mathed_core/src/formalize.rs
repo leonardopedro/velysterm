@@ -290,14 +290,14 @@ impl Verdict {
     }
 }
 
-/// The block a kernel attaches, for [`TransformOptions::annotations`].
+/// The block a kernel attaches, for [`crate::transform::TransformOptions::annotations`].
 ///
 /// Separate from [`declared_markup`] rather than a `verified` flag on it, so the
 /// two tiers cannot be confused: this one is never derived from the document, and
 /// [`declared_markup`] never shows a kernel's answer. A frontend that wants a
 /// single self-contained block splices both, in that order.
 ///
-/// Raw trusted markup; every payload goes through [`escape`], which is a
+/// Raw trusted markup; every payload goes through `escape`, which is a
 /// correctness requirement — the CNL and the readback are kernel output, and an
 /// unescaped `#` in either would be parsed as a Typst expression.
 pub fn verdict_markup(verdict: &Verdict) -> String {
@@ -376,7 +376,7 @@ fn block(colour: &str, body: &str) -> String {
 /// document: one [`ResolvedFormal`] per `\formal` segment, each carrying the
 /// stable key that identifies it on both sides.
 ///
-/// Takes [`crate::markers::segments`] rather than a `MarkerScan`, because a
+/// Takes [`crate::markers::resolve_segments`] rather than a `MarkerScan`, because a
 /// segment — not a statement — carries the resolved span and the two marker refs;
 /// the statement only has the raw arguments. That is the same shape
 /// [`crate::figures::resolve_figure`] consumes.

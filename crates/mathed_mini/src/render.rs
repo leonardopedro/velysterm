@@ -174,14 +174,14 @@ fn rasterize(frame: &Frame) -> Result<RgbaImage, RenderError> {
 ///
 /// At `1.0` this is the direct path: the frame's own point coordinates are the
 /// target's pixel coordinates. Above `1.0` the frame is recorded into an
-/// [`imaging::Scene`] and the scale is baked into that command stream before
+/// [`imaging::record::Scene`] and the scale is baked into that command stream before
 /// rasterizing, so glyphs are **drawn** at the higher resolution rather than
 /// the finished raster being resampled afterwards. That distinction is the
 /// whole point on a dense display: a resampled 1× raster is a blur no amount
 /// of interpolation removes, while a 2× draw is a genuinely larger outline.
 ///
-/// Geometry is deliberately unaffected: [`GlyphIndex`](mathed_core::glyphs::GlyphIndex),
-/// [`FigureRect`](mathed_core::figures::FigureRect) and
+/// Geometry is deliberately unaffected: [`GlyphIndex`],
+/// [`FigureRect`] and
 /// [`PageLayout::width`]/[`height`](PageLayout) stay in points — the space
 /// every caller already works in. Only the returned raster is bigger, so a
 /// frontend that needs to map a caret or a figure rect *into* the image (to

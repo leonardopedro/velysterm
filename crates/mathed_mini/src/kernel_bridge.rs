@@ -937,7 +937,7 @@ impl KernelBridge {
 
     /// Re-run the live kernel statements in `block` (index into
     /// `split_blocks` order) — the notebook "run cell" affordance
-    /// (N-series N2). Unlike [`refresh_with_index`], requests are
+    /// (N-series N2). Unlike [`KernelBridge::refresh_with_index`], requests are
     /// re-issued even when the recorded input hashes are unchanged,
     /// and bridge-wide bookkeeping (live set, scratch pruning) is
     /// left to the next full refresh. Statements outside the block

@@ -542,7 +542,7 @@ impl BlockRange {
     /// Empty ranges never overlap: a zero-width range is an insertion point, and
     /// two insertions at the same point do not conflict with each other. An
     /// insertion *adjacent to* an edit does, which is why the boundary is
-    /// inclusive on both ends of the other range -- see [`overlaps_with`].
+    /// inclusive on both ends of the other range -- see [`BlockRange::overlaps_with`].
     pub fn overlaps(&self, other: &BlockRange) -> bool {
         if self.is_empty() || other.is_empty() {
             return false;

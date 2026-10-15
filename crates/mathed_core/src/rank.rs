@@ -95,7 +95,7 @@ fn enabled_from(v: &str) -> bool {
 
 /// The embed spec for [`LOCAL_MODEL`], in the C7 vocabulary.
 ///
-/// Built directly rather than through [`parse_embed_spec`] so this module
+/// Built directly rather than through [`decide_core::backbone::parse_embed_spec`] so this module
 /// cannot panic on a constant — the two are tied together by
 /// `local_spec_matches_the_parser`, which fails if they ever drift.
 fn local_spec() -> EmbedSpec {

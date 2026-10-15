@@ -12,7 +12,7 @@
 //! Three properties, each one a failure a naive `write(path, json)` gets wrong:
 //!
 //!   * **A write is atomic.** The record goes through
-//!     [`crate::checkpoint::atomic_write`] — sibling temp file, fsync, rename —
+//!     `crate::checkpoint::atomic_write` — sibling temp file, fsync, rename —
 //!     so a crash mid-write leaves the previous session intact rather than a
 //!     truncated file that reads as garbage on the next start.
 //!   * **Corruption is surfaced, never guessed at.** A record that cannot be

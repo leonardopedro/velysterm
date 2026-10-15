@@ -334,7 +334,7 @@ fn kernel_output(result: &crate::kernel_bridge::KernelResult) -> Option<serde_js
     }
 }
 
-/// One raw Jupyter-shaped [`KernelOutput`] as an nbformat output
+/// One raw Jupyter-shaped [`kernel_client::KernelOutput`] as an nbformat output
 /// object (the faithful form — the record's kernel runs keep the
 /// module's full output list, so the `.ipynb` projection can carry
 /// every `stream`/`execute_result`/`error` in wire order with its
@@ -969,8 +969,8 @@ fn settled_bridge(doc_text: &str, grants: &[&str]) -> crate::kernel_bridge::Kern
 /// timing annotations + stale banner), rendered through typst_imaging
 /// at the doc width. `None` when the block has no region content or
 /// the markup cannot be rendered.
-/// Rasterize a block's output region from any [`ScreenshotView`]
-/// (the live [`KernelBridge`] or the owned
+/// Rasterize a block's output region from any [`crate::kernel_bridge::ScreenshotView`]
+/// (the live [`crate::kernel_bridge::KernelBridge`] or the owned
 /// [`ScreenshotSnapshot`](crate::kernel_bridge::ScreenshotSnapshot)
 /// the background compose worker uses).
 fn block_region_image<V: crate::kernel_bridge::ScreenshotView>(
@@ -1040,7 +1040,7 @@ pub fn region_screenshot(doc_text: &str, grants: &[&str]) -> Result<imaging::Rgb
 /// output region below — into one image through typst_imaging. This
 /// is the graphical "what the document looks like" path shared by
 /// the headless `--doc-image` CLI and the editor's Ctrl+R preview.
-/// The doc-screenshot composition loop over any [`ScreenshotView`]:
+/// The doc-screenshot composition loop over any [`crate::kernel_bridge::ScreenshotView`]:
 /// every block's transformed text (with its inline kernel
 /// annotations) followed by its output region, stacked into one
 /// image. Shared by the live-bridge path
@@ -1077,7 +1077,7 @@ fn doc_screenshot_core<V: crate::kernel_bridge::ScreenshotView>(
 }
 
 /// Whole-document raster preview from a live bridge — see
-/// [`doc_screenshot_core`].
+/// `doc_screenshot_core`.
 pub fn doc_screenshot_with(
     bridge: &crate::kernel_bridge::KernelBridge,
     doc_text: &str,
@@ -1085,7 +1085,7 @@ pub fn doc_screenshot_with(
     doc_screenshot_core(bridge, doc_text)
 }
 
-/// Whole-document raster preview from an owned [`ScreenshotSnapshot`]
+/// Whole-document raster preview from an owned [`ScreenshotSnapshot`](crate::kernel_bridge::ScreenshotSnapshot)
 /// (F1): identical composition to [`doc_screenshot_with`] but driven
 /// from the `Send` snapshot, so the background prefetch worker can
 /// compile a preview without touching the live bridge.

@@ -185,7 +185,7 @@ impl Translator {
         }
     }
 
-    /// [`run_entry_expr`] with the argument quoted as a Typst
+    /// [`Translator::run_entry_expr`] with the argument quoted as a Typst
     /// string literal — the translator contract.
     fn run_entry(&mut self, fn_name: &str, src: &str, arg: &str) -> Result<String, TranslateError> {
         let lit = typst_str_lit(arg);
