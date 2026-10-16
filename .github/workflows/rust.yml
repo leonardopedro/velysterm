@@ -61,7 +61,15 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      # System closure = flake.nix's `packages` list translated to apt. The
+      # old list had only alsa+wayland, and the ubuntu-24.04 runner image
+      # preinstalls none of the rest (runner-images toolset-2404: of this
+      # set only libssl-dev) — running this job's exact command on such a
+      # machine fails in libudev-sys' build.rs ("No package 'libudev'
+      # found"), the first pkg-config dependency in the bevy chain; the
+      # workspace's own Nix shell papered over the same gap with a
+      # generated libudev.pc. apt no-ops whatever the image already has.
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       # --all-features guards feature-unification rot (round-19: the wgpu-27/29
       # dual stack that broke naga 27 is fixed; all-features builds green).
       - run: cargo check --workspace --all-features --all-targets
@@ -81,7 +89,7 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       - run: cargo check --workspace --no-default-features
 
   clippy:
@@ -99,7 +107,7 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       - run: rustup component add clippy
       # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo clippy --workspace --all-features --all-targets -- -D warnings
@@ -119,7 +127,7 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo doc --workspace --all-features --no-deps --document-private-items
         env:
@@ -140,7 +148,7 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo test --workspace --all-features --all-targets
 
@@ -179,7 +187,7 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       # --all-features: green since round 19 (wgpu 27/29 unification fixed).
       - run: cargo test --workspace --all-features --doc
 
@@ -204,7 +212,7 @@ jobs:
         run: git clone --depth 1 --branch main https://github.com/leonardopedro/dynamic-arctic.git ../dynamic-arctic
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
-      - run: sudo apt-get update; sudo apt-get install --no-install-recommends libasound2-dev libwayland-dev
+      - run: sudo apt-get update; sudo apt-get install --no-install-recommends pkg-config libudev-dev libasound2-dev libwayland-dev wayland-protocols libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libegl1-mesa-dev libgl1-mesa-dev libfreetype-dev libfontconfig1-dev libvulkan-dev
       - name: mathed headless kernel smoke (transformed source)
         run: cargo test -p mathed kernel_smoke
       - name: mathed_mini headless kernel smoke (rasterized pixels)
