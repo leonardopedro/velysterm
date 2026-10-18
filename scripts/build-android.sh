@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ==============================================================================
 # build-android.sh — build the mathed Android app (APK) with the NDK + SDK
 #

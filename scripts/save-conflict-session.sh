@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # save-conflict-session.sh — real-session verifier for the desktop
 # save-path obligation rows D1/D2 in scripts/SCENARIOS.md.
 #
