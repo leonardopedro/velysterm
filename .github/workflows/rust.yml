@@ -171,6 +171,38 @@ jobs:
           cargo test --workspace 2>&1 | tee /tmp/velysterm_tests.log
           bash ../unfer/scripts/check-status --recount velysterm=/tmp/velysterm_tests.log
 
+  # mathed_android: the Android frontend. Its own workspace (the root
+  # manifest `exclude`s it), so the jobs above never build it — until this
+  # job its 29 tests ran nowhere in CI, which round 5 closed. Host-only:
+  # everything except src/android.rs is target-independent by design, so
+  # the engine, the debug protocol and mathed_probe are exercised with no
+  # NDK and no device. Building the APK stays `scripts/build-android.sh`.
+  mathed-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # actions/checkout@v4
+      # Closure, measured: mathed_core → decide_core → unfer_protocol, all
+      # inside unfer. mathed_mini is consumed with `default-features = false`,
+      # which drops its optional unfer_protocol / kernel_client / unfer_ffi
+      # edges — so, unlike the jobs above, this one needs no
+      # dynamic-arctic sibling.
+      - name: Checkout unfer as sibling (decide_core path dep)
+        run: git clone --depth 1 --branch main https://github.com/leonardopedro/unfer.git ../unfer
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c  # Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/mathed_android
+      # The host half is CPU-only Typst layout — no EGL, no vulkan, no
+      # fontconfig, so the heavyweight apt list above is deliberately not
+      # repeated here.
+      - name: test (engine + debug protocol + probe)
+        run: |
+          set -o pipefail
+          cargo test --manifest-path crates/mathed_android/Cargo.toml 2>&1 | tee /tmp/mathed_android_tests.log || {
+            tail -25 /tmp/mathed_android_tests.log | sed 's/^/::error::mathed-android: /'
+            exit 1
+          }
+
   # Note: cargo test --all-targets disables doc tests, so we have to add this to test docs
   doctest:
     runs-on: ubuntu-latest
