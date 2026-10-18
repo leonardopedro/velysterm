@@ -1,6 +1,11 @@
 /target
+# Any crate's own target dir (mathed_android builds standalone via its
+# manifest and lands outside the workspace root /target).
+**/target/
 *.pdf
 *.svg
 **/typst_packages/
 .DS_Store
 repomix-output.xml
+# Local backup of .github/ — never meant to be tracked.
+/.github_bk/
