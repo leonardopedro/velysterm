@@ -77,7 +77,7 @@ See below for upstream documentation, tutorials, and community info.
 
 # Velyst
 
-<!-- status: verified | tests: 996 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-15 -->
+<!-- status: verified | tests: 996 cargo (workspace incl. Bevy `mathed` + doc-tests + `mathed_skia` sink/doc suites, all under `nix develop`) | last_verified: 2026-10-18 -->
 
 Note: the workspace needs the flake devshell —
 `nix develop -c cargo test --workspace` is the one command for all **996**
