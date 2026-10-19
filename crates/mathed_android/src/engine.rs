@@ -40,6 +40,21 @@ use std::ops::Range;
 
 use mathed_core::glyphs::V2;
 use mathed_core::transform::TransformOptions;
+
+/// The `TransformOptions::expand` half of a relayout: the wide span
+/// keeping the special-rendered part the caret sits inside expanded
+/// (empty when the caret is on plain text). Split out so the wiring is
+/// unit-testable — this is the keyboard-interaction half of the
+/// collapsible contract.
+fn render_opts_expand(
+    scan: &mathed_core::markers::MarkerScan,
+    segments: &[mathed_core::markers::Segment],
+    caret: usize,
+) -> Vec<std::ops::Range<usize>> {
+    mathed_mini::render::reveal_span_in(scan, segments, caret)
+        .into_iter()
+        .collect()
+}
 use mathed_mini::{PageLayout, RenderError, layout_doc_paged_scaled};
 
 use crate::log_info;
@@ -319,6 +334,22 @@ impl Engine {
     /// The only expensive operation in this type, so it is called on edits,
     /// resizes and zoom steps — never per frame.
     pub fn relayout(&mut self) {
+        // Collapsibles, keyboard-driven: the caret anywhere inside a
+        // special-rendered part (a marker segment with a statement, a
+        // translator's code) keeps that part *expanded* (`expand`),
+        // while the caret sitting on a token shows that token's raw
+        // source (`reveal`) — the same split `mathed_mini`'s simulator
+        // wires (app.rs: `expand: panel, reveal: sel_reveal`). Without
+        // `expand`, caret motion never opened a collapsed part.
+        let scan = mathed_core::markers::scan(&self.doc);
+        let segments = mathed_core::markers::resolve_segments(&scan);
+        let expand = render_opts_expand(&scan, &segments, self.caret);
+        // Citations: the transform hides every `\cite(...)` token and
+        // splices its visible `[N]` label only when it is handed the
+        // document's reference entries. The default (empty) list hides
+        // the token with *no* label — the citation disappears from the
+        // rendered page (found by the 2026-10-19 visual loop).
+        let references = mathed_core::markers::scan_references(&scan);
         // Hoisted out of the struct literal because `clippy::single_range_in_vec_init`
         // wants this rewritten as `(caret..caret).collect()` — which is a
         // *different* value: a range with equal bounds iterates zero times, so
@@ -327,6 +358,8 @@ impl Engine {
         let reveal = self.caret..self.caret;
         let opts = TransformOptions {
             reveal: vec![reveal],
+            expand,
+            references,
             ..TransformOptions::default()
         };
         let scale = self.target_raster_scale();
@@ -1099,6 +1132,50 @@ mod tests {
         assert_eq!(engine.caret(), 6);
         assert!(engine.revision() > before);
         assert!(engine.layouts() > layouts);
+    }
+
+    /// Wiring pin (2026-10-19 visual loop): cite labels and the
+    /// caret-driven collapsible expansion come from `relayout`'s
+    /// options, not the transform's defaults. With the default (empty)
+    /// options every `\cite` disappeared from the rendered page (the
+    /// token is hidden and its `[N]` label is spliced only when the
+    /// reference entries are supplied), and no collapsed part ever
+    /// expanded as the caret moved through it.
+    #[test]
+    fn relayout_options_splice_cite_labels_and_expand_the_carets_segment() {
+        let doc = "#1 alpha claim #2 \\cite(#1,#2)\n\nprose tail";
+        let scan = mathed_core::markers::scan(doc);
+        let segments = mathed_core::markers::resolve_segments(&scan);
+        let render_with = |caret: usize| {
+            let opts = TransformOptions {
+                reveal: vec![caret..caret],
+                expand: render_opts_expand(&scan, &segments, caret),
+                references: mathed_core::markers::scan_references(&scan),
+                ..Default::default()
+            };
+            mathed_core::transform::to_render_text(doc, &scan, &segments, &opts).text
+        };
+
+        // Caret on plain prose: the collapsed view — the cite renders
+        // as its visible label, its raw token hidden.
+        let out = render_with(doc.find("prose").unwrap());
+        assert!(out.contains("[1]"), "collapsed view carries the cite label: {out}");
+        assert!(!out.contains("cite("), "the raw cite token is hidden: {out}");
+
+        // Keyboard interaction: the caret inside the segment expands
+        // the collapsible — the raw statement shows (so it can be
+        // edited) and the label steps aside.
+        let out = render_with(doc.find("alpha").unwrap());
+        assert!(
+            out.contains("cite("),
+            "caret inside the segment shows the raw statement: {out}"
+        );
+        assert!(!out.contains("[1]"), "the label yields to the raw token: {out}");
+
+        // And back out: the collapsed view again, byte-identical to
+        // the first pass — the interaction is dynamic, not sticky.
+        let out_again = render_with(doc.find("prose").unwrap());
+        assert_eq!(out_again, render_with(doc.find("prose").unwrap()));
     }
 
     #[test]
