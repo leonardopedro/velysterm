@@ -713,6 +713,28 @@ mod tests {
         }
     }
 
+    /// The `\app` slot rasterises as its reserved-space fill — the
+    /// same tint `mathed_android`'s engine paints over a bound slot —
+    /// so an unbound figure reads as a slot on every consumer's canvas.
+    /// Sampling the *raster* (not the placeholder bytes) pins the whole
+    /// chain; this is what caught the placeholder being opaque red while
+    /// its doc comment said "transparent" (2026-10-19 visual loop).
+    #[test]
+    fn figure_placeholder_fill_is_the_documented_tint() {
+        let layout = layout_doc(FIGURE_DOC, 600.0).expect("layout");
+        let f = &layout.figures[0];
+        let cx = ((f.rect.x0 + f.rect.x1) / 2.0) as u32;
+        let cy = ((f.rect.y0 + f.rect.y1) / 2.0) as u32;
+        let idx = ((cy * layout.width + cx) as usize) * 4;
+        let px = &layout.image.data[idx..idx + 4];
+        assert_eq!(
+            px,
+            &[0x1e, 0x2a, 0x38, 0xff],
+            "figure {} must fill with the reserved-space tint",
+            f.key
+        );
+    }
+
     #[test]
     fn documents_without_figures_report_none() {
         let layout = layout_doc("just some prose\n", 600.0).expect("layout");

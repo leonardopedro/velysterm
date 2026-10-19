@@ -21,7 +21,7 @@
 //! docui, or the Bevy `mathed` editor) needs no IPC to learn where
 //! the figures landed.
 //!
-//! The placeholder payload is one shared 1×1 PNG
+//! The placeholder payload is one shared 1×1 tinted PNG
 //! ([`figure_placeholder_png`]); the `alt` text carries the identity,
 //! so there is no need for a per-key byte registry.
 
@@ -42,17 +42,29 @@ pub const FIGURE_URL_PREFIX: &str = "app:fig/";
 /// attributable to a specific `\app` statement.
 pub const FIGURE_ALT_PREFIX: &str = "app:fig:";
 
-/// The 1×1 transparent PNG every `app:fig/<key>` URL resolves to.
+/// The 1×1 tinted PNG every `app:fig/<key>` URL resolves to.
 ///
-/// Stretched to the figure rect it is an invisible backdrop for the
-/// compositor to paint the app surface over. Typst sniffs the format
-/// from these bytes (`app:fig/f0` has no file extension to infer
-/// from), so they must be a real PNG.
+/// Stretched to the figure rect it is the slot's *reserved-space*
+/// fill — what an unbound `\app` looks like before a compositor paints
+/// the app surface over it (a bound slot is covered either way). The
+/// tint is `mathed_android`'s `FIGURE_TINT` (#1E2A38) verbatim, so the
+/// raster and the frontend's own overlay agree pixel-for-pixel.
+///
+/// History (found by the 2026-10-19 visual loop): these bytes used to
+/// be opaque **red** while this comment called them "transparent" —
+/// every unbound figure rendered as a debug-red block on every
+/// consumer's canvas. The contract is now pinned by
+/// `mathed_mini::render::tests::figure_placeholder_fill_is_the_documented_tint`,
+/// which samples the rendered raster rather than the bytes, so the
+/// comment and the pixel cannot drift apart again.
+///
+/// Typst sniffs the format from these bytes (`app:fig/f0` has no file
+/// extension to infer from), so they must be a real PNG.
 const PLACEHOLDER_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
-    0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x90, 0xd3, 0xb2, 0xf8,
+    0x0f, 0x00, 0x02, 0x6a, 0x01, 0x80, 0xc7, 0x3c, 0x08, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
     0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
