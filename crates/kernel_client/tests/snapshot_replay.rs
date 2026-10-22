@@ -41,6 +41,16 @@ fn normalize_line(line: &str) -> String {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
                 obj.remove("timing_ms");
+                // `solve_ms` is elapsed wall-clock inside `result` —
+                // the same nondeterminism as the top-level
+                // `timing_ms`, measured 0 ms idle / 3 ms under load,
+                // which flapped the golden either way. Transient by
+                // definition, so it belongs to the normalizer.
+                if let Some(result) = obj.get_mut("result")
+                    && let Some(result) = result.as_object_mut()
+                {
+                    result.remove("solve_ms");
+                }
                 // The saved session blob carries wall-clock
                 // provenance on events (`ts`) — strip
                 // it so the golden is keyless.

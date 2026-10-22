@@ -68,7 +68,7 @@ codes, typed repair hints.
   semantic tier. See `docs/AGENT_LOOP.md`, including what a green e2e run does
   **not** cover (the physical input path and the blit itself are not asserted).
   The compliance gates (`cargo fmt`/`test`/`clippy`) do not reach this crate:
-  `cargo test --manifest-path crates/mathed_android/Cargo.toml` (29 tests).
+  `cargo test --manifest-path crates/mathed_android/Cargo.toml` (30 tests, measured 2026-10-21).
   Measured loop finding worth knowing before changing `engine.rs`: a
   `set_window` that dirties on *every* call turns the render loop into a 60 fps
   spin with nothing changing on screen; only the `frames`/`layouts` counters
